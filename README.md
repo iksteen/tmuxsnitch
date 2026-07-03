@@ -40,10 +40,9 @@ with `--allow`.
 ### Shell A — the hub
 
 ```sh
-# 1. pick a secret and compute its session id
+# 1. pick a secret and compute its session id (needed for the hub's --allow)
 SECRET='change-me-to-a-long-random-secret'
 ID=$(./target/release/tmuxsnitch --key "$SECRET" --print-id)
-echo "view at: http://127.0.0.1:8080/s/$ID"
 
 # 2. run the hub, allowing that id (repeat --allow per client)
 ./target/release/tmuxsnitch --serve --bind 127.0.0.1:8080 --allow "$ID"
