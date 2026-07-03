@@ -6,8 +6,8 @@
 //!
 //! One `screen` thread owns everything that touches the real terminal — the raw
 //! mode, stdout, and the vt100 parser — so hub-connection notices can be shown
-//! cleanly: on a hub drop it leaves raw mode and prints the error below the frozen
-//! screen; on reconnect it re-enters raw mode and repaints the screen from the
+//! cleanly: on a hub drop it leaves raw mode, clears the screen and prints the
+//! error; on reconnect it re-enters raw mode and repaints the screen from the
 //! parser (`contents_formatted`), rather than the client's `eprintln!`s corrupting
 //! the live session.
 
@@ -204,7 +204,11 @@ fn screen_thread(
             Some(Msg::HubDown(msg)) if connected => {
                 connected = false;
                 raw.leave(); // back to cooked so the notice reads normally
-                let _ = write!(out, "\r\n\x1b[33mtmuxsnitch: {msg}\x1b[0m\r\n");
+                // The app may have left the screen mid-redraw or with dangling
+                // attributes/cursor state, so reset and clear before the notice —
+                // we don't know what state the screen is in.
+                let _ = out.write_all(b"\x1b[0m\x1b[?25h\x1b[2J\x1b[H");
+                let _ = write!(out, "\x1b[33mtmuxsnitch: {msg}\x1b[0m\r\n");
                 let _ = out.flush();
             }
             Some(Msg::HubUp) if !connected => {
