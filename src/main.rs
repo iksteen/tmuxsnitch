@@ -8,6 +8,7 @@ mod live;
 mod model;
 mod parse;
 mod proto;
+mod pty;
 mod render;
 mod server;
 mod tmux;
@@ -26,6 +27,12 @@ struct Args {
     /// tmux target (e.g. `session` or `session:window`); default = current window.
     #[arg(short, long)]
     target: Option<String>,
+
+    /// Mirror an interactive command in a PTY instead of tmux (the `script(1)`
+    /// model): the command runs in your terminal, the browser watches. Everything
+    /// after it is the command + args, so put it last, e.g. `--exec bash -l`.
+    #[arg(long, num_args = 1.., allow_hyphen_values = true, value_name = "CMD")]
+    exec: Vec<String>,
 
     /// Path to a TOML config (fonts + symbol_map). Optional.
     #[arg(short, long)]
@@ -159,30 +166,64 @@ async fn main() -> Result<()> {
     let fonts = Arc::new(fonts::collect_fonts(&config));
     let config = Arc::new(config);
 
+    let interactive = !args.exec.is_empty();
+
     if let Some(url) = args.push {
         let key = args
             .key
             .context("--push requires --key (or the TMUXSNITCH_KEY env var)")?;
-        return client::run(url, key, args.target, config, resolver, fonts).await;
+        // Print the view URL *before* starting the backend: a PTY backend switches
+        // the terminal to raw mode, so anything printed after would land in — and
+        // corrupt — the mirrored session.
+        let id = proto::session_id(&key);
+        let base = url.trim_end_matches('/');
+        println!("tmuxsnitch: pushing live to {base}; view at {base}/s/{id}");
+        let rx = start_backend(interactive, &args.exec, args.target.clone(), config.clone(), resolver)?;
+        return client::run(url, key, id, config, fonts, rx).await;
     }
 
     // Standalone live viewer: serve fonts at /fonts/<index>.
     let font_css = render::font_face_css(&fonts, "/fonts/");
-    let live_rx = live::start(args.target.clone(), config.clone(), resolver);
+    let listener = bind(&args.bind).await?;
+    // Print the URL before a PTY backend switches the terminal to raw mode.
+    if interactive {
+        println!(
+            "tmuxsnitch: mirroring `{}` (pty) at http://{}/",
+            args.exec.join(" "),
+            listener.local_addr()?
+        );
+    } else {
+        println!(
+            "tmuxsnitch: mirroring tmux target {:?} (live) at http://{}/",
+            args.target.as_deref().unwrap_or("<current>"),
+            listener.local_addr()?
+        );
+    }
+    let live_rx = start_backend(interactive, &args.exec, args.target.clone(), config.clone(), resolver)?;
     let state = AppState {
         config,
         font_css: Arc::new(font_css),
         fonts,
         live_rx,
     };
-    let listener = bind(&args.bind).await?;
-    println!(
-        "tmuxsnitch: mirroring tmux target {:?} (live) at http://{}/",
-        args.target.as_deref().unwrap_or("<current>"),
-        listener.local_addr()?
-    );
     axum::serve(listener, server::app(state)).await?;
     Ok(())
+}
+
+/// Pick the input backend: an interactive PTY command (`--exec`) or tmux control
+/// mode. Both yield a `watch::Receiver` of the latest rendered `#screen` fragment.
+fn start_backend(
+    interactive: bool,
+    exec: &[String],
+    target: Option<String>,
+    config: Arc<Config>,
+    resolver: Arc<Resolver>,
+) -> Result<tokio::sync::watch::Receiver<String>> {
+    if interactive {
+        pty::start(exec, config, resolver)
+    } else {
+        Ok(live::start(target, config, resolver))
+    }
 }
 
 /// Serve the hub, terminating TLS per `tls`. Plain HTTP keeps the `SO_REUSEADDR`

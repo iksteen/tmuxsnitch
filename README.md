@@ -15,6 +15,19 @@ You can run it two ways:
 - **Hub + client** — a client streams its rendered frames to a remote **hub**, which
   hosts the session at a URL. Good for sharing a session off-box.
 
+The input backend is swappable. Instead of tmux, `--exec` mirrors an **interactive
+command in a PTY** — the `script(1)` model: the command runs in your terminal and the
+browser watches. No tmux needed; one command, no panes.
+
+```sh
+tmuxsnitch --exec bash -l                 # standalone: work in this shell, watch at :8080
+tmuxsnitch --push https://hub … --key … --exec bash   # or stream it to a hub
+```
+
+`--exec` takes the command plus its args, so put it **last**. The terminal is switched to
+raw mode for the session and restored when the command exits (which also quits
+tmuxsnitch). Unix only.
+
 ## Build
 
 ```sh
@@ -79,6 +92,7 @@ needs the secret. A client whose key isn't on the hub's `--allow` list is reject
 | Flag | Applies to | Meaning |
 |------|------------|---------|
 | `--target <t>` | standalone, client | tmux target (`session` or `session:window`); default = current window |
+| `--exec <cmd>…` | standalone, client | mirror an interactive PTY command instead of tmux (put last) |
 | `--config <path>` | standalone, client | TOML config (fonts + `symbol_map`); omit for defaults |
 | `--bind <addr>` | standalone, hub | HTTP listen address (default `127.0.0.1:8080`) |
 | `--serve` | hub | run as a hub (no tmux/config needed) |

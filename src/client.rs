@@ -9,9 +9,9 @@
 //! blip) it re-registers and reopens.
 
 use crate::config::Config;
-use crate::fonts::{self, FontFile, Resolver};
-use crate::proto::{frame_encode, session_id, RegisterBody, KEY_HEADER};
-use crate::{live, render};
+use crate::fonts::{self, FontFile};
+use crate::proto::{frame_encode, RegisterBody, KEY_HEADER};
+use crate::render;
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use std::sync::Arc;
@@ -23,23 +23,21 @@ use tokio_stream::wrappers::ReceiverStream;
 pub async fn run(
     base_url: String,
     key: String,
-    target: Option<String>,
+    id: String,
     config: Arc<Config>,
-    resolver: Arc<Resolver>,
     fonts: Arc<Vec<FontFile>>,
+    mut rx: watch::Receiver<String>,
 ) -> Result<()> {
     let base = base_url.trim_end_matches('/').to_string();
     let http = reqwest::Client::new();
-    let id = session_id(&key);
-    // The hub serves our fonts under this session's id, so bake that URL prefix
-    // into the @font-face CSS and upload the font bytes alongside it.
+    // The view URL is printed by `main` before any backend (and any PTY raw mode)
+    // starts. The hub serves our fonts under this session's id, so bake that URL
+    // prefix into the @font-face CSS and upload the font bytes alongside it.
     let font_css = render::font_face_css(&fonts, &format!("/s/{id}/fonts/"));
     let css = render::head_css(&font_css, &config);
     let reg = RegisterBody { css, fonts: fonts::font_assets(&fonts) };
     let reg_body = Bytes::from(serde_json::to_vec(&reg).context("encoding register payload")?);
-    println!("tmuxsnitch: pushing live to {base}; view at {base}/s/{id}");
 
-    let mut rx = live::start(target, config, resolver);
     let mut first = true;
     loop {
         // Register (also re-registers the CSS after a hub restart) before opening
