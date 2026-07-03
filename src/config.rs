@@ -50,8 +50,14 @@ pub struct FontSource {
     pub system: Option<String>,
 }
 
+/// Family assumed installed system-wide for Nerd-Font symbol glyphs. It's part of
+/// the built-in `default_font` fallback so icons render with no config; if it
+/// isn't installed the browser just falls through (and it's exempt from the
+/// unresolved-font warning, being our default rather than a user's typo).
+pub(crate) const DEFAULT_SYMBOL_FONT: &str = "Symbols Nerd Font Mono";
+
 fn default_font() -> Vec<String> {
-    vec!["monospace".to_string()]
+    vec!["monospace".to_string(), DEFAULT_SYMBOL_FONT.to_string()]
 }
 
 /// Accept either `default_font = "Menlo"` or `default_font = ["Menlo", "NF"]`.
@@ -115,6 +121,6 @@ mod tests {
         let many: Config = toml::from_str("default_font = [\"Menlo\", \"NF\"]").unwrap();
         assert_eq!(many.default_font, vec!["Menlo", "NF"]);
         let absent: Config = toml::from_str("").unwrap();
-        assert_eq!(absent.default_font, vec!["monospace"]);
+        assert_eq!(absent.default_font, vec!["monospace", DEFAULT_SYMBOL_FONT]);
     }
 }

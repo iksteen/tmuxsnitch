@@ -123,6 +123,11 @@ Font"]`. The browser resolves each character against the stack in order, so a Ne
 listed after your text font covers every glyph the text font lacks. That reproduces
 Kitty's fallback with no `symbol_map` ranges at all (see `config.kitty.toml`).
 
+By default `default_font` is `["monospace", "Symbols Nerd Font Mono"]`, so Nerd-Font
+symbol glyphs render out of the box with **no config** if `Symbols Nerd Font Mono` is
+installed system-wide (it's part of the standard Nerd Fonts packages). Override
+`default_font` to use a different text font or symbol font.
+
 Each `[fonts."Name"]` entry is either embedded (`path = "..."` → base64 `@font-face`,
 self-contained page) or referenced by an installed family (`system = "..."`). Font
 family is an axis of the span style, so an override breaks a run exactly like a color

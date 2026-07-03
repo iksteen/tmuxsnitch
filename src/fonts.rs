@@ -57,7 +57,11 @@ fn unresolved_fonts(config: &Config) -> Vec<String> {
         .iter()
         .chain(config.symbol_map.iter().map(|s| &s.font));
     referenced
-        .filter(|f| !GENERICS.contains(&f.as_str()) && !config.fonts.contains_key(*f))
+        .filter(|f| {
+            !GENERICS.contains(&f.as_str())
+                && f.as_str() != crate::config::DEFAULT_SYMBOL_FONT
+                && !config.fonts.contains_key(*f)
+        })
         .filter(|f| seen.insert((*f).clone()))
         .cloned()
         .collect()
