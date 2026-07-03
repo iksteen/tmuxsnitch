@@ -77,6 +77,10 @@ pub struct FontFile {
     pub mime: &'static str,
     pub format: &'static str,
     pub bytes: Vec<u8>,
+    /// True for a family's bold face — emitted as a `font-weight:bold` `@font-face`
+    /// so bold cells render at real weight and monospace width. Without it the
+    /// browser fakes bold, which is wider than the cell and gets clipped.
+    pub bold: bool,
 }
 
 /// The process-wide system font database, built once (scanning font dirs is not
@@ -101,34 +105,48 @@ pub fn collect_fonts(config: &Config) -> Vec<FontFile> {
     let mut out = Vec::new();
     for family in referenced_families(config) {
         let entry = config.fonts.get(&family);
-        let ff = if let Some(path) = entry.and_then(|s| s.path.as_deref()) {
+        if let Some(path) = entry.and_then(|s| s.path.as_deref()) {
+            // Explicit path: one file, one (regular) face — no bold variant to find.
             match load_font_file(&family, path) {
-                Ok(f) => Some(f),
-                Err(e) => {
-                    eprintln!("shellglass: skipping font {family:?}: {e:#}");
-                    None
-                }
+                Ok(f) => out.push(f),
+                Err(e) => eprintln!("shellglass: skipping font {family:?}: {e:#}"),
             }
-        } else {
-            // `system` overrides the name to look up when it differs from the key.
-            let name = entry.and_then(|s| s.system.as_deref()).unwrap_or(&family);
-            let f = fontdb_locate(db, name).map(|(bytes, mime, format)| FontFile {
-                family: family.clone(), // reference it by the config key, not the lookup name
-                mime,
-                format,
-                bytes,
-            });
+            continue;
+        }
+        // `system` overrides the name to look up when it differs from the key.
+        let name = entry.and_then(|s| s.system.as_deref()).unwrap_or(&family);
+        let Some((normal_id, bytes, mime, format)) = fontdb_locate(db, name, Weight::NORMAL) else {
             // The built-in default symbol font is expected to be absent on some
             // hosts; don't nag about it. Anything the user configured, do warn.
-            if f.is_none() && family != crate::config::DEFAULT_SYMBOL_FONT {
+            if family != crate::config::DEFAULT_SYMBOL_FONT {
                 eprintln!(
                     "shellglass: font {family:?} not found on this host — viewers without it \
                      installed will see fallback glyphs"
                 );
             }
-            f
+            continue;
         };
-        out.extend(ff);
+        out.push(FontFile {
+            family: family.clone(), // reference it by the config key, not the lookup name
+            mime,
+            format,
+            bytes,
+            bold: false,
+        });
+        // Ship the family's bold face too when it's a distinct file, so bold cells
+        // render at real weight and monospace width. Best-effort — a family with no
+        // separate bold resolves back to `normal_id`; skip it (browser faux-bold).
+        if let Some((bold_id, bytes, mime, format)) = fontdb_locate(db, name, Weight::BOLD)
+            && bold_id != normal_id
+        {
+            out.push(FontFile {
+                family: family.clone(),
+                mime,
+                format,
+                bytes,
+                bold: true,
+            });
+        }
     }
     out
 }
@@ -151,16 +169,22 @@ fn load_font_file(family: &str, path: &Path) -> Result<FontFile> {
         mime,
         format,
         bytes,
+        bold: false,
     })
 }
 
-/// Find the installed file for family `name` via fontdb and return servable bytes.
-/// fontdb matches by family and doesn't substitute, but double-check the match to
-/// be safe. Returns `(bytes, mime, format)`.
-fn fontdb_locate(db: &Database, name: &str) -> Option<(Vec<u8>, &'static str, &'static str)> {
+/// Find the installed file for family `name` at `weight` via fontdb and return its
+/// face id + servable bytes. fontdb matches by family and doesn't substitute, but
+/// double-check the match to be safe. The id lets the caller tell a real bold face
+/// from a `weight`-request that fell back to the regular one.
+fn fontdb_locate(
+    db: &Database,
+    name: &str,
+    weight: Weight,
+) -> Option<(fontdb::ID, Vec<u8>, &'static str, &'static str)> {
     let id = db.query(&Query {
         families: &[Family::Name(name)],
-        weight: Weight::NORMAL,
+        weight,
         stretch: Stretch::Normal,
         style: Style::Normal,
     })?;
@@ -173,7 +197,7 @@ fn fontdb_locate(db: &Database, name: &str) -> Option<(Vec<u8>, &'static str, &'
         return None;
     }
     let (bytes, format) = db.with_face_data(id, sfnt_face)??;
-    Some((bytes, mime_for(format), format))
+    Some((id, bytes, mime_for(format), format))
 }
 
 /// Expand CSS-generic entries in `default_font` (`monospace`, `serif`, …) to the

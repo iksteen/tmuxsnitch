@@ -17,8 +17,9 @@ pub fn font_face_css(fonts: &[FontFile], url_prefix: &str) -> String {
     for (i, f) in fonts.iter().enumerate() {
         let _ = writeln!(
             css,
-            "@font-face {{ font-family:'{}'; src:url(\"{}{}\") format('{}'); }}",
+            "@font-face {{ font-family:'{}'; font-weight:{}; src:url(\"{}{}\") format('{}'); }}",
             crate::fonts::css_escape_family(&f.family),
+            if f.bold { "bold" } else { "normal" },
             url_prefix,
             i,
             f.format,
@@ -548,6 +549,7 @@ mod tests {
             mime: "font/ttf",
             format: "truetype",
             bytes: vec![1, 2],
+            bold: false,
         }];
         let css = font_face_css(&fonts, "/s/abc/fonts/");
         assert!(css.contains("font-family:'NF'"), "{css}");
