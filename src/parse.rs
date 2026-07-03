@@ -2,6 +2,7 @@
 //! throwaway `vt100` terminal emulator.
 
 use crate::model::{Color, Grid, StyledCell};
+use std::fmt::Write as _;
 
 /// Build a persistent vt100 parser seeded with a `capture-pane -e` snapshot, with
 /// the cursor placed at `cursor` (col, row), 0-based. The returned parser is then
@@ -16,15 +17,41 @@ pub fn seed_parser(capture: &str, cols: u16, rows: u16, cursor: (u16, u16)) -> v
     let feed = lines.join("\r\n");
     parser.process(feed.as_bytes());
 
-    // Feeding the snapshot leaves the cursor at the end of the last line and the
-    // pen in whatever SGR that last cell used; capture-pane carries neither the
-    // real cursor nor pen. Reset attributes (`\x1b[m`) and restore the cursor
-    // (1-based CUP) so relative `%output` — e.g. a shell/irssi echoing keystrokes
-    // — lands at the right place with default colors, not the bottom-right corner
-    // wearing a stale background.
+    // capture-pane carries neither the cursor position nor the active pen (SGR);
+    // feeding the snapshot leaves the cursor at the end of the last line and the
+    // pen as that cell's attributes. Restore the real cursor, and set the pen to
+    // the cell there — the rendition a program writing at the cursor would
+    // inherit — so relative `%output` (a shell/irssi echoing keystrokes) continues
+    // with the right attributes instead of a stale bottom-right background.
     let (col, row) = cursor;
-    parser.process(format!("\x1b[m\x1b[{};{}H", row + 1, col + 1).as_bytes());
+    let pen = {
+        let screen = parser.screen();
+        screen.cell(row, col).map(pen_sgr).unwrap_or_else(|| "\x1b[m".to_string())
+    };
+    parser.process(format!("{pen}\x1b[{};{}H", row + 1, col + 1).as_bytes());
     parser
+}
+
+/// Reconstruct an SGR sequence (leading reset) reproducing `cell`'s pen.
+fn pen_sgr(cell: &vt100::Cell) -> String {
+    let mut s = String::from("\x1b[0");
+    match cell.fgcolor() {
+        vt100::Color::Default => {}
+        vt100::Color::Idx(i) => { let _ = write!(s, ";38;5;{i}"); }
+        vt100::Color::Rgb(r, g, b) => { let _ = write!(s, ";38;2;{r};{g};{b}"); }
+    }
+    match cell.bgcolor() {
+        vt100::Color::Default => {}
+        vt100::Color::Idx(i) => { let _ = write!(s, ";48;5;{i}"); }
+        vt100::Color::Rgb(r, g, b) => { let _ = write!(s, ";48;2;{r};{g};{b}"); }
+    }
+    if cell.bold() { s.push_str(";1"); }
+    if cell.dim() { s.push_str(";2"); }
+    if cell.italic() { s.push_str(";3"); }
+    if cell.underline() { s.push_str(";4"); }
+    if cell.inverse() { s.push_str(";7"); }
+    s.push('m');
+    s
 }
 
 /// Render `capture` (SGR-annotated text) into a fixed `cols`×`rows` grid. Only the
@@ -95,6 +122,30 @@ fn conv_color(c: vt100::Color) -> Color {
 mod tests {
     use super::*;
     use crate::model::Color;
+
+    #[test]
+    fn seed_restores_pen_from_cursor_cell() {
+        // Row 0 is plain; row 1 has a green (idx 2) background.
+        let cap = "abc\n\x1b[42mXYZ";
+
+        // Cursor on a default cell (0,0): a following char stays default.
+        let mut p = seed_parser(cap, 10, 2, (0, 0));
+        p.process(b"Q");
+        assert_eq!(
+            p.screen().cell(0, 0).unwrap().bgcolor(),
+            vt100::Color::Default,
+            "pen should be default on a default cell"
+        );
+
+        // Cursor on the green cell (0,1): a following char inherits the bg.
+        let mut p2 = seed_parser(cap, 10, 2, (0, 1));
+        p2.process(b"Q");
+        assert_eq!(
+            p2.screen().cell(1, 0).unwrap().bgcolor(),
+            vt100::Color::Idx(2),
+            "pen should inherit the cursor cell's background"
+        );
+    }
 
     #[test]
     fn attrs_and_colors() {
