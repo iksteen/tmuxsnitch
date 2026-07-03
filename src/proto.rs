@@ -5,21 +5,32 @@
 //! *read* capability to embed in a viewer URL: you can render the session from the
 //! id but cannot recover the key (and thus cannot push) from it.
 
-use sha2::{Digest, Sha256};
+use argon2::Argon2;
 use std::fmt::Write as _;
 
-/// Header carrying the secret key on `/register` and `/frame`.
+/// Header carrying the secret key on `/register` and `/stream`.
 pub const KEY_HEADER: &str = "x-tmuxsnitch-key";
 
-/// Underivable session id for a secret key: lowercase hex sha256. Hex (never `-`)
-/// so the id is safe as a CLI value (`--allow`) and in a URL path.
+/// Fixed application salt. The id must be a pure function of the secret (client
+/// and hub derive it independently and must agree), so the salt can't be random
+/// or per-hash — it's a constant. Memory-hardness, not the salt, is what slows a
+/// brute force here.
+const SALT: &[u8] = b"tmuxsnitch/session-id/v1";
+
+/// Underivable session id for a secret key: Argon2id (memory- and compute-hard)
+/// rendered as lowercase hex. Memory-hardness makes brute-forcing a weak secret
+/// from the public id expensive; with a strong random secret it's belt-and-
+/// suspenders. Hex (never `-`) so the id is safe as a CLI value and URL path.
+/// Cost is paid once per client connection (at `/register`), not per frame.
 pub fn session_id(key: &str) -> String {
-    Sha256::digest(key.as_bytes())
-        .iter()
-        .fold(String::with_capacity(64), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
+    let mut out = [0u8; 32];
+    Argon2::default()
+        .hash_password_into(key.as_bytes(), SALT, &mut out)
+        .expect("argon2id with a fixed valid salt and output length cannot fail");
+    out.iter().fold(String::with_capacity(64), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 /// Upper bound on a single streamed frame; guards the hub against a corrupt or

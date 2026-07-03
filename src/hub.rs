@@ -43,18 +43,16 @@ impl HubState {
             allowed: Arc::new(allowed),
         }
     }
-
-    fn allows(&self, key: &str) -> bool {
-        self.allowed.contains(&session_id(key))
-    }
 }
 
 /// Resolve a request's key to its (allowed) session id, or the status to reject
 /// with: `401` if no key, `403` if the key isn't pre-registered on the hub.
+/// Hashes the key once (Argon2 is deliberately expensive).
 fn authorize(st: &HubState, headers: &HeaderMap) -> Result<String, StatusCode> {
     let key = key_of(headers).ok_or(StatusCode::UNAUTHORIZED)?;
-    if st.allows(&key) {
-        Ok(session_id(&key))
+    let id = session_id(&key);
+    if st.allowed.contains(&id) {
+        Ok(id)
     } else {
         Err(StatusCode::FORBIDDEN)
     }
@@ -162,11 +160,11 @@ mod tests {
 
     #[test]
     fn only_preregistered_keys_are_allowed() {
-        let allowed = HashSet::from([session_id("good-secret")]);
-        let st = HubState::new(allowed);
-        assert!(st.allows("good-secret"), "registered key must be allowed");
-        assert!(!st.allows("other-secret"), "unregistered key must be rejected");
+        let st = HubState::new(HashSet::from([session_id("good-secret")]));
+        assert!(st.allowed.contains(&session_id("good-secret")), "registered key allowed");
+        assert!(!st.allowed.contains(&session_id("other-secret")), "unregistered key rejected");
         // An empty allowlist rejects everything (no implicit open hub).
-        assert!(!HubState::new(HashSet::new()).allows("good-secret"));
+        let empty = HubState::new(HashSet::new());
+        assert!(!empty.allowed.contains(&session_id("good-secret")));
     }
 }

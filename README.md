@@ -32,9 +32,10 @@ tmux new-session -d -s demo                       # a session to mirror
 
 ## Quickstart: hub + client (two shells)
 
-The **secret** is the write capability; its hash `hex(sha256(secret))` is the
-**session id**, a one-way read capability that goes in the view URL. The hub only
-accepts pushes for session ids you pre-register with `--allow`.
+The **secret** is the write capability; its hash — `hex(argon2id(secret))`, a
+one-way, memory-hard derivation — is the **session id**, a read capability that
+goes in the view URL. The hub only accepts pushes for session ids you pre-register
+with `--allow`.
 
 ### Shell A — the hub
 
@@ -87,8 +88,10 @@ needs the secret. A client whose key isn't on the hub's `--allow` list is reject
 | `--key <secret>` | client, `--print-id` | secret key (or `TMUXSNITCH_KEY` env var) |
 | `--print-id` | — | print the session id for `--key` and exit |
 
-The session id is portable: `tmuxsnitch --key K --print-id` equals
-`printf %s K | sha256sum`.
+The session id is `hex(argon2id(secret))` with a fixed application salt — a
+memory-hard derivation, so a weak secret can't be cheaply brute-forced from the
+public id. It's computed once per client connection, not per frame. Use
+`--print-id` to obtain the id for a secret (there's no one-line shell equivalent).
 
 ## How it works
 
