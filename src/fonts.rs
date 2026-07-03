@@ -105,34 +105,12 @@ fn load_font(family: &str, path: &Path) -> Result<FontFile> {
 /// Ask fontconfig for the file backing `name`. fc-match always returns *some*
 /// font, so accept the result only if its family actually matches `name` — a
 /// mismatch means the font isn't installed and fontconfig substituted a default.
-/// ponytail: shells out to fc-match (the system font DB on Linux); absent or no
-/// match → None and the caller falls back to browser rendering.
+/// File for an installed family exactly named `name`, or `None` if it isn't
+/// installed (a substituted default doesn't count) or the platform font DB is
+/// unavailable — the caller then falls back to browser rendering. Backed by
+/// fontconfig (`fc-match`) elsewhere, Core Text on macOS.
 fn locate_font(name: &str) -> Option<std::path::PathBuf> {
-    let (families, path) = fc_query(name)?;
-    // %{family} is a comma-separated alias list; accept only an exact
-    // (case-insensitive) hit — otherwise fontconfig substituted a default, i.e.
-    // the requested font isn't installed and we mustn't serve the wrong file.
-    families
-        .split(',')
-        .any(|a| a.trim().eq_ignore_ascii_case(name))
-        .then_some(path)
-}
-
-/// Raw `fc-match`: the `%{family}` alias list and file path fontconfig returns for
-/// `name` (always *some* font). Returns None only if fc-match is absent/fails.
-fn fc_query(name: &str) -> Option<(String, std::path::PathBuf)> {
-    let out = std::process::Command::new("fc-match")
-        .arg("-f")
-        .arg("%{family}|%{file}")
-        .arg(name)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let (families, file) = stdout.split_once('|')?;
-    Some((families.to_string(), std::path::PathBuf::from(file.trim())))
+    platform::locate_installed(name)
 }
 
 /// Expand CSS-generic entries in `default_font` (`monospace`, `serif`, …) to the
@@ -140,21 +118,87 @@ fn fc_query(name: &str) -> Option<(String, std::path::PathBuf)> {
 /// own browser default — for a mirror, the host's monospace *is* the content. The
 /// generic stays as the stack's last-resort fallback (appended by `font_stack`);
 /// downstream (`collect_fonts`, `font_stack`) then treats the concrete name like
-/// any other family. Left untouched if fontconfig can't resolve it.
+/// any other family. Left untouched if the platform can't resolve it.
 pub fn resolve_generics(config: &mut Config) {
     for fam in &mut config.default_font {
         if !GENERICS.contains(&fam.as_str()) {
             continue;
         }
-        // Take fontconfig's substitution as-is (that's what a generic means); use
-        // its primary alias as the concrete family name to reference and serve.
-        if let Some((families, _)) = fc_query(fam) {
-            if let Some(concrete) = families.split(',').next().map(str::trim) {
-                if !concrete.is_empty() {
-                    *fam = concrete.to_string();
-                }
-            }
+        if let Some(concrete) = platform::resolve_generic(fam) {
+            *fam = concrete;
         }
+    }
+}
+
+/// Platform font-database lookup: fontconfig on Linux/BSD, Core Text on macOS.
+#[cfg(not(target_os = "macos"))]
+mod platform {
+    use std::path::PathBuf;
+
+    /// ponytail: shells out to fc-match (the system font DB); absent/failed → None.
+    pub fn locate_installed(name: &str) -> Option<PathBuf> {
+        let (families, path) = fc_query(name)?;
+        // %{family} is a comma-separated alias list; accept only an exact
+        // (case-insensitive) hit — otherwise fontconfig substituted a default.
+        families
+            .split(',')
+            .any(|a| a.trim().eq_ignore_ascii_case(name))
+            .then_some(path)
+    }
+
+    /// fontconfig resolves a generic itself; take its primary matched family.
+    pub fn resolve_generic(name: &str) -> Option<String> {
+        let (families, _) = fc_query(name)?;
+        let fam = families.split(',').next()?.trim();
+        (!fam.is_empty()).then(|| fam.to_string())
+    }
+
+    /// Raw `fc-match`: the `%{family}` alias list and file path for `name`.
+    fn fc_query(name: &str) -> Option<(String, PathBuf)> {
+        let out = std::process::Command::new("fc-match")
+            .arg("-f")
+            .arg("%{family}|%{file}")
+            .arg(name)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let (families, file) = stdout.split_once('|')?;
+        Some((families.to_string(), PathBuf::from(file.trim())))
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod platform {
+    use core_text::font;
+    use std::path::PathBuf;
+
+    /// Installed file for family `name` via Core Text. Core Text substitutes a
+    /// default when the family is missing, so accept only when the resolved font's
+    /// family actually matches `name` (mirrors the fontconfig exact-match check).
+    pub fn locate_installed(name: &str) -> Option<PathBuf> {
+        let f = font::new_from_name(name, 12.0).ok()?;
+        if !f.family_name().eq_ignore_ascii_case(name) {
+            return None;
+        }
+        f.url().and_then(|u| u.to_path())
+    }
+
+    /// Core Text has no CSS generics, so map them to the macOS families that back
+    /// them, keeping only ones actually present (via the exact-match locator).
+    pub fn resolve_generic(name: &str) -> Option<String> {
+        let concrete = match name {
+            "monospace" => "Menlo",
+            "serif" => "Times New Roman",
+            "sans-serif" => "Helvetica",
+            "cursive" => "Apple Chancery",
+            "fantasy" => "Papyrus",
+            _ => return None,
+        };
+        let f = font::new_from_name(concrete, 12.0).ok()?;
+        f.family_name().eq_ignore_ascii_case(concrete).then(|| concrete.to_string())
     }
 }
 
