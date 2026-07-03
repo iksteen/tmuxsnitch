@@ -183,11 +183,16 @@ pub fn resolve_generics(config: &mut Config) {
     }
 }
 
-/// A concrete installed family backing a CSS generic. fontdb doesn't track the OS
-/// default, so try a small ordered candidate list per generic (cross-platform) and
-/// take the first installed. ponytail: heuristic, not the exact OS default — fine
-/// for a mirror, and the generic stays as the ultimate CSS fallback regardless.
+/// A concrete installed family backing a CSS generic. Prefer the OS's configured
+/// default (fontconfig, where present); otherwise — macOS, Windows, or no
+/// fontconfig — fall back to a cross-platform candidate list. fontdb serves the
+/// file either way, and the generic stays as the ultimate CSS fallback regardless.
 fn concrete_generic(db: &Database, generic: &str) -> Option<String> {
+    if let Some(fam) = fontconfig_default(generic) {
+        if family_installed(db, &fam) {
+            return Some(fam);
+        }
+    }
     let candidates: &[&str] = match generic {
         "monospace" => &[
             "Menlo", "DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono", "Consolas",
@@ -199,13 +204,30 @@ fn concrete_generic(db: &Database, generic: &str) -> Option<String> {
         "fantasy" => &["Papyrus", "Impact"],
         _ => return None,
     };
-    candidates
-        .iter()
-        .find(|c| {
-            db.faces()
-                .any(|f| f.families.iter().any(|(fam, _)| fam.eq_ignore_ascii_case(c)))
-        })
-        .map(|c| c.to_string())
+    candidates.iter().find(|c| family_installed(db, c)).map(|c| c.to_string())
+}
+
+/// The concrete family fontconfig resolves a CSS generic to — i.e. the OS/user
+/// configured default. `None` if `fc-match` isn't present (macOS/Windows). Used
+/// only for the generic→family hint; fontdb still locates and serves the file.
+fn fontconfig_default(generic: &str) -> Option<String> {
+    let out = std::process::Command::new("fc-match")
+        .arg("-f")
+        .arg("%{family}")
+        .arg(generic)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let fam = stdout.split(',').next()?.trim(); // %{family} may be an alias list
+    (!fam.is_empty()).then(|| fam.to_string())
+}
+
+fn family_installed(db: &Database, name: &str) -> bool {
+    db.faces()
+        .any(|f| f.families.iter().any(|(fam, _)| fam.eq_ignore_ascii_case(name)))
 }
 
 /// Extract face `index` from `data` (a TTF/OTF, or one face of a TTC) as a
