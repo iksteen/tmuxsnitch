@@ -1,10 +1,12 @@
 //! Kitty-style `symbol_map` codepoint→family resolution, plus locating the font
 //! files referenced by the config so they can be served to viewers.
 //!
-//! Font lookup uses [`fontdb`] — a pure-Rust, cross-platform system font database
-//! (no `fc-match`/Core Text subprocess). It hands back the file *and the face
-//! index*, so a single face can be extracted from a `.ttc` collection and served
-//! as a standalone web font (browsers can't select a face from a `.ttc`).
+//! Font *file* lookup uses [`fontdb`] — a pure-Rust, cross-platform system font
+//! database, no subprocess. It hands back the file *and the face index*, so a
+//! single face can be extracted from a `.ttc` collection and served as a standalone
+//! web font (browsers can't select a face from a `.ttc`). The only platform tool
+//! consulted is `fc-match`, purely to learn the OS's default family for a CSS
+//! generic (`monospace`, …); it's optional and absent on macOS/Windows.
 
 use crate::config::Config;
 use anyhow::{Context, Result, bail};

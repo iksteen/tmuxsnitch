@@ -130,9 +130,9 @@ installed system-wide (it's part of the standard Nerd Fonts packages). Override
 
 **Fonts are served, so viewers render them without a local install.** Every family
 referenced by `default_font`/`symbol_map` is located on the host running tmuxsnitch —
-via [`fontdb`] (a pure-Rust, cross-platform system font database; works on Linux, macOS
-and Windows with no `fc-match`/Core Text), or an explicit `[fonts."Name"].path` — its
-file read once at startup, and served: standalone at `/fonts/<i>`, the hub **per
+via [`fontdb`] (a pure-Rust, cross-platform system font database; Linux, macOS and
+Windows, no subprocess), or an explicit `[fonts."Name"].path` — its file read once at
+startup, and served: standalone at `/fonts/<i>`, the hub **per
 session** at `/s/<id>/fonts/<i>` (so two clients' fonts can't clash). The page's
 `@font-face` points at those URLs; responses are Brotli/gzip-compressed and sent with a
 day-long `Cache-Control` so a browser fetches each font once. A single face is extracted

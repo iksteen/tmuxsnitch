@@ -1,5 +1,6 @@
-//! Snapshot input source: shell out to `tmux` to read window/pane geometry and
-//! capture each pane's rendered contents (with SGR escapes).
+//! Seed/resync source: shell out to `tmux` to read window/pane geometry and
+//! capture each pane's rendered contents (with SGR escapes). Used to seed the live
+//! parsers at startup and re-seed them on a layout change.
 
 use crate::model::PaneGeom;
 use anyhow::{Context, Result, anyhow, bail};

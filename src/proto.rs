@@ -1,9 +1,9 @@
 //! Client/hub wire contract.
 //!
 //! The secret key is the *write* capability: a client presents it to push frames.
-//! The session id is `base64url(sha256(key))` — a one-way hash, so it's a safe
-//! *read* capability to embed in a viewer URL: you can render the session from the
-//! id but cannot recover the key (and thus cannot push) from it.
+//! The session id is `hex(argon2id(key))` — a one-way, memory-hard hash, so it's a
+//! safe *read* capability to put in a viewer URL: you can render the session from
+//! the id but cannot recover the key (and thus cannot push) from it.
 
 use argon2::Argon2;
 use serde::{Deserialize, Serialize};
@@ -102,7 +102,7 @@ mod tests {
         assert_eq!(id, session_id(key), "same key -> same id");
         assert_ne!(id, session_id("other"), "different key -> different id");
         assert!(!id.contains(key), "id must not leak the key");
-        assert_eq!(id.len(), 64, "sha256 -> 64 hex chars: {id}");
+        assert_eq!(id.len(), 64, "argon2id 32 bytes -> 64 hex chars: {id}");
         assert!(
             id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
             "id must be lowercase hex (no '-', CLI/URL safe): {id}"

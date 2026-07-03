@@ -27,9 +27,10 @@ font   = "Symbols Nerd Font"
 # path = "/usr/share/fonts/NerdFonts/SymbolsNerdFont-Regular.woff2"
 system = "Symbols Nerd Font"
 
-# Fallback family used by the default_font stack above — a system-installed
-# Symbols Nerd Font Mono. If it isn't installed, the browser just falls through
-# to the next stack entry (no error). To embed a local copy for a self-contained
-# page instead, set `path = "..."`; a missing path warns and is skipped.
+# Fallback family used by the default_font stack above. This entry is optional:
+# a referenced family is auto-located and served anyway. Add it only to override
+# the lookup — `system` sets the name searched in the font database, or `path`
+# forces a specific file (a missing path warns and is skipped). If nothing is
+# found, the browser just falls through to the next stack entry (no error).
 [fonts."Symbols Nerd Font Mono"]
 system = "Symbols Nerd Font Mono"

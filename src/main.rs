@@ -48,7 +48,7 @@ struct Args {
     #[arg(long)]
     push: Option<String>,
 
-    /// Secret key for `--push`. Its `sha256` is the shareable session id.
+    /// Secret key for `--push`. Its `argon2id` hash is the shareable session id.
     /// (allow_hyphen_values: a secret may legitimately start with `-`.)
     #[arg(long, env = "TMUXSNITCH_KEY", allow_hyphen_values = true)]
     key: Option<String>,

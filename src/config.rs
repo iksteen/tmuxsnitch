@@ -1,5 +1,5 @@
 //! User configuration: rendering knobs, Kitty-style `symbol_map` font overrides,
-//! and font sources (embedded file or installed system family).
+//! and optional font-source hints (an explicit file path, or a lookup-name override).
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -39,13 +39,15 @@ pub struct SymbolMap {
     pub font: String,
 }
 
-/// A font is either embedded from a file (`path`) or referenced by an installed
-/// family name (`system`). If neither is set, the family name is used verbatim.
+/// Optional override for how a referenced family is located and served. Both
+/// fields are optional: with neither, the family is looked up in the system font
+/// database by its `[fonts]` key. `path` forces a specific file to serve; `system`
+/// overrides the family name used for the database lookup when it differs from the
+/// key.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct FontSource {
     pub path: Option<PathBuf>,
-    /// Family name to hand fontconfig when it differs from the `[fonts]` key.
     pub system: Option<String>,
 }
 

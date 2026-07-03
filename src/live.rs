@@ -1,15 +1,14 @@
 //! Live tracking input source: a persistent `tmux -C` (control mode) client.
 //!
-//! Snapshot mode re-runs `capture-pane` on every browser poll. Live mode instead
-//! attaches once, seeds each pane's [`vt100::Parser`] from a single capture, then
-//! feeds the incremental `%output` byte stream tmux pushes as panes produce it.
-//! A dedicated OS thread owns the parsers and, when the stream goes quiet (or at
-//! most ~30fps), renders the fragment and publishes it on a `watch` channel that
-//! the SSE endpoint relays to browsers. The renderer is reused verbatim.
+//! It attaches once, seeds each pane's [`vt100::Parser`] from a single capture,
+//! then feeds the incremental `%output` byte stream tmux pushes as panes produce
+//! it — no polling. A dedicated OS thread owns the parsers and, when the stream
+//! goes quiet (or at most ~30fps), renders the fragment and publishes it on a
+//! `watch` channel that the SSE endpoint relays to browsers.
 //!
-//! Scope: tracks the target session's *current window* — the same thing snapshot
-//! mode shows. Window switching / layout changes trigger a full re-capture, which
-//! also fixes geometry, so we never parse tmux's layout string ourselves.
+//! Scope: tracks the target session's *current window*. Window switching / layout
+//! changes trigger a full re-capture, which also fixes geometry, so we never parse
+//! tmux's layout string ourselves.
 
 use crate::config::Config;
 use crate::fonts::Resolver;
@@ -42,7 +41,7 @@ const MIN_FRAME: Duration = Duration::from_millis(33);
 
 /// Start live tracking. Returns a `watch::Receiver` whose value is always the
 /// latest rendered `#screen` fragment (or an error banner). Never fails: tmux
-/// problems surface as an in-page banner, matching snapshot mode.
+/// problems surface as an in-page banner rather than a failed request.
 pub fn start(
     target: Option<String>,
     config: Arc<Config>,

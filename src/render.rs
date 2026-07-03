@@ -30,9 +30,10 @@ pub fn font_face_css(fonts: &[FontFile], url_prefix: &str) -> String {
 const DEFAULT_FG: (u8, u8, u8) = (0xd0, 0xd0, 0xd0);
 const DEFAULT_BG: (u8, u8, u8) = (0x00, 0x00, 0x00);
 
-/// Everything that goes inside `<style>`: embedded `@font-face` plus the config-
-/// derived base CSS. Computed by whoever owns the config (the standalone server or
-/// a push client); the hub just stores and re-emits it, so it renders nothing.
+/// Everything that goes inside `<style>`: the served-font `@font-face` rules plus
+/// the config-derived base CSS. Computed by whoever owns the config (the standalone
+/// server or a push client); the hub just stores and re-emits it, so it renders
+/// nothing.
 pub fn head_css(font_css: &str, config: &Config) -> String {
     let base_css = format!(
         "html,body {{ margin:0; background:#000; }}\n\
@@ -88,7 +89,7 @@ pub fn banner(msg: &str) -> String {
     )
 }
 
-/// Render just the panes (the swappable inner fragment the poller replaces).
+/// Render just the panes (the swappable inner fragment each SSE update replaces).
 pub fn render_fragment(window: &Window, config: &Config, resolver: &Resolver) -> String {
     let mut out = String::new();
     let _ = write!(

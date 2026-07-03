@@ -61,8 +61,8 @@ pub fn grid_from_capture(capture: &str, cols: u16, rows: u16) -> Grid {
     grid_from_screen(seed_parser(capture, cols, rows, (0, 0)).screen())
 }
 
-/// Extract a parser-agnostic [`Grid`] from a live vt100 screen. Shared by the
-/// snapshot path and the control-mode live path (which reads a long-lived screen).
+/// Extract a parser-agnostic [`Grid`] from a live vt100 screen (the long-lived
+/// control-mode screen at render time; also used by the capture-seeding tests).
 pub fn grid_from_screen(screen: &vt100::Screen) -> Grid {
     let (srows, scols) = screen.size();
 
