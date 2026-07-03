@@ -87,6 +87,11 @@ needs the secret. A client whose key isn't on the hub's `--allow` list is reject
 | `--push <url>` | client | hub base URL to push to |
 | `--key <secret>` | client, `--print-id` | secret key (or `TMUXSNITCH_KEY` env var) |
 | `--print-id` | — | print the session id for `--key` and exit |
+| `--tls-cert <path>` / `--tls-key <path>` | hub | serve HTTPS with your own PEM cert chain + key |
+| `--acme-domain <d>` | hub | auto-obtain a cert via ACME/Let's Encrypt (repeat per domain) |
+| `--acme-email <e>` | hub | contact email for the ACME account |
+| `--acme-cache <dir>` | hub | persist ACME account + certs across restarts (recommended) |
+| `--acme-production` | hub | use Let's Encrypt production (default: staging) |
 
 The session id is `hex(argon2id(secret))` with a fixed application salt — a
 memory-hard derivation, so a weak secret can't be cheaply brute-forced from the
@@ -129,13 +134,31 @@ Nerd-Font codepoint ranges to it.
 - The **secret** is a bearer capability. Anyone who has it can push to that session;
   anyone with the **view URL** can watch. Use a long random secret and share the URL
   only with people who should see the session.
-- `--push` speaks plain HTTP with the secret in a header. Run it over a trusted network
-  or behind a TLS-terminating reverse proxy.
+- The secret travels in a header on `/register` and `/stream`. Terminate TLS so it
+  isn't sent in the clear. The hub can do this itself:
+
+  ```sh
+  # your own certificate
+  tmuxsnitch --serve --bind 0.0.0.0:443 --allow "$ID" \
+    --tls-cert /etc/ssl/hub.crt --tls-key /etc/ssl/hub.key
+
+  # or automatic Let's Encrypt (needs a public DNS name resolving to this host,
+  # and port 443 reachable — the TLS-ALPN-01 challenge is served on the same socket)
+  tmuxsnitch --serve --bind 0.0.0.0:443 --allow "$ID" \
+    --acme-domain hub.example.com --acme-email you@example.com \
+    --acme-cache /var/lib/tmuxsnitch/acme --acme-production
+  ```
+
+  ACME defaults to Let's Encrypt **staging** (untrusted certs, generous rate limits)
+  so you can test the plumbing; add `--acme-production` for real certs. Always set
+  `--acme-cache` or the account + certificate are re-issued on every restart.
+  Otherwise, run behind a TLS-terminating reverse proxy. The client's `--push`
+  URL just needs to be `https://…`.
 - The hub trusts allowed clients: it caps request bodies at 64 MB (embedded fonts are
   large) but does not otherwise rate-limit. Don't expose an open hub to the internet.
 
 ## Status
 
 Control-mode live rendering, standalone + client/hub push, single active window, full
-pane layout. Not yet: scrollback, multi-window/session tab bar, window switching within
-a session, TLS on the push transport.
+pane layout, optional hub TLS (own cert or ACME/Let's Encrypt). Not yet: scrollback,
+multi-window/session tab bar, window switching within a session.

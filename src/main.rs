@@ -56,6 +56,69 @@ struct Args {
     /// Print the session id for `--key` and exit (to add to a hub's `--allow`).
     #[arg(long)]
     print_id: bool,
+
+    /// (Hub) Serve HTTPS with this certificate chain (PEM). Requires --tls-key.
+    #[arg(long, requires = "tls_key")]
+    tls_cert: Option<PathBuf>,
+
+    /// (Hub) Private key (PEM) for --tls-cert.
+    #[arg(long, requires = "tls_cert")]
+    tls_key: Option<PathBuf>,
+
+    /// (Hub) Obtain/renew a certificate automatically via ACME for this domain;
+    /// repeat for several. Mutually exclusive with --tls-cert.
+    #[arg(long = "acme-domain", value_name = "DOMAIN")]
+    acme_domain: Vec<String>,
+
+    /// (Hub) Contact email for the ACME account.
+    #[arg(long)]
+    acme_email: Option<String>,
+
+    /// (Hub) Directory to persist the ACME account + issued certificates across
+    /// restarts. Strongly recommended — without it certs are re-issued every run.
+    #[arg(long)]
+    acme_cache: Option<PathBuf>,
+
+    /// (Hub) Use the Let's Encrypt production directory (default: staging).
+    #[arg(long)]
+    acme_production: bool,
+}
+
+/// How the hub should terminate TLS.
+enum Tls {
+    None,
+    Static { cert: PathBuf, key: PathBuf },
+    Acme {
+        domains: Vec<String>,
+        email: Option<String>,
+        cache: Option<PathBuf>,
+        production: bool,
+    },
+}
+
+impl Tls {
+    fn from_args(a: &Args) -> Result<Tls> {
+        let static_tls = a.tls_cert.is_some(); // clap guarantees tls_key is paired
+        let acme = !a.acme_domain.is_empty();
+        if static_tls && acme {
+            anyhow::bail!("use either --tls-cert/--tls-key or --acme-domain, not both");
+        }
+        if static_tls {
+            return Ok(Tls::Static {
+                cert: a.tls_cert.clone().unwrap(),
+                key: a.tls_key.clone().unwrap(),
+            });
+        }
+        if acme {
+            return Ok(Tls::Acme {
+                domains: a.acme_domain.clone(),
+                email: a.acme_email.clone(),
+                cache: a.acme_cache.clone(),
+                production: a.acme_production,
+            });
+        }
+        Ok(Tls::None)
+    }
 }
 
 #[tokio::main]
@@ -71,15 +134,14 @@ async fn main() -> Result<()> {
 
     // Hub needs no tmux/config: it only stores and re-serves what clients push.
     if args.serve {
+        let tls = Tls::from_args(&args)?;
         let allowed: std::collections::HashSet<String> = args.allow.into_iter().collect();
         if allowed.is_empty() {
             eprintln!(
                 "tmuxsnitch: warning — no --allow session ids; the hub will reject all pushes (403)"
             );
         }
-        let listener = bind(&args.bind).await?;
-        println!("tmuxsnitch hub at http://{}/", listener.local_addr()?);
-        axum::serve(listener, hub::app(hub::HubState::new(allowed))).await?;
+        serve_hub(hub::app(hub::HubState::new(allowed)), &args.bind, tls).await?;
         return Ok(());
     }
 
@@ -113,6 +175,67 @@ async fn main() -> Result<()> {
         listener.local_addr()?
     );
     axum::serve(listener, server::app(state)).await?;
+    Ok(())
+}
+
+/// Serve the hub, terminating TLS per `tls`. Plain HTTP keeps the `SO_REUSEADDR`
+/// listener via `axum::serve`; the TLS paths hand the same reuseaddr listener to
+/// `axum-server`. ACME drives certificate issuance/renewal on a background task.
+async fn serve_hub(app: axum::Router, addr: &str, tls: Tls) -> Result<()> {
+    let listener = bind(addr).await?;
+    let local = listener.local_addr()?;
+    match tls {
+        Tls::None => {
+            println!("tmuxsnitch hub at http://{local}/");
+            axum::serve(listener, app).await?;
+        }
+        Tls::Static { cert, key } => {
+            use axum_server::tls_rustls::RustlsConfig;
+            let config = RustlsConfig::from_pem_file(&cert, &key)
+                .await
+                .with_context(|| format!("loading TLS cert {cert:?} + key {key:?}"))?;
+            let std_listener = listener.into_std()?;
+            println!("tmuxsnitch hub at https://{local}/");
+            axum_server::from_tcp_rustls(std_listener, config)?
+                .serve(app.into_make_service())
+                .await?;
+        }
+        Tls::Acme { domains, email, cache, production } => {
+            use rustls_acme::{caches::DirCache, AcmeConfig};
+            use tokio_stream::StreamExt;
+            if cache.is_none() {
+                eprintln!(
+                    "tmuxsnitch: warning — no --acme-cache; certificate + account are re-issued \
+                     every run (Let's Encrypt will rate-limit you). Set --acme-cache DIR."
+                );
+            }
+            let mut acme = AcmeConfig::new(domains.clone())
+                .directory_lets_encrypt(production)
+                .cache_option(cache.map(DirCache::new));
+            if let Some(e) = email {
+                acme = acme.contact_push(format!("mailto:{e}"));
+            }
+            let mut state = acme.state();
+            let acceptor = state.axum_acceptor(state.default_rustls_config());
+            // ACME (challenge, issuance, renewal) only advances while this stream is
+            // polled — drive it forever on its own task.
+            tokio::spawn(async move {
+                while let Some(ev) = state.next().await {
+                    match ev {
+                        Ok(ok) => eprintln!("tmuxsnitch acme: {ok:?}"),
+                        Err(err) => eprintln!("tmuxsnitch acme error: {err}"),
+                    }
+                }
+            });
+            let std_listener = listener.into_std()?;
+            let env = if production { "production" } else { "staging" };
+            println!("tmuxsnitch hub at https://{local}/ (ACME {env}: {domains:?})");
+            axum_server::from_tcp(std_listener)?
+                .acceptor(acceptor)
+                .serve(app.into_make_service())
+                .await?;
+        }
+    }
     Ok(())
 }
 
