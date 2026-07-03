@@ -210,7 +210,7 @@ fn screen_thread(
                 // attributes/cursor state, so reset and clear before the notice —
                 // we don't know what state the screen is in.
                 let _ = out.write_all(b"\x1b[0m\x1b[?25h\x1b[2J\x1b[H");
-                let _ = write!(out, "\x1b[33mtmuxsnitch: {msg}\x1b[0m\r\n");
+                let _ = write!(out, "\x1b[33mshellglass: {msg}\x1b[0m\r\n");
                 let _ = out.flush();
             }
             Some(Msg::HubUp) if !connected => {

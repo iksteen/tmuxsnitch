@@ -9,18 +9,18 @@ RUN cargo build --release --locked
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd -r -u 10001 tmuxsnitch \
-    && mkdir /data && chown tmuxsnitch /data
-COPY --from=build /src/target/release/tmuxsnitch /usr/local/bin/tmuxsnitch
+    && useradd -r -u 10001 shellglass \
+    && mkdir /data && chown shellglass /data
+COPY --from=build /src/target/release/shellglass /usr/local/bin/shellglass
 
 # ACME cache lives here — mount a named volume at /data to keep the account +
 # certificate across restarts (pass --acme-cache /data/acme).
 VOLUME /data
-USER tmuxsnitch
+USER shellglass
 EXPOSE 443
-ENTRYPOINT ["tmuxsnitch"]
+ENTRYPOINT ["shellglass"]
 # Override with your own flags, e.g.:
-#   docker run -p 443:443 -v tmuxsnitch-acme:/data IMAGE \
+#   docker run -p 443:443 -v shellglass-acme:/data IMAGE \
 #     --serve --bind 0.0.0.0:443 --allow <ID> \
 #     --acme-domain hub.example.com --acme-email you@example.com \
 #     --acme-cache /data/acme --acme-production

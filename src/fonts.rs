@@ -105,7 +105,7 @@ pub fn collect_fonts(config: &Config) -> Vec<FontFile> {
             match load_font_file(&family, path) {
                 Ok(f) => Some(f),
                 Err(e) => {
-                    eprintln!("tmuxsnitch: skipping font {family:?}: {e:#}");
+                    eprintln!("shellglass: skipping font {family:?}: {e:#}");
                     None
                 }
             }
@@ -122,7 +122,7 @@ pub fn collect_fonts(config: &Config) -> Vec<FontFile> {
             // hosts; don't nag about it. Anything the user configured, do warn.
             if f.is_none() && family != crate::config::DEFAULT_SYMBOL_FONT {
                 eprintln!(
-                    "tmuxsnitch: font {family:?} not found on this host — viewers without it \
+                    "shellglass: font {family:?} not found on this host — viewers without it \
                      installed will see fallback glyphs"
                 );
             }

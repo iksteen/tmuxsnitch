@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>tmuxsnitch</title>
+<title>shellglass</title>
 <!-- Tokens filled at serve time (double-brace style/screen/script): style = terminal
      CSS + @font-face; screen = the live #screen div the SSE updater swaps; script = that
      updater. Everything else is chrome you can edit freely. No external assets. -->
@@ -55,14 +55,14 @@ footer { max-width:1140px; margin:0 auto; padding:24px clamp(16px,5vw,40px) 48px
 </head>
 <body>
 <nav class="nav">
-  <span class="brand"><span class="dot"></span><span class="grad">tmuxsnitch</span></span>
+  <span class="brand"><span class="dot"></span><span class="grad">shellglass</span></span>
   <span class="meta">live terminal mirror</span>
 </nav>
 <main class="stage">
   <div class="glow"></div>
   <div class="panel">{{screen}}</div>
 </main>
-<footer>Live over SSE — <a href="https://github.com/iksteen/tmuxsnitch">tmuxsnitch</a>.</footer>
+<footer>Live over SSE — <a href="https://github.com/iksteen/shellglass">shellglass</a>.</footer>
 {{script}}
 </body>
 </html>

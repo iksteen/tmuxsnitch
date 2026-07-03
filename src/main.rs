@@ -1,4 +1,4 @@
-//! tmuxsnitch — mirror a tmux window's full pane layout as live HTML.
+//! shellglass — mirror a tmux window's full pane layout as live HTML.
 
 mod client;
 mod config;
@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Parser, Debug)]
-#[command(name = "tmuxsnitch", about = "Mirror a tmux window as live HTML")]
+#[command(name = "shellglass", about = "Mirror a tmux window as live HTML")]
 struct Args {
     /// tmux target (e.g. `session` or `session:window`); default = current window.
     #[arg(short, long)]
@@ -57,7 +57,7 @@ struct Args {
 
     /// Secret key for `--push`. Its `argon2id` hash is the shareable session id.
     /// (allow_hyphen_values: a secret may legitimately start with `-`.)
-    #[arg(long, env = "TMUXSNITCH_KEY", allow_hyphen_values = true)]
+    #[arg(long, env = "SHELLGLASS_KEY", allow_hyphen_values = true)]
     key: Option<String>,
 
     /// Print the session id for `--key` and exit (to add to a hub's `--allow`).
@@ -134,7 +134,7 @@ async fn main() -> Result<()> {
 
     // Helper: print a key's session id (for a hub operator's --allow list) and exit.
     if args.print_id {
-        let key = args.key.context("--print-id requires --key (or TMUXSNITCH_KEY)")?;
+        let key = args.key.context("--print-id requires --key (or SHELLGLASS_KEY)")?;
         println!("{}", proto::session_id(&key));
         return Ok(());
     }
@@ -145,7 +145,7 @@ async fn main() -> Result<()> {
         let allowed: std::collections::HashSet<String> = args.allow.into_iter().collect();
         if allowed.is_empty() {
             eprintln!(
-                "tmuxsnitch: warning — no --allow session ids; the hub will reject all pushes (403)"
+                "shellglass: warning — no --allow session ids; the hub will reject all pushes (403)"
             );
         }
         serve_hub(allowed, &args.bind, tls).await?;
@@ -172,13 +172,13 @@ async fn main() -> Result<()> {
     if let Some(url) = args.push {
         let key = args
             .key
-            .context("--push requires --key (or the TMUXSNITCH_KEY env var)")?;
+            .context("--push requires --key (or the SHELLGLASS_KEY env var)")?;
         // Print the view URL *before* starting the backend: a PTY backend switches
         // the terminal to raw mode, so anything printed after would land in — and
         // corrupt — the mirrored session.
         let id = proto::session_id(&key);
         let base = url.trim_end_matches('/');
-        println!("tmuxsnitch: pushing live to {base}; view at {base}/s/{id}");
+        println!("shellglass: pushing live to {base}; view at {base}/s/{id}");
         let (rx, notifier) = start_backend(interactive, &args.exec, args.target.clone(), config.clone(), resolver)?;
         return client::run(url, key, id, config, fonts, template, rx, notifier).await;
     }
@@ -189,13 +189,13 @@ async fn main() -> Result<()> {
     // Print the URL before a PTY backend switches the terminal to raw mode.
     if interactive {
         println!(
-            "tmuxsnitch: mirroring `{}` (pty) at http://{}/",
+            "shellglass: mirroring `{}` (pty) at http://{}/",
             args.exec.join(" "),
             listener.local_addr()?
         );
     } else {
         println!(
-            "tmuxsnitch: mirroring tmux target {:?} (live) at http://{}/",
+            "shellglass: mirroring tmux target {:?} (live) at http://{}/",
             args.target.as_deref().unwrap_or("<current>"),
             listener.local_addr()?
         );
@@ -251,7 +251,7 @@ async fn serve_hub(
     let app = hub::app(hub::HubState::new(allowed, base));
     match tls {
         Tls::None => {
-            println!("tmuxsnitch hub at http://{local}/");
+            println!("shellglass hub at http://{local}/");
             axum::serve(listener, app).await?;
         }
         Tls::Static { cert, key } => {
@@ -260,7 +260,7 @@ async fn serve_hub(
                 .await
                 .with_context(|| format!("loading TLS cert {cert:?} + key {key:?}"))?;
             let std_listener = listener.into_std()?;
-            println!("tmuxsnitch hub at https://{local}/");
+            println!("shellglass hub at https://{local}/");
             axum_server::from_tcp_rustls(std_listener, config)?
                 .serve(app.into_make_service())
                 .await?;
@@ -270,7 +270,7 @@ async fn serve_hub(
             use tokio_stream::StreamExt;
             if cache.is_none() {
                 eprintln!(
-                    "tmuxsnitch: warning — no --acme-cache; certificate + account are re-issued \
+                    "shellglass: warning — no --acme-cache; certificate + account are re-issued \
                      every run (Let's Encrypt will rate-limit you). Set --acme-cache DIR."
                 );
             }
@@ -287,14 +287,14 @@ async fn serve_hub(
             tokio::spawn(async move {
                 while let Some(ev) = state.next().await {
                     match ev {
-                        Ok(ok) => eprintln!("tmuxsnitch acme: {ok:?}"),
-                        Err(err) => eprintln!("tmuxsnitch acme error: {err}"),
+                        Ok(ok) => eprintln!("shellglass acme: {ok:?}"),
+                        Err(err) => eprintln!("shellglass acme error: {err}"),
                     }
                 }
             });
             let std_listener = listener.into_std()?;
             let env = if production { "production" } else { "staging" };
-            println!("tmuxsnitch hub at https://{local}/ (ACME {env}: {domains:?})");
+            println!("shellglass hub at https://{local}/ (ACME {env}: {domains:?})");
             axum_server::from_tcp(std_listener)?
                 .acceptor(acceptor)
                 .serve(app.into_make_service())

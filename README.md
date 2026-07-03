@@ -1,45 +1,46 @@
-# tmuxsnitch
+# shellglass
 
-Mirror a **tmux** window's full pane layout as live **HTML** in your browser, with
-Kitty-style `symbol_map` font overrides (map Unicode codepoint ranges to specific
-fonts, e.g. Nerd Font glyph ranges).
+A live glass over your shell: mirror a terminal session as live **HTML** in your browser.
+Rendering is always **live** — terminal state is kept in a long-lived vt100 parser and
+pushed to the browser over SSE, with no polling and no per-tick subprocess — and carries
+Kitty-style `symbol_map` font overrides (map Unicode codepoint ranges to specific fonts,
+e.g. Nerd Font glyph ranges).
 
-Rendering is always **live**: a persistent `tmux -C` control-mode client is attached
-once, each pane's terminal state is kept in a long-lived vt100 parser and updated from
-tmux's incremental `%output` stream, then pushed to the browser over SSE. No polling,
-no per-tick subprocess.
+Two input backends:
 
-You can run it two ways:
+- **tmux** — attach a persistent `tmux -C` control-mode client and mirror a window's full
+  multi-pane layout, updated live from tmux's incremental `%output` stream.
+- **PTY** (`--exec`) — run any interactive command in a pseudo-terminal (the `script(1)`
+  model): the command runs in your terminal, the browser watches. No tmux; one pane.
 
-- **Standalone** — mirror local tmux to a local browser (one process).
-- **Hub + client** — a client streams its rendered frames to a remote **hub**, which
-  hosts the session at a URL. Good for sharing a session off-box.
+Two ways to serve it:
 
-The input backend is swappable. Instead of tmux, `--exec` mirrors an **interactive
-command in a PTY** — the `script(1)` model: the command runs in your terminal and the
-browser watches. No tmux needed; one command, no panes.
+- **Standalone** — mirror to a local browser (one process).
+- **Hub + client** — a client streams its rendered frames to a remote **hub** that hosts
+  the session at a URL. Good for sharing off-box.
 
 ```sh
-tmuxsnitch --exec bash -l                 # standalone: work in this shell, watch at :8080
-tmuxsnitch --push https://hub … --key … --exec bash   # or stream it to a hub
+shellglass --target work                              # mirror tmux session "work", watch at :8080
+shellglass --exec bash -l                             # or mirror a PTY: work in this shell, watch it
+shellglass --push https://hub … --key … --exec bash  # or stream it to a hub
 ```
 
-`--exec` takes the command plus its args, so put it **last**. The terminal is switched to
-raw mode for the session and restored when the command exits (which also quits
-tmuxsnitch). Unix only.
+For `--exec`, the command plus its args go **last**. The terminal is switched to raw mode
+for the session and restored when the command exits (which also quits shellglass). Unix
+only.
 
 ## Build
 
 ```sh
 cargo build --release
-# binary at ./target/release/tmuxsnitch  (examples below use it)
+# binary at ./target/release/shellglass  (examples below use it)
 ```
 
 ## Quickstart: standalone (one shell)
 
 ```sh
 tmux new-session -d -s demo                       # a session to mirror
-./target/release/tmuxsnitch --target demo --bind 127.0.0.1:8080
+./target/release/shellglass --target demo --bind 127.0.0.1:8080
 # open http://127.0.0.1:8080/
 ```
 
@@ -55,10 +56,10 @@ with `--allow`.
 ```sh
 # 1. pick a secret and compute its session id (needed for the hub's --allow)
 SECRET='change-me-to-a-long-random-secret'
-ID=$(./target/release/tmuxsnitch --key "$SECRET" --print-id)
+ID=$(./target/release/shellglass --key "$SECRET" --print-id)
 
 # 2. run the hub, allowing that id (repeat --allow per client)
-./target/release/tmuxsnitch --serve --bind 127.0.0.1:8080 --allow "$ID"
+./target/release/shellglass --serve --bind 127.0.0.1:8080 --allow "$ID"
 ```
 
 The hub needs no tmux and no config — it just relays what clients push.
@@ -70,14 +71,14 @@ For access from other machines, bind `0.0.0.0:8080` and use the host's address.
 tmux new-session -d -s demo                       # skip if you have a session
 
 # same secret as the hub was configured for
-export TMUXSNITCH_KEY='change-me-to-a-long-random-secret'
-./target/release/tmuxsnitch --push http://127.0.0.1:8080 --target demo
+export SHELLGLASS_KEY='change-me-to-a-long-random-secret'
+./target/release/shellglass --push http://127.0.0.1:8080 --target demo
 ```
 
 The client prints its view URL on startup:
 
 ```
-tmuxsnitch: pushing live to http://127.0.0.1:8080; view at http://127.0.0.1:8080/s/<id>
+shellglass: pushing live to http://127.0.0.1:8080; view at http://127.0.0.1:8080/s/<id>
 ```
 
 Open that `/s/<id>` URL in a browser. Viewing needs only the id (in the URL); pushing
@@ -98,7 +99,7 @@ needs the secret. A client whose key isn't on the hub's `--allow` list is reject
 | `--serve` | hub | run as a hub (no tmux/config needed) |
 | `--allow <id>` | hub | a session id permitted to push; repeat per client. Others get `403` |
 | `--push <url>` | client | hub base URL to push to |
-| `--key <secret>` | client, `--print-id` | secret key (or `TMUXSNITCH_KEY` env var) |
+| `--key <secret>` | client, `--print-id` | secret key (or `SHELLGLASS_KEY` env var) |
 | `--print-id` | — | print the session id for `--key` and exit |
 | `--tls-cert <path>` / `--tls-key <path>` | hub | serve HTTPS with your own PEM cert chain + key |
 | `--acme-domain <d>` | hub | auto-obtain a cert via ACME/Let's Encrypt (repeat per domain) |
@@ -119,6 +120,9 @@ tmux -C (control mode)  ── %output ─►  per-pane vt100 parsers (seeded on
   → HTML (absolute-positioned panes, coalesced <span> runs)
   → SSE fragment on a watch channel  → browser swaps #screen
 ```
+
+The `--exec` PTY backend joins this pipeline at the vt100-parser stage — one parser, one
+pane — so everything downstream (grid → HTML → SSE) is shared with the tmux path.
 
 Live tracking follows the target session's **current window** and needs the tmux server
 running at launch. Attaching a control-mode client sizes it to the current window so it
@@ -143,7 +147,7 @@ installed system-wide (it's part of the standard Nerd Fonts packages). Override
 `default_font` to use a different text font or symbol font.
 
 **Fonts are served, so viewers render them without a local install.** Every family
-referenced by `default_font`/`symbol_map` is located on the host running tmuxsnitch —
+referenced by `default_font`/`symbol_map` is located on the host running shellglass —
 via [`fontdb`] (a pure-Rust, cross-platform system font database; Linux, macOS and
 Windows, no subprocess), or an explicit `[fonts."Name"].path` — its file read once at
 startup, and served: standalone at `/fonts/<i>`, the hub **per
@@ -203,14 +207,14 @@ custom themes work off-box too.
 
   ```sh
   # your own certificate
-  tmuxsnitch --serve --bind 0.0.0.0:443 --allow "$ID" \
+  shellglass --serve --bind 0.0.0.0:443 --allow "$ID" \
     --tls-cert /etc/ssl/hub.crt --tls-key /etc/ssl/hub.key
 
   # or automatic Let's Encrypt (needs a public DNS name resolving to this host,
   # and port 443 reachable — the TLS-ALPN-01 challenge is served on the same socket)
-  tmuxsnitch --serve --bind 0.0.0.0:443 --allow "$ID" \
+  shellglass --serve --bind 0.0.0.0:443 --allow "$ID" \
     --acme-domain hub.example.com --acme-email you@example.com \
-    --acme-cache /var/lib/tmuxsnitch/acme --acme-production
+    --acme-cache /var/lib/shellglass/acme --acme-production
   ```
 
   ACME defaults to Let's Encrypt **staging** (untrusted certs, generous rate limits)
@@ -225,6 +229,7 @@ custom themes work off-box too.
 
 ## Status
 
-Control-mode live rendering, standalone + client/hub push, single active window, full
-pane layout, optional hub TLS (own cert or ACME/Let's Encrypt). Not yet: scrollback,
-multi-window/session tab bar, window switching within a session.
+Two backends — tmux control-mode (full pane layout, single active window) and a PTY
+(`--exec`, one pane) — with live rendering, standalone + client/hub push, viewer
+templating (default + CRT themes), and optional hub TLS (own cert or ACME/Let's Encrypt).
+Not yet: scrollback, multi-window/session tab bar, window switching within a session.

@@ -82,7 +82,7 @@ pub async fn run(
                 // Transient — let the next register decide if it's a real outage, so
                 // a quick reconnect doesn't flash a pause in PTY mode.
                 if notifier.is_none() {
-                    eprintln!("tmuxsnitch: push connection dropped; reconnecting");
+                    eprintln!("shellglass: push connection dropped; reconnecting");
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
@@ -95,7 +95,7 @@ pub async fn run(
 fn report_down(notifier: &Option<crate::pty::Notifier>, msg: &str) {
     match notifier {
         Some(n) => n.hub_down(msg),
-        None => eprintln!("tmuxsnitch: {msg}"),
+        None => eprintln!("shellglass: {msg}"),
     }
 }
 

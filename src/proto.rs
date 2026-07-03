@@ -37,13 +37,13 @@ pub struct RegisterBody {
 }
 
 /// Header carrying the secret key on `/register` and `/stream`.
-pub const KEY_HEADER: &str = "x-tmuxsnitch-key";
+pub const KEY_HEADER: &str = "x-shellglass-key";
 
 /// Fixed application salt. The id must be a pure function of the secret (client
 /// and hub derive it independently and must agree), so the salt can't be random
 /// or per-hash — it's a constant. Memory-hardness, not the salt, is what slows a
 /// brute force here.
-const SALT: &[u8] = b"tmuxsnitch/session-id/v1";
+const SALT: &[u8] = b"shellglass/session-id/v1";
 
 /// Underivable session id for a secret key: Argon2id (memory- and compute-hard)
 /// rendered as lowercase hex. Memory-hardness makes brute-forcing a weak secret

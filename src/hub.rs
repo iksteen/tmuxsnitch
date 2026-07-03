@@ -150,7 +150,7 @@ async fn register(
             // restart) — announce where to watch it. Stream reconnects re-hit the
             // Some branch, so this doesn't spam. Honor reverse-proxy headers so the
             // URL matches the public address, not the hub's internal bind.
-            println!("tmuxsnitch: session connected — view at {}/s/{id}", view_base(&headers, &st.base));
+            println!("shellglass: session connected — view at {}/s/{id}", view_base(&headers, &st.base));
         }
     }
     (StatusCode::OK, id).into_response()
@@ -235,7 +235,7 @@ async fn events(State(st): State<HubState>, Path(id): Path<String>) -> Response 
 }
 
 async fn index() -> Html<&'static str> {
-    Html("<p style=\"font-family:monospace\">tmuxsnitch hub — open /s/&lt;session-id&gt;</p>")
+    Html("<p style=\"font-family:monospace\">shellglass hub — open /s/&lt;session-id&gt;</p>")
 }
 
 #[cfg(test)]

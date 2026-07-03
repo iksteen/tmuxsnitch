@@ -43,8 +43,8 @@ jobs:
           fi
 
       - name: Package
-        run: tar -czf tmuxsnitch-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release tmuxsnitch
+        run: tar -czf shellglass-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release shellglass
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: tmuxsnitch-${{ matrix.target }}.tar.gz
+          files: shellglass-${{ matrix.target }}.tar.gz

@@ -1,4 +1,4 @@
-# tmuxsnitch example config. Pass with `--config config.toml`.
+# shellglass example config. Pass with `--config config.toml`.
 
 # Base font: one family, or a fallback stack tried in order. With a list, the
 # browser picks per character the first family that has the glyph — list a Nerd

@@ -96,7 +96,7 @@ pub fn banner(msg: &str) -> String {
     let esc = msg.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
     format!(
         "<div style=\"color:#ff6b6b;font-family:monospace;padding:8px;\">\
-         tmuxsnitch: {esc}</div>"
+         shellglass: {esc}</div>"
     )
 }
 
