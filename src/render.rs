@@ -144,7 +144,7 @@ fn render_row(
 
         // Symbol cells (font override) render as a scaled SVG in their own box;
         // they never coalesce, so flush any pending text run first.
-        if let Some(font) = cell_font(cell, resolver, config) {
+        if let Some(font) = svg_font(cell, resolver, config) {
             flush_text_run(out, &run_style, cols, &mut text);
             run_style = None;
             cols = 0;
@@ -207,6 +207,19 @@ fn emit_symbol_cell(out: &mut String, cell: &StyledCell, is_cursor: bool, w: u16
 /// adjacent segments tile without gaps; everything else scales proportionally.
 fn is_fill_glyph(c: char) -> bool {
     ('\u{E0B0}'..='\u{E0D4}').contains(&c)
+}
+
+/// Font stack for rendering `cell` as a scaled SVG glyph, or `None` for plain text.
+/// A `symbol_map` override wins. Otherwise powerline *fill* separators still need
+/// SVG cell-locking even with no `symbol_map`: rendered as text their glyph is
+/// wider than a cell and gets clipped to a block, so route them through the base
+/// fallback stack (the browser picks whichever family has the glyph).
+fn svg_font(cell: &StyledCell, resolver: &Resolver, config: &Config) -> Option<String> {
+    if let Some(font) = cell_font(cell, resolver, config) {
+        return Some(font);
+    }
+    let first = cell.text.chars().next()?;
+    is_fill_glyph(first).then(|| font_stack(config))
 }
 
 /// Resolved override font stack for a cell, or `None` to use the base font.
@@ -424,6 +437,24 @@ mod tests {
             css.contains("font-family:'Menlo','Symbols Nerd Font Mono',monospace;"),
             "font stack missing/ordered wrong: {css}"
         );
+    }
+
+    #[test]
+    fn powerline_separator_svg_scaled_without_symbol_map() {
+        // With no symbol_map (the default fallback setup), a fill separator must
+        // still go through the stretch-to-fill SVG path — otherwise its glyph is
+        // clipped to a block. It renders in a 1ch box with a base fallback stack.
+        let cfg = Config::default();
+        let res = Resolver::build(&cfg).unwrap();
+        let html = render_fragment(&window_from("\u{E0B0}", 2, 1), &cfg, &res);
+        assert!(
+            html.contains("preserveAspectRatio=\"none\""),
+            "separator not SVG stretch-filled: {html}"
+        );
+        assert!(html.contains("<svg viewBox=\"0 0 14 14\""), "no SVG glyph box: {html}");
+        // A plain letter next to it stays plain text (not SVG).
+        let plain = render_fragment(&window_from("a", 2, 1), &cfg, &res);
+        assert!(!plain.contains("<svg"), "plain text should not be SVG: {plain}");
     }
 
     #[test]
