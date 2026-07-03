@@ -10,9 +10,9 @@
 
 use crate::config::Config;
 use crate::fonts::{self, FontFile};
-use crate::proto::{frame_encode, RegisterBody, KEY_HEADER};
+use crate::proto::{KEY_HEADER, RegisterBody, frame_encode};
 use crate::render;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,7 +40,11 @@ pub async fn run(
     // prefix into the @font-face CSS and upload the font bytes alongside it.
     let font_css = render::font_face_css(&fonts, &format!("/s/{id}/fonts/"));
     let css = render::head_css(&font_css, &config);
-    let reg = RegisterBody { css, template: (*template).clone(), fonts: fonts::font_assets(&fonts) };
+    let reg = RegisterBody {
+        css,
+        template: (*template).clone(),
+        fonts: fonts::font_assets(&fonts),
+    };
     let reg_body = Bytes::from(serde_json::to_vec(&reg).context("encoding register payload")?);
 
     let mut first = true;
@@ -79,7 +83,10 @@ pub async fn run(
             }
             Reg::Rejected(s) => {
                 if !down {
-                    report_down(&notifier, &format!("hub rejected the request (HTTP {s}); retrying"));
+                    report_down(
+                        &notifier,
+                        &format!("hub rejected the request (HTTP {s}); retrying"),
+                    );
                     down = true;
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;

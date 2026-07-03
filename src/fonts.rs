@@ -146,7 +146,12 @@ fn load_font_file(family: &str, path: &Path) -> Result<FontFile> {
             (bytes, mime_for(format), format)
         }
     };
-    Ok(FontFile { family: family.to_string(), mime, format, bytes })
+    Ok(FontFile {
+        family: family.to_string(),
+        mime,
+        format,
+        bytes,
+    })
 }
 
 /// Find the installed file for family `name` via fontdb and return servable bytes.
@@ -160,7 +165,11 @@ fn fontdb_locate(db: &Database, name: &str) -> Option<(Vec<u8>, &'static str, &'
         style: Style::Normal,
     })?;
     let info = db.face(id)?;
-    if !info.families.iter().any(|(f, _)| f.eq_ignore_ascii_case(name)) {
+    if !info
+        .families
+        .iter()
+        .any(|(f, _)| f.eq_ignore_ascii_case(name))
+    {
         return None;
     }
     let (bytes, format) = db.with_face_data(id, |data, idx| sfnt_face(data, idx))??;
@@ -197,16 +206,36 @@ fn concrete_generic(db: &Database, generic: &str) -> Option<String> {
     }
     let candidates: &[&str] = match generic {
         "monospace" => &[
-            "Menlo", "DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono", "Consolas",
-            "Cascadia Mono", "Courier New",
+            "Menlo",
+            "DejaVu Sans Mono",
+            "Noto Sans Mono",
+            "Liberation Mono",
+            "Consolas",
+            "Cascadia Mono",
+            "Courier New",
         ],
-        "serif" => &["Times New Roman", "Times", "DejaVu Serif", "Noto Serif", "Liberation Serif"],
-        "sans-serif" => &["Helvetica", "Arial", "DejaVu Sans", "Noto Sans", "Liberation Sans"],
+        "serif" => &[
+            "Times New Roman",
+            "Times",
+            "DejaVu Serif",
+            "Noto Serif",
+            "Liberation Serif",
+        ],
+        "sans-serif" => &[
+            "Helvetica",
+            "Arial",
+            "DejaVu Sans",
+            "Noto Sans",
+            "Liberation Sans",
+        ],
         "cursive" => &["Apple Chancery", "Comic Sans MS"],
         "fantasy" => &["Papyrus", "Impact"],
         _ => return None,
     };
-    candidates.iter().find(|c| family_installed(db, c)).map(|c| c.to_string())
+    candidates
+        .iter()
+        .find(|c| family_installed(db, c))
+        .map(|c| c.to_string())
 }
 
 /// The concrete family fontconfig resolves a CSS generic to — i.e. the OS/user
@@ -228,8 +257,11 @@ fn fontconfig_default(generic: &str) -> Option<String> {
 }
 
 fn family_installed(db: &Database, name: &str) -> bool {
-    db.faces()
-        .any(|f| f.families.iter().any(|(fam, _)| fam.eq_ignore_ascii_case(name)))
+    db.faces().any(|f| {
+        f.families
+            .iter()
+            .any(|(fam, _)| fam.eq_ignore_ascii_case(name))
+    })
 }
 
 /// Extract face `index` from `data` (a TTF/OTF, or one face of a TTC) as a
@@ -303,7 +335,11 @@ fn sfnt_face(data: &[u8], index: u32) -> Option<(Vec<u8>, &'static str)> {
         }
     }
 
-    let format = if sfnt_ver == b"OTTO" { "opentype" } else { "truetype" };
+    let format = if sfnt_ver == b"OTTO" {
+        "opentype"
+    } else {
+        "truetype"
+    };
     Some((out, format))
 }
 
@@ -400,11 +436,20 @@ mod tests {
         let mut cfg = Config::default();
         cfg.default_font = vec!["monospace".into(), "Menlo".into()];
         cfg.symbol_map = vec![
-            SymbolMap { ranges: vec!["U+E0B0".into()], font: "Menlo".into() }, // dup
-            SymbolMap { ranges: vec!["U+F000".into()], font: "NF".into() },
+            SymbolMap {
+                ranges: vec!["U+E0B0".into()],
+                font: "Menlo".into(),
+            }, // dup
+            SymbolMap {
+                ranges: vec!["U+F000".into()],
+                font: "NF".into(),
+            },
         ];
         // monospace dropped (generic); Menlo appears once despite two references.
-        assert_eq!(referenced_families(&cfg), vec!["Menlo".to_string(), "NF".to_string()]);
+        assert_eq!(
+            referenced_families(&cfg),
+            vec!["Menlo".to_string(), "NF".to_string()]
+        );
     }
 
     #[test]
@@ -436,7 +481,11 @@ mod tests {
         assert_eq!(table(b"cmap"), cmap);
         assert_eq!(table(b"head").len(), 54);
         // With checkSumAdjustment applied, the whole file sums to the magic constant.
-        assert_eq!(sfnt_checksum(&out), 0xB1B0_AFBA, "head checkSumAdjustment wrong");
+        assert_eq!(
+            sfnt_checksum(&out),
+            0xB1B0_AFBA,
+            "head checkSumAdjustment wrong"
+        );
     }
 
     /// Lay out a single-face TTC with table offsets absolute from file start.
@@ -479,7 +528,10 @@ mod tests {
         let first = &cfg.default_font[0];
         assert!(!first.is_empty());
         if first != "monospace" {
-            assert!(!GENERICS.contains(&first.as_str()), "resolved to another generic: {first}");
+            assert!(
+                !GENERICS.contains(&first.as_str()),
+                "resolved to another generic: {first}"
+            );
         }
         assert_eq!(cfg.default_font[1], "Symbols Nerd Font Mono");
     }
@@ -493,12 +545,20 @@ mod tests {
         cfg.default_font = vec!["monospace".into(), "Definitely Not A Font 9271".into()];
         cfg.fonts.insert(
             "Ghost".into(),
-            FontSource { path: Some("/no/such/font.ttf".into()), system: None },
+            FontSource {
+                path: Some("/no/such/font.ttf".into()),
+                system: None,
+            },
         );
-        cfg.symbol_map = vec![SymbolMap { ranges: vec!["U+F000".into()], font: "Ghost".into() }];
+        cfg.symbol_map = vec![SymbolMap {
+            ranges: vec!["U+F000".into()],
+            font: "Ghost".into(),
+        }];
         let fonts = collect_fonts(&cfg);
         assert!(
-            fonts.iter().all(|f| f.family != "Definitely Not A Font 9271" && f.family != "Ghost"),
+            fonts
+                .iter()
+                .all(|f| f.family != "Definitely Not A Font 9271" && f.family != "Ghost"),
             "unlocatable/missing fonts must not be collected"
         );
     }

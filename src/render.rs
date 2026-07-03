@@ -74,7 +74,10 @@ pub fn page(template: &str, head_css: &str, fragment: &str, script: &str) -> Str
     template
         .replace("{{style}}", &format!("<style>\n{head_css}</style>"))
         .replace("{{script}}", &format!("<script>\n{script}\n</script>"))
-        .replace("{{screen}}", &format!("<div id=\"screen\">{fragment}</div>"))
+        .replace(
+            "{{screen}}",
+            &format!("<div id=\"screen\">{fragment}</div>"),
+        )
 }
 
 /// SSE updater: subscribe to `events_path` and swap `#screen` on each push.
@@ -88,12 +91,20 @@ pub fn sse_script(events_path: &str) -> String {
 
 /// Standalone page (local tmux → local viewer): streams live from `/events`.
 pub fn render_page(template: &str, fragment: &str, font_css: &str, config: &Config) -> String {
-    page(template, &head_css(font_css, config), fragment, &sse_script("/events"))
+    page(
+        template,
+        &head_css(font_css, config),
+        fragment,
+        &sse_script("/events"),
+    )
 }
 
 /// Red in-page error banner (shared by every mode's failure path).
 pub fn banner(msg: &str) -> String {
-    let esc = msg.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let esc = msg
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
     format!(
         "<div style=\"color:#ff6b6b;font-family:monospace;padding:8px;\">\
          shellglass: {esc}</div>"
@@ -124,7 +135,12 @@ pub fn render_fragment(window: &Window, config: &Config, resolver: &Resolver) ->
     out
 }
 
-fn render_pane_body(out: &mut String, pane: &crate::model::Pane, config: &Config, resolver: &Resolver) {
+fn render_pane_body(
+    out: &mut String,
+    pane: &crate::model::Pane,
+    config: &Config,
+    resolver: &Resolver,
+) {
     let cursor = pane.grid.cursor;
     for (r, row) in pane.grid.rows.iter().enumerate() {
         let cursor_col = match cursor {
@@ -168,7 +184,11 @@ fn render_row(
                 run_style = Some(style);
                 cols = 0;
             }
-            let ch = if cell.text.is_empty() { " " } else { &cell.text };
+            let ch = if cell.text.is_empty() {
+                " "
+            } else {
+                &cell.text
+            };
             escape_into(&mut text, ch);
             cols += w;
         }
@@ -184,7 +204,10 @@ fn flush_text_run(out: &mut String, style: &Option<String>, cols: u16, text: &mu
         return;
     }
     let s = style.as_deref().unwrap_or("");
-    let _ = write!(out, "<span class=\"run\" style=\"width:{cols}ch;{s}\">{text}</span>");
+    let _ = write!(
+        out,
+        "<span class=\"run\" style=\"width:{cols}ch;{s}\">{text}</span>"
+    );
     text.clear();
 }
 
@@ -282,7 +305,11 @@ fn cell_box_style(cell: &StyledCell, is_cursor: bool) -> String {
 /// last resort appended unless already present. The browser resolves each glyph
 /// against this stack, giving Kitty-style per-character fallback for free.
 fn font_stack(config: &Config) -> String {
-    let mut fams: Vec<String> = config.default_font.iter().map(|f| quote_family(f)).collect();
+    let mut fams: Vec<String> = config
+        .default_font
+        .iter()
+        .map(|f| quote_family(f))
+        .collect();
     if !config.default_font.iter().any(|f| f == "monospace") {
         fams.push("monospace".to_string());
     }
@@ -373,7 +400,14 @@ mod tests {
             width: w,
             height: h,
             panes: vec![Pane {
-                geom: PaneGeom { id: "%0".into(), left: 0, top: 0, width: w, height: h, active: true },
+                geom: PaneGeom {
+                    id: "%0".into(),
+                    left: 0,
+                    top: 0,
+                    width: w,
+                    height: h,
+                    active: true,
+                },
                 grid,
             }],
         }
@@ -463,10 +497,16 @@ mod tests {
             html.contains("preserveAspectRatio=\"none\""),
             "separator not SVG stretch-filled: {html}"
         );
-        assert!(html.contains("<svg viewBox=\"0 0 14 14\""), "no SVG glyph box: {html}");
+        assert!(
+            html.contains("<svg viewBox=\"0 0 14 14\""),
+            "no SVG glyph box: {html}"
+        );
         // A plain letter next to it stays plain text (not SVG).
         let plain = render_fragment(&window_from("a", 2, 1), &cfg, &res);
-        assert!(!plain.contains("<svg"), "plain text should not be SVG: {plain}");
+        assert!(
+            !plain.contains("<svg"),
+            "plain text should not be SVG: {plain}"
+        );
     }
 
     #[test]
@@ -476,10 +516,17 @@ mod tests {
         // verbatim (screen is filled last and never re-scanned).
         let html = page(tmpl, "CSS", "hi {{script}} there", "JS");
         assert!(html.contains("<style>\nCSS</style>"), "{html}");
-        assert!(html.contains("<div id=\"screen\">hi {{script}} there</div>"), "{html}");
+        assert!(
+            html.contains("<div id=\"screen\">hi {{script}} there</div>"),
+            "{html}"
+        );
         assert!(html.contains("<script>\nJS\n</script>"), "{html}");
         // Exactly one real script block (the typed token wasn't expanded).
-        assert_eq!(html.matches("<script>").count(), 1, "typed token got expanded: {html}");
+        assert_eq!(
+            html.matches("<script>").count(),
+            1,
+            "typed token got expanded: {html}"
+        );
     }
 
     #[test]
@@ -493,12 +540,18 @@ mod tests {
 
     #[test]
     fn font_face_css_references_served_urls() {
-        let fonts = vec![
-            FontFile { family: "NF".into(), mime: "font/ttf", format: "truetype", bytes: vec![1, 2] },
-        ];
+        let fonts = vec![FontFile {
+            family: "NF".into(),
+            mime: "font/ttf",
+            format: "truetype",
+            bytes: vec![1, 2],
+        }];
         let css = font_face_css(&fonts, "/s/abc/fonts/");
         assert!(css.contains("font-family:'NF'"), "{css}");
-        assert!(css.contains("src:url(\"/s/abc/fonts/0\") format('truetype')"), "{css}");
+        assert!(
+            css.contains("src:url(\"/s/abc/fonts/0\") format('truetype')"),
+            "{css}"
+        );
     }
 
     #[test]
@@ -509,8 +562,19 @@ mod tests {
             width: 80,
             height: 24,
             panes: vec![Pane {
-                geom: PaneGeom { id: "%1".into(), left: 41, top: 0, width: 39, height: 24, active: false },
-                grid: Grid { cols: 39, rows: vec![vec![]], cursor: None },
+                geom: PaneGeom {
+                    id: "%1".into(),
+                    left: 41,
+                    top: 0,
+                    width: 39,
+                    height: 24,
+                    active: false,
+                },
+                grid: Grid {
+                    cols: 39,
+                    rows: vec![vec![]],
+                    cursor: None,
+                },
             }],
         };
         let html = render_fragment(&w, &cfg, &res);

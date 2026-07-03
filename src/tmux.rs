@@ -72,7 +72,11 @@ pub fn capture(target: Option<&str>) -> Result<RawWindow> {
         // lines drawn via ESC[K background fill) keep their background to the
         // pane edge instead of being trimmed.
         let capture = run(&["capture-pane", "-e", "-N", "-p", "-t", &geom.id])?;
-        panes.push(RawPane { geom, capture, cursor });
+        panes.push(RawPane {
+            geom,
+            capture,
+            cursor,
+        });
     }
 
     if panes.is_empty() {
@@ -102,7 +106,14 @@ fn parse_pane_line(line: &str) -> Option<(PaneGeom, (u16, u16))> {
     let cursor_x = it.next()?.parse().ok()?;
     let cursor_y = it.next()?.parse().ok()?;
     Some((
-        PaneGeom { id, left, top, width, height, active },
+        PaneGeom {
+            id,
+            left,
+            top,
+            width,
+            height,
+            active,
+        },
         (cursor_x, cursor_y),
     ))
 }

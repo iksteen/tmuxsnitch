@@ -7,7 +7,7 @@
 //! viewers) is the write capability.
 
 use crate::fonts::CACHE_CONTROL_FONT;
-use crate::proto::{self, session_id, KEY_HEADER};
+use crate::proto::{self, KEY_HEADER, session_id};
 use crate::render;
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Path, State};
@@ -17,14 +17,14 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
-use tokio_stream::wrappers::WatchStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::WatchStream;
 use tower_http::compression::CompressionLayer;
 
 struct Session {
@@ -103,11 +103,17 @@ fn key_of(headers: &HeaderMap) -> Option<String> {
 /// falls back to the configured base for whichever part is absent. XFF headers are
 /// comma-lists (proxy chain) — the first token is the original client-facing value.
 fn view_base(headers: &HeaderMap, configured: &str) -> String {
-    let fwd = |name| header_str(headers, name).and_then(|v| v.split(',').next()).map(str::trim);
+    let fwd = |name| {
+        header_str(headers, name)
+            .and_then(|v| v.split(',').next())
+            .map(str::trim)
+    };
     let (def_scheme, def_host) = configured
         .split_once("://")
         .map_or(("http", configured), |(s, h)| (s, h));
-    let scheme = fwd("x-forwarded-proto").filter(|s| !s.is_empty()).unwrap_or(def_scheme);
+    let scheme = fwd("x-forwarded-proto")
+        .filter(|s| !s.is_empty())
+        .unwrap_or(def_scheme);
     let host = fwd("x-forwarded-host")
         .or_else(|| header_str(headers, "host"))
         .filter(|s| !s.is_empty())
@@ -145,12 +151,23 @@ async fn register(
         }
         None => {
             let (frame, _) = watch::channel(render::banner("waiting for client…"));
-            map.insert(id.clone(), Session { css: reg.css, template: reg.template, frame, fonts });
+            map.insert(
+                id.clone(),
+                Session {
+                    css: reg.css,
+                    template: reg.template,
+                    frame,
+                    fonts,
+                },
+            );
             // First registration for this id (a new client, or after a hub
             // restart) — announce where to watch it. Stream reconnects re-hit the
             // Some branch, so this doesn't spam. Honor reverse-proxy headers so the
             // URL matches the public address, not the hub's internal bind.
-            println!("shellglass: session connected — view at {}/s/{id}", view_base(&headers, &st.base));
+            println!(
+                "shellglass: session connected — view at {}/s/{id}",
+                view_base(&headers, &st.base)
+            );
         }
     }
     (StatusCode::OK, id).into_response()
@@ -218,7 +235,11 @@ async fn view(State(st): State<HubState>, Path(id): Path<String>) -> Response {
     };
     let script = render::sse_script(&format!("/s/{id}/events"));
     // Empty template = an older client that didn't push one; use the built-in.
-    let template = if s.template.is_empty() { render::DEFAULT_TEMPLATE } else { &s.template };
+    let template = if s.template.is_empty() {
+        render::DEFAULT_TEMPLATE
+    } else {
+        &s.template
+    };
     Html(render::page(template, &s.css, &s.frame.borrow(), &script)).into_response()
 }
 
@@ -231,7 +252,9 @@ async fn events(State(st): State<HubState>, Path(id): Path<String>) -> Response 
         }
     };
     let stream = WatchStream::new(rx).map(|html| Ok::<_, Infallible>(Event::default().data(html)));
-    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 async fn index() -> Html<&'static str> {
@@ -246,8 +269,14 @@ mod tests {
     #[test]
     fn only_preregistered_keys_are_allowed() {
         let st = HubState::new(HashSet::from([session_id("good-secret")]), String::new());
-        assert!(st.allowed.contains(&session_id("good-secret")), "registered key allowed");
-        assert!(!st.allowed.contains(&session_id("other-secret")), "unregistered key rejected");
+        assert!(
+            st.allowed.contains(&session_id("good-secret")),
+            "registered key allowed"
+        );
+        assert!(
+            !st.allowed.contains(&session_id("other-secret")),
+            "unregistered key rejected"
+        );
         // An empty allowlist rejects everything (no implicit open hub).
         let empty = HubState::new(HashSet::new(), String::new());
         assert!(!empty.allowed.contains(&session_id("good-secret")));
@@ -268,7 +297,10 @@ mod tests {
         // Full XFF chain → first token of each, overriding scheme + host.
         let mut h = HeaderMap::new();
         h.insert("x-forwarded-proto", "https, http".parse().unwrap());
-        h.insert("x-forwarded-host", "hub.example.com, internal".parse().unwrap());
+        h.insert(
+            "x-forwarded-host",
+            "hub.example.com, internal".parse().unwrap(),
+        );
         h.insert("host", "internal:8080".parse().unwrap());
         assert_eq!(view_base(&h, cfg), "https://hub.example.com");
     }

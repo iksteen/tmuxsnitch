@@ -16,8 +16,8 @@ use crate::model::{Pane, PaneGeom, Window};
 use crate::{parse, render, tmux};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
@@ -70,7 +70,11 @@ fn run(
             let _ = tx.send(banner(&e.to_string()));
             // Fall through to control mode anyway: tmux may come up, or it's
             // already up and only the current window momentarily had no panes.
-            State { width: 0, height: 0, panes: Vec::new() }
+            State {
+                width: 0,
+                height: 0,
+                panes: Vec::new(),
+            }
         }
     };
 
@@ -181,7 +185,11 @@ enum Step {
 fn handle_line(line: &[u8], state: &mut State, target: Option<&str>) -> Step {
     match classify(line) {
         Event::Output { pane, data } => {
-            match state.panes.iter_mut().find(|p| p.geom.id.as_bytes() == pane) {
+            match state
+                .panes
+                .iter_mut()
+                .find(|p| p.geom.id.as_bytes() == pane)
+            {
                 Some(p) => {
                     p.parser.process(&unescape(data));
                     Step::Dirty
@@ -214,7 +222,11 @@ fn resync(target: Option<&str>) -> anyhow::Result<State> {
             geom: p.geom,
         })
         .collect();
-    Ok(State { width: raw.width, height: raw.height, panes })
+    Ok(State {
+        width: raw.width,
+        height: raw.height,
+        panes,
+    })
 }
 
 fn render_state(state: &State, config: &Config, resolver: &Resolver) -> String {
@@ -342,7 +354,10 @@ mod tests {
     #[test]
     fn classify_structural_and_exit() {
         assert!(matches!(classify(b"%layout-change @0 abc"), Event::Resync));
-        assert!(matches!(classify(b"%window-pane-changed @0 %1"), Event::Resync));
+        assert!(matches!(
+            classify(b"%window-pane-changed @0 %1"),
+            Event::Resync
+        ));
         assert!(matches!(classify(b"%exit"), Event::Exit));
         assert!(matches!(classify(b"%begin 123 0 1"), Event::Ignore));
     }

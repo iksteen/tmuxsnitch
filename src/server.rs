@@ -3,20 +3,20 @@
 //! channel; `GET /` serves the page and `GET /events` streams updates over SSE.
 
 use crate::config::Config;
-use crate::fonts::{FontFile, CACHE_CONTROL_FONT};
+use crate::fonts::{CACHE_CONTROL_FONT, FontFile};
 use crate::render;
+use axum::Router;
 use axum::extract::{Path, State};
-use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::StatusCode;
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::sync::watch;
-use tokio_stream::wrappers::WatchStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::WatchStream;
 use tower_http::compression::CompressionLayer;
 
 #[derive(Clone)]
@@ -66,5 +66,7 @@ async fn index(State(state): State<AppState>) -> Html<String> {
 async fn events(State(state): State<AppState>) -> Response {
     let stream = WatchStream::new(state.live_rx.clone())
         .map(|html| Ok::<_, Infallible>(Event::default().data(html)));
-    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }

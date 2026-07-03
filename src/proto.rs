@@ -110,7 +110,8 @@ mod tests {
         assert!(!id.contains(key), "id must not leak the key");
         assert_eq!(id.len(), 64, "argon2id 32 bytes -> 64 hex chars: {id}");
         assert!(
-            id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+            id.bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
             "id must be lowercase hex (no '-', CLI/URL safe): {id}"
         );
     }

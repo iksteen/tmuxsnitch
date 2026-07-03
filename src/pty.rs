@@ -16,11 +16,11 @@ use crate::fonts::Resolver;
 use crate::model::{Pane, PaneGeom, Window};
 use crate::render;
 use anyhow::{Context, Result};
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
@@ -65,7 +65,12 @@ pub fn start(
 ) -> Result<(watch::Receiver<String>, Notifier)> {
     let (cols, rows) = term_size().unwrap_or((80, 24));
     let pair = native_pty_system()
-        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .context("opening pty")?;
 
     let mut builder = CommandBuilder::new(&command[0]);
@@ -73,7 +78,10 @@ pub fn start(
     if std::env::var_os("TERM").is_none() {
         builder.env("TERM", "xterm-256color");
     }
-    let mut child = pair.slave.spawn_command(builder).context("spawning command")?;
+    let mut child = pair
+        .slave
+        .spawn_command(builder)
+        .context("spawning command")?;
     drop(pair.slave);
 
     let master = pair.master;
@@ -135,7 +143,12 @@ pub fn start(
                     Some(size) if size != last => {
                         last = size;
                         let (c, r) = size;
-                        let _ = master.resize(PtySize { rows: r, cols: c, pixel_width: 0, pixel_height: 0 });
+                        let _ = master.resize(PtySize {
+                            rows: r,
+                            cols: c,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        });
                         if msg_tx.send(Msg::Resize(r, c)).is_err() {
                             break;
                         }
@@ -150,7 +163,14 @@ pub fn start(
     // parser. Tees shell output immediately, renders to the browser at ≤30fps, and
     // handles hub notices with a clean pause/restore.
     std::thread::spawn(move || {
-        screen_thread(msg_rx, frame_tx, raw, new_parser(rows, cols), config, resolver)
+        screen_thread(
+            msg_rx,
+            frame_tx,
+            raw,
+            new_parser(rows, cols),
+            config,
+            resolver,
+        )
     });
 
     // When the command exits, tell the screen thread to restore the terminal + quit.
@@ -250,7 +270,14 @@ fn render_screen(parser: &vt100::Parser, config: &Config, resolver: &Resolver) -
         width: cols,
         height: rows,
         panes: vec![Pane {
-            geom: PaneGeom { id: "%0".into(), left: 0, top: 0, width: cols, height: rows, active: true },
+            geom: PaneGeom {
+                id: "%0".into(),
+                left: 0,
+                top: 0,
+                width: cols,
+                height: rows,
+                active: true,
+            },
             grid: crate::parse::grid_from_screen(screen),
         }],
     };
@@ -310,11 +337,20 @@ impl Sigwinch {
         }
         // SAFETY: poll then drain our own non-blocking pipe fd.
         unsafe {
-            let mut pfd = libc::pollfd { fd: self.read_fd, events: libc::POLLIN, revents: 0 };
+            let mut pfd = libc::pollfd {
+                fd: self.read_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
             let ms = timeout.as_millis().min(i32::MAX as u128) as libc::c_int;
             libc::poll(&mut pfd, 1, ms);
             let mut buf = [0u8; 64];
-            while libc::read(self.read_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) > 0 {}
+            while libc::read(
+                self.read_fd,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+            ) > 0
+            {}
         }
     }
 }

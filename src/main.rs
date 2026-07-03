@@ -94,7 +94,10 @@ struct Args {
 /// How the hub should terminate TLS.
 enum Tls {
     None,
-    Static { cert: PathBuf, key: PathBuf },
+    Static {
+        cert: PathBuf,
+        key: PathBuf,
+    },
     Acme {
         domains: Vec<String>,
         email: Option<String>,
@@ -134,7 +137,9 @@ async fn main() -> Result<()> {
 
     // Helper: print a key's session id (for a hub operator's --allow list) and exit.
     if args.print_id {
-        let key = args.key.context("--print-id requires --key (or SHELLGLASS_KEY)")?;
+        let key = args
+            .key
+            .context("--print-id requires --key (or SHELLGLASS_KEY)")?;
         println!("{}", proto::session_id(&key));
         return Ok(());
     }
@@ -179,7 +184,13 @@ async fn main() -> Result<()> {
         let id = proto::session_id(&key);
         let base = url.trim_end_matches('/');
         println!("shellglass: pushing live to {base}; view at {base}/s/{id}");
-        let (rx, notifier) = start_backend(interactive, &args.exec, args.target.clone(), config.clone(), resolver)?;
+        let (rx, notifier) = start_backend(
+            interactive,
+            &args.exec,
+            args.target.clone(),
+            config.clone(),
+            resolver,
+        )?;
         return client::run(url, key, id, config, fonts, template, rx, notifier).await;
     }
 
@@ -200,7 +211,13 @@ async fn main() -> Result<()> {
             listener.local_addr()?
         );
     }
-    let (live_rx, _notifier) = start_backend(interactive, &args.exec, args.target.clone(), config.clone(), resolver)?;
+    let (live_rx, _notifier) = start_backend(
+        interactive,
+        &args.exec,
+        args.target.clone(),
+        config.clone(),
+        resolver,
+    )?;
     let state = AppState {
         config,
         font_css: Arc::new(font_css),
@@ -232,11 +249,7 @@ fn start_backend(
 /// Serve the hub, terminating TLS per `tls`. Plain HTTP keeps the `SO_REUSEADDR`
 /// listener via `axum::serve`; the TLS paths hand the same reuseaddr listener to
 /// `axum-server`. ACME drives certificate issuance/renewal on a background task.
-async fn serve_hub(
-    allowed: std::collections::HashSet<String>,
-    addr: &str,
-    tls: Tls,
-) -> Result<()> {
+async fn serve_hub(allowed: std::collections::HashSet<String>, addr: &str, tls: Tls) -> Result<()> {
     let listener = bind(addr).await?;
     let local = listener.local_addr()?;
     // Public base for the view URLs the hub logs. For ACME the cert is for the
@@ -245,7 +258,10 @@ async fn serve_hub(
         Tls::None => format!("http://{local}"),
         Tls::Static { .. } => format!("https://{local}"),
         Tls::Acme { domains, .. } => {
-            format!("https://{}", domains.first().map(String::as_str).unwrap_or("localhost"))
+            format!(
+                "https://{}",
+                domains.first().map(String::as_str).unwrap_or("localhost")
+            )
         }
     };
     let app = hub::app(hub::HubState::new(allowed, base));
@@ -265,8 +281,13 @@ async fn serve_hub(
                 .serve(app.into_make_service())
                 .await?;
         }
-        Tls::Acme { domains, email, cache, production } => {
-            use rustls_acme::{caches::DirCache, AcmeConfig};
+        Tls::Acme {
+            domains,
+            email,
+            cache,
+            production,
+        } => {
+            use rustls_acme::{AcmeConfig, caches::DirCache};
             use tokio_stream::StreamExt;
             if cache.is_none() {
                 eprintln!(
@@ -319,6 +340,10 @@ async fn bind(addr: &str) -> Result<tokio::net::TcpListener> {
     }
     .context("creating socket")?;
     socket.set_reuseaddr(true)?;
-    socket.bind(sockaddr).with_context(|| format!("binding {addr}"))?;
-    socket.listen(1024).with_context(|| format!("listening on {addr}"))
+    socket
+        .bind(sockaddr)
+        .with_context(|| format!("binding {addr}"))?;
+    socket
+        .listen(1024)
+        .with_context(|| format!("listening on {addr}"))
 }

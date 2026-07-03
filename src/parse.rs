@@ -26,7 +26,10 @@ pub fn seed_parser(capture: &str, cols: u16, rows: u16, cursor: (u16, u16)) -> v
     let (col, row) = cursor;
     let pen = {
         let screen = parser.screen();
-        screen.cell(row, col).map(pen_sgr).unwrap_or_else(|| "\x1b[m".to_string())
+        screen
+            .cell(row, col)
+            .map(pen_sgr)
+            .unwrap_or_else(|| "\x1b[m".to_string())
     };
     parser.process(format!("{pen}\x1b[{};{}H", row + 1, col + 1).as_bytes());
     parser
@@ -37,19 +40,37 @@ fn pen_sgr(cell: &vt100::Cell) -> String {
     let mut s = String::from("\x1b[0");
     match cell.fgcolor() {
         vt100::Color::Default => {}
-        vt100::Color::Idx(i) => { let _ = write!(s, ";38;5;{i}"); }
-        vt100::Color::Rgb(r, g, b) => { let _ = write!(s, ";38;2;{r};{g};{b}"); }
+        vt100::Color::Idx(i) => {
+            let _ = write!(s, ";38;5;{i}");
+        }
+        vt100::Color::Rgb(r, g, b) => {
+            let _ = write!(s, ";38;2;{r};{g};{b}");
+        }
     }
     match cell.bgcolor() {
         vt100::Color::Default => {}
-        vt100::Color::Idx(i) => { let _ = write!(s, ";48;5;{i}"); }
-        vt100::Color::Rgb(r, g, b) => { let _ = write!(s, ";48;2;{r};{g};{b}"); }
+        vt100::Color::Idx(i) => {
+            let _ = write!(s, ";48;5;{i}");
+        }
+        vt100::Color::Rgb(r, g, b) => {
+            let _ = write!(s, ";48;2;{r};{g};{b}");
+        }
     }
-    if cell.bold() { s.push_str(";1"); }
-    if cell.dim() { s.push_str(";2"); }
-    if cell.italic() { s.push_str(";3"); }
-    if cell.underline() { s.push_str(";4"); }
-    if cell.inverse() { s.push_str(";7"); }
+    if cell.bold() {
+        s.push_str(";1");
+    }
+    if cell.dim() {
+        s.push_str(";2");
+    }
+    if cell.italic() {
+        s.push_str(";3");
+    }
+    if cell.underline() {
+        s.push_str(";4");
+    }
+    if cell.inverse() {
+        s.push_str(";7");
+    }
     s.push('m');
     s
 }
