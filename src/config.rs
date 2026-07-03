@@ -45,8 +45,7 @@ pub struct SymbolMap {
 #[serde(deny_unknown_fields)]
 pub struct FontSource {
     pub path: Option<PathBuf>,
-    /// Installed family to reference instead of embedding (no `@font-face`).
-    #[allow(dead_code)]
+    /// Family name to hand fontconfig when it differs from the `[fonts]` key.
     pub system: Option<String>,
 }
 

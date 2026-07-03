@@ -6,7 +6,29 @@
 //! id but cannot recover the key (and thus cannot push) from it.
 
 use argon2::Argon2;
+use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
+
+/// One font the client serves to viewers, uploaded on `/register`. The hub stores
+/// it per session and serves the bytes at `/s/<id>/fonts/<key>`, which the page's
+/// `@font-face` references — so a viewer renders the glyphs even without the font
+/// installed. Per-session storage means two clients' fonts never clash.
+#[derive(Serialize, Deserialize)]
+pub struct FontAsset {
+    /// URL-safe id, unique within the session (the font's index).
+    pub key: String,
+    pub mime: String,
+    /// base64 of the font file bytes.
+    pub b64: String,
+}
+
+/// `/register` payload: the page CSS plus the fonts it references.
+#[derive(Serialize, Deserialize)]
+pub struct RegisterBody {
+    pub css: String,
+    #[serde(default)]
+    pub fonts: Vec<FontAsset>,
+}
 
 /// Header carrying the secret key on `/register` and `/stream`.
 pub const KEY_HEADER: &str = "x-tmuxsnitch-key";

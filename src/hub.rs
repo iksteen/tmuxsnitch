@@ -10,11 +10,14 @@ use crate::proto::{self, session_id, KEY_HEADER};
 use crate::render;
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
+use axum::{Json, Router};
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
@@ -26,6 +29,9 @@ struct Session {
     css: String,
     /// Latest fragment; `watch` hands the current value to each new viewer.
     frame: watch::Sender<String>,
+    /// Fonts the client uploaded, keyed as the CSS references them (`key` → (mime,
+    /// bytes)). Scoped to this session so different clients' fonts never clash.
+    fonts: HashMap<String, (String, Vec<u8>)>,
 }
 
 #[derive(Clone)]
@@ -72,6 +78,7 @@ pub fn app(state: HubState) -> Router {
         .route("/stream", post(stream).layer(DefaultBodyLimit::disable()))
         .route("/s/{id}", get(view))
         .route("/s/{id}/events", get(events))
+        .route("/s/{id}/fonts/{key}", get(font))
         .with_state(state)
 }
 
@@ -79,21 +86,50 @@ fn key_of(headers: &HeaderMap) -> Option<String> {
     headers.get(KEY_HEADER)?.to_str().ok().map(str::to_string)
 }
 
-/// Store (or refresh) a session's CSS. Creates the session if new.
-async fn register(State(st): State<HubState>, headers: HeaderMap, body: String) -> Response {
+/// Store (or refresh) a session's CSS and served fonts. Creates the session if new.
+async fn register(
+    State(st): State<HubState>,
+    headers: HeaderMap,
+    Json(reg): Json<proto::RegisterBody>,
+) -> Response {
     let id = match authorize(&st, &headers) {
         Ok(id) => id,
         Err(code) => return code.into_response(),
     };
+    // Decode uploaded fonts; silently drop any with bad base64 (the family just
+    // falls back in the browser rather than failing the whole registration).
+    let fonts: HashMap<String, (String, Vec<u8>)> = reg
+        .fonts
+        .into_iter()
+        .filter_map(|f| Some((f.key, (f.mime, B64.decode(f.b64).ok()?))))
+        .collect();
     let mut map = st.sessions.lock().unwrap();
     match map.get_mut(&id) {
-        Some(s) => s.css = body,
+        Some(s) => {
+            s.css = reg.css;
+            s.fonts = fonts;
+        }
         None => {
             let (frame, _) = watch::channel(render::banner("waiting for client…"));
-            map.insert(id.clone(), Session { css: body, frame });
+            map.insert(id.clone(), Session { css: reg.css, frame, fonts });
         }
     }
     (StatusCode::OK, id).into_response()
+}
+
+/// Serve a session's uploaded font bytes (the page's `@font-face` points here).
+/// Public like `view`/`events` — the id in the path is the read capability.
+async fn font(State(st): State<HubState>, Path((id, key)): Path<(String, String)>) -> Response {
+    let map = st.sessions.lock().unwrap();
+    let Some(s) = map.get(&id) else {
+        return (StatusCode::NOT_FOUND, "unknown session").into_response();
+    };
+    match s.fonts.get(&key) {
+        // ponytail: clone the bytes per request; browsers cache fonts, so this is
+        // a cache-miss cost only. Wrap in Arc<[u8]> if it ever shows up in a profile.
+        Some((mime, bytes)) => ([(CONTENT_TYPE, mime.clone())], bytes.clone()).into_response(),
+        None => (StatusCode::NOT_FOUND, "unknown font").into_response(),
+    }
 }
 
 /// Persistent push: the body is a stream of length-prefixed frames (see

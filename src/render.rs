@@ -3,9 +3,29 @@
 //! into a single `<span>`.
 
 use crate::config::Config;
-use crate::fonts::Resolver;
+use crate::fonts::{FontFile, Resolver};
 use crate::model::{Color, StyledCell, Window};
 use std::fmt::Write as _;
+
+/// `@font-face` blocks for served fonts. Each references `{url_prefix}{index}`,
+/// where the index is the font's position (matching [`crate::fonts::font_assets`])
+/// — the standalone server serves those at `/fonts/…`, the hub per session at
+/// `/s/<id>/fonts/…`. Serving (not inlining) keeps the page small and lets the
+/// browser cache the font.
+pub fn font_face_css(fonts: &[FontFile], url_prefix: &str) -> String {
+    let mut css = String::new();
+    for (i, f) in fonts.iter().enumerate() {
+        let _ = write!(
+            css,
+            "@font-face {{ font-family:'{}'; src:url(\"{}{}\") format('{}'); }}\n",
+            crate::fonts::css_escape_family(&f.family),
+            url_prefix,
+            i,
+            f.format,
+        );
+    }
+    css
+}
 
 const DEFAULT_FG: (u8, u8, u8) = (0xd0, 0xd0, 0xd0);
 const DEFAULT_BG: (u8, u8, u8) = (0x00, 0x00, 0x00);
@@ -404,6 +424,16 @@ mod tests {
             css.contains("font-family:'Menlo','Symbols Nerd Font Mono',monospace;"),
             "font stack missing/ordered wrong: {css}"
         );
+    }
+
+    #[test]
+    fn font_face_css_references_served_urls() {
+        let fonts = vec![
+            FontFile { family: "NF".into(), mime: "font/ttf", format: "truetype", bytes: vec![1, 2] },
+        ];
+        let css = font_face_css(&fonts, "/s/abc/fonts/");
+        assert!(css.contains("font-family:'NF'"), "{css}");
+        assert!(css.contains("src:url(\"/s/abc/fonts/0\") format('truetype')"), "{css}");
     }
 
     #[test]

@@ -1968,6 +1968,7 @@ dependencies = [
  "reqwest",
  "rustls-acme",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-stream",
  "toml",

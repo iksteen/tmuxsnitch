@@ -19,9 +19,10 @@ font   = "Symbols Nerd Font"
 ranges = ["U+F000-U+F2FF"]                    # Nerd Font private-use icons
 font   = "Symbols Nerd Font"
 
-# Font sources. A `path` is embedded into the page as a base64 @font-face
-# (self-contained output). Use `system = "..."` to reference an installed family
-# instead. A family named here but with neither key is used verbatim.
+# Font sources are optional: any family referenced above is auto-located via
+# fontconfig and served to viewers. Add an entry only to override that — `path`
+# serves a specific file, `system = "..."` sets the fontconfig name to match when
+# it differs from the [fonts] key.
 [fonts."Symbols Nerd Font"]
 # path = "/usr/share/fonts/NerdFonts/SymbolsNerdFont-Regular.woff2"
 system = "Symbols Nerd Font"

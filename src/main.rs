@@ -151,21 +151,25 @@ async fn main() -> Result<()> {
         None => Config::default(),
     };
     let resolver = Arc::new(Resolver::build(&config).context("building font resolver")?);
-    let font_css = fonts::font_face_css(&config);
+    // Locate + read referenced fonts on this host (which has them installed) so we
+    // can serve them to viewers that don't. Done once here for both modes.
+    let fonts = Arc::new(fonts::collect_fonts(&config));
     let config = Arc::new(config);
 
     if let Some(url) = args.push {
         let key = args
             .key
             .context("--push requires --key (or the TMUXSNITCH_KEY env var)")?;
-        return client::run(url, key, args.target, config, resolver, font_css).await;
+        return client::run(url, key, args.target, config, resolver, fonts).await;
     }
 
-    // Standalone live viewer.
+    // Standalone live viewer: serve fonts at /fonts/<index>.
+    let font_css = render::font_face_css(&fonts, "/fonts/");
     let live_rx = live::start(args.target.clone(), config.clone(), resolver);
     let state = AppState {
         config,
         font_css: Arc::new(font_css),
+        fonts,
         live_rx,
     };
     let listener = bind(&args.bind).await?;

@@ -24,13 +24,6 @@ impl Resolver {
                 entries.push((range, sm.font.clone()));
             }
         }
-        // Build runs once at startup, so warning here warns once per unresolved name.
-        for fam in unresolved_fonts(config) {
-            eprintln!(
-                "tmuxsnitch: font {fam:?} is referenced but not a CSS generic and has no \
-                 [fonts] source — it will render only if installed system-wide"
-            );
-        }
         Ok(Resolver { entries })
     }
 
@@ -47,24 +40,90 @@ impl Resolver {
 /// CSS generic families that always resolve without a source.
 const GENERICS: [&str; 5] = ["monospace", "serif", "sans-serif", "cursive", "fantasy"];
 
-/// Families referenced by `default_font` / `symbol_map` that have no way to be
-/// made available — neither a CSS generic nor a `[fonts]` entry — deduped so each
-/// name appears once. Such a name only renders if it's installed system-wide.
-fn unresolved_fonts(config: &Config) -> Vec<String> {
+/// Families referenced by `default_font` / `symbol_map`, deduped in first-seen
+/// order, minus CSS generics (which need no file).
+fn referenced_families(config: &Config) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
-    let referenced = config
+    config
         .default_font
         .iter()
-        .chain(config.symbol_map.iter().map(|s| &s.font));
-    referenced
-        .filter(|f| {
-            !GENERICS.contains(&f.as_str())
-                && f.as_str() != crate::config::DEFAULT_SYMBOL_FONT
-                && !config.fonts.contains_key(*f)
-        })
+        .chain(config.symbol_map.iter().map(|s| &s.font))
+        .filter(|f| !GENERICS.contains(&f.as_str()))
         .filter(|f| seen.insert((*f).clone()))
         .cloned()
         .collect()
+}
+
+/// A font file located on this host, to be served to viewers so they render the
+/// glyphs without a local install. `family` is the CSS name it's referenced by.
+pub struct FontFile {
+    pub family: String,
+    pub mime: &'static str,
+    pub format: &'static str,
+    pub bytes: Vec<u8>,
+}
+
+/// Locate and read every referenced family's font file: an explicit `[fonts].path`
+/// wins, otherwise ask fontconfig (`fc-match`) for the installed file. Missing or
+/// unreadable fonts are soft failures (warn + skip) so the page still renders with
+/// browser fallback. Run once at startup by the process that owns the fonts
+/// (standalone or push client); the hub just serves what the client uploads.
+pub fn collect_fonts(config: &Config) -> Vec<FontFile> {
+    let mut out = Vec::new();
+    for family in referenced_families(config) {
+        let entry = config.fonts.get(&family);
+        let path = entry.and_then(|s| s.path.clone()).or_else(|| {
+            let name = entry.and_then(|s| s.system.as_deref()).unwrap_or(&family);
+            locate_font(name)
+        });
+        let Some(path) = path else {
+            // The built-in default symbol font is expected to be absent on some
+            // hosts; don't nag about it. Anything the user configured, do warn.
+            if family != crate::config::DEFAULT_SYMBOL_FONT {
+                eprintln!(
+                    "tmuxsnitch: font {family:?} not found on this host — viewers without it \
+                     installed will see fallback glyphs"
+                );
+            }
+            continue;
+        };
+        match load_font(&family, &path) {
+            Ok(f) => out.push(f),
+            Err(e) => eprintln!("tmuxsnitch: skipping font {family:?}: {e:#}"),
+        }
+    }
+    out
+}
+
+fn load_font(family: &str, path: &Path) -> Result<FontFile> {
+    let (mime, format) = font_format(path)?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("reading font file {}", path.display()))?;
+    Ok(FontFile { family: family.to_string(), mime, format, bytes })
+}
+
+/// Ask fontconfig for the file backing `name`. fc-match always returns *some*
+/// font, so accept the result only if its family actually matches `name` — a
+/// mismatch means the font isn't installed and fontconfig substituted a default.
+/// ponytail: shells out to fc-match (the system font DB on Linux); absent or no
+/// match → None and the caller falls back to browser rendering.
+fn locate_font(name: &str) -> Option<std::path::PathBuf> {
+    let out = std::process::Command::new("fc-match")
+        .arg("-f")
+        .arg("%{family}|%{file}")
+        .arg(name)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let (families, file) = stdout.split_once('|')?;
+    // %{family} is a comma-separated alias list; any exact (case-insensitive) hit.
+    if !families.split(',').any(|a| a.trim().eq_ignore_ascii_case(name)) {
+        return None;
+    }
+    Some(std::path::PathBuf::from(file.trim()))
 }
 
 /// Parse `"U+E0A0-U+E0D4"` or a single `"U+F000"` into an inclusive range.
@@ -93,37 +152,18 @@ fn parse_range(spec: &str) -> Result<RangeInclusive<u32>> {
     }
 }
 
-/// Build `@font-face` blocks for every font source that points at a file.
-/// System-referenced fonts (or bare family names) produce no `@font-face`.
-///
-/// An unavailable embedded font (missing/unreadable file, bad extension) is a
-/// soft failure: warn and skip its `@font-face` so the family name simply falls
-/// through to an installed copy or the next font in the stack, rather than
-/// aborting the whole page. Configs can therefore point at optional local files.
-pub fn font_face_css(config: &Config) -> String {
-    let mut css = String::new();
-    for (name, src) in &config.fonts {
-        let Some(path) = &src.path else { continue };
-        match font_face(name, path) {
-            Ok(face) => css.push_str(&face),
-            Err(e) => eprintln!("tmuxsnitch: skipping font {name:?}: {e:#}"),
-        }
-    }
-    css
-}
-
-fn font_face(name: &str, path: &Path) -> Result<String> {
-    let (mime, format) = font_format(path)?;
-    let bytes =
-        std::fs::read(path).with_context(|| format!("reading font file {}", path.display()))?;
-    let b64 = B64.encode(&bytes);
-    Ok(format!(
-        "@font-face {{ font-family: '{}'; src: url(data:{};base64,{}) format('{}'); }}\n",
-        css_escape_family(name),
-        mime,
-        b64,
-        format,
-    ))
+/// Encode located fonts for upload to the hub. The key is the font's index and
+/// MUST match the URL index [`crate::render::font_face_css`] bakes into the CSS.
+pub fn font_assets(fonts: &[FontFile]) -> Vec<crate::proto::FontAsset> {
+    fonts
+        .iter()
+        .enumerate()
+        .map(|(i, f)| crate::proto::FontAsset {
+            key: i.to_string(),
+            mime: f.mime.to_string(),
+            b64: B64.encode(&f.bytes),
+        })
+        .collect()
 }
 
 fn font_format(path: &Path) -> Result<(&'static str, &'static str)> {
@@ -142,7 +182,7 @@ fn font_format(path: &Path) -> Result<(&'static str, &'static str)> {
 }
 
 /// Family names go inside a single-quoted CSS string; neutralize quotes/backslashes.
-fn css_escape_family(name: &str) -> String {
+pub(crate) fn css_escape_family(name: &str) -> String {
     name.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
@@ -152,35 +192,33 @@ mod tests {
     use crate::config::{FontSource, SymbolMap};
 
     #[test]
-    fn unresolved_fonts_skip_generics_and_sources_and_dedupe() {
+    fn referenced_families_dedupe_and_drop_generics() {
         let mut cfg = Config::default();
         cfg.default_font = vec!["monospace".into(), "Menlo".into()];
         cfg.symbol_map = vec![
-            // "Menlo" referenced again — must still warn only once.
-            SymbolMap { ranges: vec!["U+E0B0".into()], font: "Menlo".into() },
-            SymbolMap { ranges: vec!["U+F000".into()], font: "Embedded".into() },
+            SymbolMap { ranges: vec!["U+E0B0".into()], font: "Menlo".into() }, // dup
+            SymbolMap { ranges: vec!["U+F000".into()], font: "NF".into() },
         ];
-        cfg.fonts.insert(
-            "Embedded".into(),
-            FontSource { path: None, system: Some("Embedded".into()) },
-        );
-        // monospace = generic, Embedded = has a [fonts] entry → only Menlo, once.
-        assert_eq!(unresolved_fonts(&cfg), vec!["Menlo".to_string()]);
+        // monospace dropped (generic); Menlo appears once despite two references.
+        assert_eq!(referenced_families(&cfg), vec!["Menlo".to_string(), "NF".to_string()]);
     }
 
     #[test]
-    fn missing_embedded_font_soft_fails() {
-        // A path that doesn't exist must not abort — it's skipped, other fonts kept.
+    fn collect_skips_unlocatable_and_missing_path() {
+        // Neither a family fontconfig can't match nor a bad explicit path yields a
+        // FontFile — collection soft-fails instead of aborting. (No dependence on
+        // any particular font being installed: we only assert these are absent.)
         let mut cfg = Config::default();
+        cfg.default_font = vec!["monospace".into(), "Definitely Not A Font 9271".into()];
         cfg.fonts.insert(
             "Ghost".into(),
             FontSource { path: Some("/no/such/font.ttf".into()), system: None },
         );
-        cfg.fonts.insert(
-            "Named".into(),
-            FontSource { path: None, system: Some("Named".into()) },
+        cfg.symbol_map = vec![SymbolMap { ranges: vec!["U+F000".into()], font: "Ghost".into() }];
+        let fonts = collect_fonts(&cfg);
+        assert!(
+            fonts.iter().all(|f| f.family != "Definitely Not A Font 9271" && f.family != "Ghost"),
+            "unlocatable/missing fonts must not be collected"
         );
-        let css = font_face_css(&cfg);
-        assert!(!css.contains("Ghost"), "missing font should be skipped: {css}");
     }
 }

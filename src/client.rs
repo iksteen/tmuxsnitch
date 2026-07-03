@@ -9,8 +9,8 @@
 //! blip) it re-registers and reopens.
 
 use crate::config::Config;
-use crate::fonts::Resolver;
-use crate::proto::{frame_encode, session_id, KEY_HEADER};
+use crate::fonts::{self, FontFile, Resolver};
+use crate::proto::{frame_encode, session_id, RegisterBody, KEY_HEADER};
 use crate::{live, render};
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
@@ -26,12 +26,17 @@ pub async fn run(
     target: Option<String>,
     config: Arc<Config>,
     resolver: Arc<Resolver>,
-    font_css: String,
+    fonts: Arc<Vec<FontFile>>,
 ) -> Result<()> {
     let base = base_url.trim_end_matches('/').to_string();
     let http = reqwest::Client::new();
-    let css = render::head_css(&font_css, &config);
     let id = session_id(&key);
+    // The hub serves our fonts under this session's id, so bake that URL prefix
+    // into the @font-face CSS and upload the font bytes alongside it.
+    let font_css = render::font_face_css(&fonts, &format!("/s/{id}/fonts/"));
+    let css = render::head_css(&font_css, &config);
+    let reg = RegisterBody { css, fonts: fonts::font_assets(&fonts) };
+    let reg_body = Bytes::from(serde_json::to_vec(&reg).context("encoding register payload")?);
     println!("tmuxsnitch: pushing live to {base}; view at {base}/s/{id}");
 
     let mut rx = live::start(target, config, resolver);
@@ -41,7 +46,7 @@ pub async fn run(
         // the stream. register is a clean request/response that fails fast when the
         // hub is down, so the reconnect loop spins here — cheaply — until it's back,
         // instead of hanging on a stream POST to an unreachable hub.
-        match register(&http, &base, &key, &css).await {
+        match register(&http, &base, &key, &reg_body).await {
             Reg::Ok => first = false,
             Reg::Forbidden => bail!(
                 "hub rejected this key: register its session id on the hub \
@@ -122,11 +127,12 @@ enum Reg {
     Failed(anyhow::Error),
 }
 
-async fn register(http: &reqwest::Client, base: &str, key: &str, css: &str) -> Reg {
+async fn register(http: &reqwest::Client, base: &str, key: &str, body: &Bytes) -> Reg {
     let resp = match http
         .post(format!("{base}/register"))
         .header(KEY_HEADER, key)
-        .body(css.to_string())
+        .header("content-type", "application/json")
+        .body(body.clone())
         .send()
         .await
     {

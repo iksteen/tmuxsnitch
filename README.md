@@ -113,8 +113,9 @@ won't resize your real session. Errors (no tmux server / bad target) show as an 
 banner rather than a failed request. In hub mode the client renders everything and
 pushes frames over a **single persistent streaming connection** (not a request per
 frame), so throughput isn't gated by round-trip latency; the hub just stores and
-re-serves the latest CSS + fragment. If the connection drops (hub restart, network
-blip) the client re-registers and reconnects automatically.
+re-serves the latest CSS + fragment, plus the fonts the client uploaded. If the
+connection drops (hub restart, network blip) the client re-registers and reconnects
+automatically.
 
 ## Fonts
 
@@ -128,20 +129,20 @@ symbol glyphs render out of the box with **no config** if `Symbols Nerd Font Mon
 installed system-wide (it's part of the standard Nerd Fonts packages). Override
 `default_font` to use a different text font or symbol font.
 
-Each `[fonts."Name"]` entry is either embedded (`path = "..."` → base64 `@font-face`,
-self-contained page) or referenced by an installed family (`system = "..."`). Font
-family is an axis of the span style, so an override breaks a run exactly like a color
-change — see `config.example.toml`.
+**Fonts are served, so viewers render them without a local install.** Every family
+referenced by `default_font`/`symbol_map` is located on the host running tmuxsnitch —
+via `fc-match` (fontconfig), or an explicit `[fonts."Name"].path` — its file read once
+at startup, and served: standalone at `/fonts/<i>`, the hub **per session** at
+`/s/<id>/fonts/<i>` (so two clients' fonts can't clash). The page's `@font-face` points
+at those URLs. A font that can't be located is a soft failure (warn + skip); the browser
+just falls back. A `[fonts."Name"]` entry is optional — use `path` to serve a specific
+file, or `system = "Other Name"` when the family's fontconfig name differs from the key.
 
 `symbol_map` is still useful alongside the stack: its matched glyphs are SVG-scaled to
 lock to exactly one cell (powerline separators tile seamlessly), which plain fallback —
-rendering at the font's own advance — doesn't do.
-
-Symbol glyphs (Nerd Font / powerline) are scaled to the cell via SVG: separators
-(`U+E0B0–E0D4`) stretch to fill so segments tile seamlessly, other icons fit
-proportionally. `config.kitty.toml` reproduces kitty's zero-config powerline
-rendering by embedding kitty's bundled `Symbols Nerd Font Mono` and mapping the
-Nerd-Font codepoint ranges to it.
+rendering at the font's own advance — doesn't do. Separators (`U+E0B0–E0D4`) stretch to
+fill; other icons fit proportionally. `config.kitty.toml` reproduces kitty's zero-config
+powerline rendering by serving kitty's bundled `Symbols Nerd Font Mono` as a fallback.
 
 ## Security notes
 
@@ -168,8 +169,8 @@ Nerd-Font codepoint ranges to it.
   `--acme-cache` or the account + certificate are re-issued on every restart.
   Otherwise, run behind a TLS-terminating reverse proxy. The client's `--push`
   URL just needs to be `https://…`.
-- The hub trusts allowed clients: it caps request bodies at 64 MB (embedded fonts are
-  large) but does not otherwise rate-limit. Don't expose an open hub to the internet.
+- The hub trusts allowed clients: it caps the `/register` body at 64 MB (uploaded fonts
+  are large) but does not otherwise rate-limit. Don't expose an open hub to the internet.
 
 ## Status
 

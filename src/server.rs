@@ -3,8 +3,11 @@
 //! channel; `GET /` serves the page and `GET /events` streams updates over SSE.
 
 use crate::config::Config;
+use crate::fonts::FontFile;
 use crate::render;
-use axum::extract::State;
+use axum::extract::{Path, State};
+use axum::http::header::CONTENT_TYPE;
+use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
@@ -19,6 +22,9 @@ use tokio_stream::StreamExt;
 pub struct AppState {
     pub config: Arc<Config>,
     pub font_css: Arc<String>,
+    /// Fonts served at `/fonts/<index>` so a remote browser renders them without a
+    /// local install; the page's `@font-face` (in `font_css`) references these.
+    pub fonts: Arc<Vec<FontFile>>,
     /// Latest rendered fragment, pushed by the live control task.
     pub live_rx: watch::Receiver<String>,
 }
@@ -27,7 +33,15 @@ pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/events", get(events))
+        .route("/fonts/{key}", get(font))
         .with_state(state)
+}
+
+async fn font(State(state): State<AppState>, Path(key): Path<String>) -> Response {
+    match key.parse::<usize>().ok().and_then(|i| state.fonts.get(i)) {
+        Some(f) => ([(CONTENT_TYPE, f.mime)], f.bytes.clone()).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn index(State(state): State<AppState>) -> Html<String> {

@@ -10,7 +10,9 @@ default_font = ["Noto Sans Mono", "Symbols Nerd Font Mono"]
 font_size_px = 14.0
 line_height  = 1.2
 
-# Embed kitty's own bundled file so the page is self-contained and pixel-matches.
+# Optional: force kitty's own bundled file (served to viewers) so it pixel-matches
+# even if a different Symbols Nerd Font Mono is installed. Omit to just use the
+# system-installed copy, which fontconfig locates automatically.
 [fonts."Symbols Nerd Font Mono"]
 path = "/usr/lib/kitty/fonts/SymbolsNerdFontMono-Regular.ttf"
 
