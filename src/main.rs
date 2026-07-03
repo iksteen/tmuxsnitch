@@ -178,8 +178,8 @@ async fn main() -> Result<()> {
         let id = proto::session_id(&key);
         let base = url.trim_end_matches('/');
         println!("tmuxsnitch: pushing live to {base}; view at {base}/s/{id}");
-        let rx = start_backend(interactive, &args.exec, args.target.clone(), config.clone(), resolver)?;
-        return client::run(url, key, id, config, fonts, rx).await;
+        let (rx, notifier) = start_backend(interactive, &args.exec, args.target.clone(), config.clone(), resolver)?;
+        return client::run(url, key, id, config, fonts, rx, notifier).await;
     }
 
     // Standalone live viewer: serve fonts at /fonts/<index>.
@@ -199,7 +199,7 @@ async fn main() -> Result<()> {
             listener.local_addr()?
         );
     }
-    let live_rx = start_backend(interactive, &args.exec, args.target.clone(), config.clone(), resolver)?;
+    let (live_rx, _notifier) = start_backend(interactive, &args.exec, args.target.clone(), config.clone(), resolver)?;
     let state = AppState {
         config,
         font_css: Arc::new(font_css),
@@ -218,11 +218,12 @@ fn start_backend(
     target: Option<String>,
     config: Arc<Config>,
     resolver: Arc<Resolver>,
-) -> Result<tokio::sync::watch::Receiver<String>> {
+) -> Result<(tokio::sync::watch::Receiver<String>, Option<pty::Notifier>)> {
     if interactive {
-        pty::start(exec, config, resolver)
+        let (rx, notifier) = pty::start(exec, config, resolver)?;
+        Ok((rx, Some(notifier)))
     } else {
-        Ok(live::start(target, config, resolver))
+        Ok((live::start(target, config, resolver), None))
     }
 }
 

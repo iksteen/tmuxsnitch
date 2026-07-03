@@ -27,6 +27,7 @@ pub async fn run(
     config: Arc<Config>,
     fonts: Arc<Vec<FontFile>>,
     mut rx: watch::Receiver<String>,
+    notifier: Option<crate::pty::Notifier>,
 ) -> Result<()> {
     let base = base_url.trim_end_matches('/').to_string();
     let http = reqwest::Client::new();
@@ -39,20 +40,33 @@ pub async fn run(
     let reg_body = Bytes::from(serde_json::to_vec(&reg).context("encoding register payload")?);
 
     let mut first = true;
+    // Whether we've reported the hub as unreachable (so we report down/up once per
+    // outage, not every retry). In PTY mode this drives a clean pause/restore of the
+    // terminal via the notifier; otherwise it's a plain stderr log.
+    let mut down = false;
     loop {
         // Register (also re-registers the CSS after a hub restart) before opening
         // the stream. register is a clean request/response that fails fast when the
         // hub is down, so the reconnect loop spins here — cheaply — until it's back,
         // instead of hanging on a stream POST to an unreachable hub.
         match register(&http, &base, &key, &reg_body).await {
-            Reg::Ok => first = false,
+            Reg::Ok => {
+                first = false;
+                if down {
+                    report_up(&notifier);
+                    down = false;
+                }
+            }
             Reg::Forbidden => bail!(
                 "hub rejected this key: register its session id on the hub \
                  (run `--key <secret> --print-id`, add it to the hub's --allow)"
             ),
             Reg::Failed(e) if first => return Err(e).context("registering with hub"),
             Reg::Failed(e) => {
-                eprintln!("tmuxsnitch: hub unreachable ({e}); retrying");
+                if !down {
+                    report_down(&notifier, &format!("hub unreachable ({e}); retrying"));
+                    down = true;
+                }
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 continue;
             }
@@ -61,12 +75,31 @@ pub async fn run(
         match stream_push(&http, &base, &key, &mut rx).await {
             End::LiveDone => break, // tmux/control task ended — nothing left to push
             End::Disconnected => {
-                eprintln!("tmuxsnitch: push connection dropped; reconnecting");
+                // Transient — let the next register decide if it's a real outage, so
+                // a quick reconnect doesn't flash a pause in PTY mode.
+                if notifier.is_none() {
+                    eprintln!("tmuxsnitch: push connection dropped; reconnecting");
+                }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
         }
     }
     Ok(())
+}
+
+/// Report the hub as unreachable: pause+announce in the terminal (PTY mode) or log.
+fn report_down(notifier: &Option<crate::pty::Notifier>, msg: &str) {
+    match notifier {
+        Some(n) => n.hub_down(msg),
+        None => eprintln!("tmuxsnitch: {msg}"),
+    }
+}
+
+/// Report the hub as reachable again: restore the terminal (PTY mode) or stay quiet.
+fn report_up(notifier: &Option<crate::pty::Notifier>) {
+    if let Some(n) = notifier {
+        n.hub_up();
+    }
 }
 
 enum End {
