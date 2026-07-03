@@ -131,12 +131,19 @@ installed system-wide (it's part of the standard Nerd Fonts packages). Override
 
 **Fonts are served, so viewers render them without a local install.** Every family
 referenced by `default_font`/`symbol_map` is located on the host running tmuxsnitch —
-via `fc-match` (fontconfig), or an explicit `[fonts."Name"].path` — its file read once
-at startup, and served: standalone at `/fonts/<i>`, the hub **per session** at
-`/s/<id>/fonts/<i>` (so two clients' fonts can't clash). The page's `@font-face` points
-at those URLs. A font that can't be located is a soft failure (warn + skip); the browser
-just falls back. A `[fonts."Name"]` entry is optional — use `path` to serve a specific
-file, or `system = "Other Name"` when the family's fontconfig name differs from the key.
+via [`fontdb`] (a pure-Rust, cross-platform system font database; works on Linux, macOS
+and Windows with no `fc-match`/Core Text), or an explicit `[fonts."Name"].path` — its
+file read once at startup, and served: standalone at `/fonts/<i>`, the hub **per
+session** at `/s/<id>/fonts/<i>` (so two clients' fonts can't clash). The page's
+`@font-face` points at those URLs; responses are Brotli/gzip-compressed and sent with a
+day-long `Cache-Control` so a browser fetches each font once. A single face is extracted
+from a `.ttc` collection (e.g. macOS's `Menlo.ttc`) and served as a standalone web font.
+A font that can't be located is a soft failure (warn + skip); the browser just falls
+back. A `[fonts."Name"]` entry is optional — use `path` to serve a specific file
+(`.ttf`/`.otf`/`.ttc`/`.woff`/`.woff2`), or `system = "Other Name"` when the installed
+family name differs from the key.
+
+[`fontdb`]: https://docs.rs/fontdb
 
 `symbol_map` is still useful alongside the stack: its matched glyphs are SVG-scaled to
 lock to exactly one cell (powerline separators tile seamlessly), which plain fallback —
