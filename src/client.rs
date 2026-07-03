@@ -65,10 +65,21 @@ pub async fn run(
                 "hub rejected this key: register its session id on the hub \
                  (run `--key <secret> --print-id`, add it to the hub's --allow)"
             ),
-            Reg::Failed(e) if first => return Err(e).context("registering with hub"),
-            Reg::Failed(e) => {
+            Reg::Unreachable(e) if first => return Err(e).context("registering with hub"),
+            Reg::Rejected(s) if first => bail!("hub rejected the registration (HTTP {s})"),
+            // Retry either way, but say which it is — an HTTP response means the hub
+            // is reachable, so don't call it "unreachable".
+            Reg::Unreachable(e) => {
                 if !down {
                     report_down(&notifier, &format!("hub unreachable ({e}); retrying"));
+                    down = true;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+            Reg::Rejected(s) => {
+                if !down {
+                    report_down(&notifier, &format!("hub rejected the request (HTTP {s}); retrying"));
                     down = true;
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
@@ -154,12 +165,16 @@ async fn stream_push(
     }
 }
 
-/// Outcome of a register attempt: `Forbidden` is always fatal, `Failed` is fatal
-/// only at startup (otherwise it's a transient hub-down condition to retry).
+/// Outcome of a register attempt. `Forbidden` is always fatal; the two failure
+/// kinds are fatal only at startup (otherwise a transient condition to retry).
+/// They're split so we word them honestly: `Unreachable` means no HTTP response
+/// (hub down / network), `Rejected` means the hub answered with a bad status —
+/// cause left unstated (could be version skew, a proxy, a transient hub error).
 enum Reg {
     Ok,
     Forbidden,
-    Failed(anyhow::Error),
+    Unreachable(anyhow::Error),
+    Rejected(u16),
 }
 
 async fn register(http: &reqwest::Client, base: &str, key: &str, body: &Bytes) -> Reg {
@@ -172,11 +187,11 @@ async fn register(http: &reqwest::Client, base: &str, key: &str, body: &Bytes) -
         .await
     {
         Ok(r) => r,
-        Err(e) => return Reg::Failed(e.into()),
+        Err(e) => return Reg::Unreachable(e.into()),
     };
     match resp.status().as_u16() {
         200..=299 => Reg::Ok,
         403 => Reg::Forbidden,
-        s => Reg::Failed(anyhow::anyhow!("hub register failed: HTTP {s}")),
+        s => Reg::Rejected(s),
     }
 }
