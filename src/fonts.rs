@@ -24,6 +24,13 @@ impl Resolver {
                 entries.push((range, sm.font.clone()));
             }
         }
+        // Build runs once at startup, so warning here warns once per unresolved name.
+        for fam in unresolved_fonts(config) {
+            eprintln!(
+                "tmuxsnitch: font {fam:?} is referenced but not a CSS generic and has no \
+                 [fonts] source — it will render only if installed system-wide"
+            );
+        }
         Ok(Resolver { entries })
     }
 
@@ -35,6 +42,25 @@ impl Resolver {
             .find(|(r, _)| r.contains(&cp))
             .map(|(_, f)| f.as_str())
     }
+}
+
+/// CSS generic families that always resolve without a source.
+const GENERICS: [&str; 5] = ["monospace", "serif", "sans-serif", "cursive", "fantasy"];
+
+/// Families referenced by `default_font` / `symbol_map` that have no way to be
+/// made available — neither a CSS generic nor a `[fonts]` entry — deduped so each
+/// name appears once. Such a name only renders if it's installed system-wide.
+fn unresolved_fonts(config: &Config) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let referenced = config
+        .default_font
+        .iter()
+        .chain(config.symbol_map.iter().map(|s| &s.font));
+    referenced
+        .filter(|f| !GENERICS.contains(&f.as_str()) && !config.fonts.contains_key(*f))
+        .filter(|f| seen.insert((*f).clone()))
+        .cloned()
+        .collect()
 }
 
 /// Parse `"U+E0A0-U+E0D4"` or a single `"U+F000"` into an inclusive range.
@@ -119,7 +145,24 @@ fn css_escape_family(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::FontSource;
+    use crate::config::{FontSource, SymbolMap};
+
+    #[test]
+    fn unresolved_fonts_skip_generics_and_sources_and_dedupe() {
+        let mut cfg = Config::default();
+        cfg.default_font = vec!["monospace".into(), "Menlo".into()];
+        cfg.symbol_map = vec![
+            // "Menlo" referenced again — must still warn only once.
+            SymbolMap { ranges: vec!["U+E0B0".into()], font: "Menlo".into() },
+            SymbolMap { ranges: vec!["U+F000".into()], font: "Embedded".into() },
+        ];
+        cfg.fonts.insert(
+            "Embedded".into(),
+            FontSource { path: None, system: Some("Embedded".into()) },
+        );
+        // monospace = generic, Embedded = has a [fonts] entry → only Menlo, once.
+        assert_eq!(unresolved_fonts(&cfg), vec!["Menlo".to_string()]);
+    }
 
     #[test]
     fn missing_embedded_font_soft_fails() {
