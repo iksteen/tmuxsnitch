@@ -20,12 +20,16 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio_stream::wrappers::ReceiverStream;
 
+// ponytail: 8 positional args, one call site — an args struct would be ceremony
+// for no reader benefit. Bundle them if a second caller ever appears.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     base_url: String,
     key: String,
     id: String,
     config: Arc<Config>,
     fonts: Arc<Vec<FontFile>>,
+    template: Arc<String>,
     mut rx: watch::Receiver<String>,
     notifier: Option<crate::pty::Notifier>,
 ) -> Result<()> {
@@ -36,7 +40,7 @@ pub async fn run(
     // prefix into the @font-face CSS and upload the font bytes alongside it.
     let font_css = render::font_face_css(&fonts, &format!("/s/{id}/fonts/"));
     let css = render::head_css(&font_css, &config);
-    let reg = RegisterBody { css, fonts: fonts::font_assets(&fonts) };
+    let reg = RegisterBody { css, template: (*template).clone(), fonts: fonts::font_assets(&fonts) };
     let reg_body = Bytes::from(serde_json::to_vec(&reg).context("encoding register payload")?);
 
     let mut first = true;

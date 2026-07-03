@@ -26,6 +26,8 @@ pub struct AppState {
     /// Fonts served at `/fonts/<index>` so a remote browser renders them without a
     /// local install; the page's `@font-face` (in `font_css`) references these.
     pub fonts: Arc<Vec<FontFile>>,
+    /// Viewer HTML template (`{{style}}`/`{{screen}}`/`{{script}}` tokens).
+    pub template: Arc<String>,
     /// Latest rendered fragment, pushed by the live control task.
     pub live_rx: watch::Receiver<String>,
 }
@@ -54,6 +56,7 @@ async fn font(State(state): State<AppState>, Path(key): Path<String>) -> Respons
 
 async fn index(State(state): State<AppState>) -> Html<String> {
     Html(render::render_page(
+        &state.template,
         &state.live_rx.borrow(),
         &state.font_css,
         &state.config,

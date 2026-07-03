@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tmuxsnitch</title>
+<!-- Tokens filled at serve time (double-brace style/screen/script): style = terminal
+     CSS + @font-face; screen = the live #screen div the SSE updater swaps; script = that
+     updater. Same chrome as the default theme, plus a pure-CSS CRT overlay on the panel. -->
+{{style}}
+<style>
+:root {
+  --bg:#0a0e14; --border:#232c3a;
+  --text:#e8edf4; --text-mute:#6b7888;
+  --accent:#34d399; --accent-2:#22d3ee; --radius:14px;
+  --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Inter,Helvetica,Arial,sans-serif;
+}
+body { background:var(--bg); color:var(--text); font-family:var(--sans);
+  line-height:1.6; -webkit-font-smoothing:antialiased; overflow-x:hidden; }
+a { color:var(--accent-2); text-decoration:none; }
+.nav {
+  position:sticky; top:0; z-index:50;
+  display:flex; align-items:center; justify-content:space-between; gap:16px;
+  padding:14px clamp(16px,5vw,40px);
+  background:color-mix(in oklab, var(--bg) 78%, transparent);
+  backdrop-filter:blur(12px); border-bottom:1px solid var(--border);
+}
+.brand { display:flex; align-items:center; gap:10px; font-weight:700; letter-spacing:-0.01em; }
+.brand .grad { background:linear-gradient(100deg,var(--accent),var(--accent-2));
+  -webkit-background-clip:text; background-clip:text; color:transparent; }
+.dot { width:9px; height:9px; border-radius:50%; background:var(--accent); animation:pulse 2s infinite; }
+@keyframes pulse {
+  0%   { box-shadow:0 0 0 0 color-mix(in oklab,var(--accent) 55%,transparent); }
+  70%  { box-shadow:0 0 0 7px transparent; }
+  100% { box-shadow:0 0 0 0 transparent; }
+}
+.nav .meta { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.5px; color:var(--text-mute); }
+.stage { position:relative; display:flex; justify-content:center;
+  padding:clamp(28px,5vw,56px) clamp(16px,5vw,40px); }
+.glow {
+  position:absolute; inset:-10% -20% auto -20%; height:420px; z-index:-1; pointer-events:none;
+  filter:blur(8px); opacity:.7;
+  background:
+    radial-gradient(700px 300px at 22% 0%, color-mix(in oklab,var(--accent) 22%,transparent), transparent 70%),
+    radial-gradient(640px 280px at 82% 0%, color-mix(in oklab,var(--accent-2) 18%,transparent), transparent 70%);
+}
+footer { max-width:1140px; margin:0 auto; padding:24px clamp(16px,5vw,40px) 48px;
+  color:var(--text-mute); font-size:13px; border-top:1px solid var(--border); }
+
+/* ── CRT tube ─────────────────────────────────────────────────────────────
+   The panel is styled as a curved glass tube (thick bezel, deep corner
+   vignette, rounded glass). Four stacked non-interactive overlay layers give
+   the shader: .crt-scan (darkening scanlines, multiply), .crt-grille (RGB
+   aperture mask, screen), .crt-bar (bright rolling refresh band), .crt-vig
+   (glass sheen + vignette). #screen itself gets phosphor bloom + a chromatic
+   fringe. Overlays are pointer-events:none so the text stays selectable. */
+.stage { perspective:1600px; }
+.panel {
+  position:relative; max-width:100%; overflow:auto;
+  padding:26px 30px; border:none; border-radius:26px / 34px;
+  background:#040705;
+  box-shadow:
+    0 0 0 10px #05070a, 0 0 0 11px #1c2530,   /* bezel */
+    0 40px 90px -20px rgba(0,0,0,.9),
+    inset 0 0 90px 24px rgba(0,0,0,.95),        /* deep corner vignette */
+    inset 0 0 40px rgba(60,255,170,.06);        /* faint phosphor wash */
+  filter:saturate(1.25) contrast(1.06);
+  transform:rotateX(.6deg);
+}
+#screen {
+  filter:brightness(1.12) contrast(1.08) saturate(1.3);
+  text-shadow:
+    -1px 0 rgba(255,45,85,.45),
+     1px 0 rgba(45,205,255,.45),
+     0 0 6px rgba(120,255,180,.6),
+     0 0 16px rgba(80,255,160,.35);
+}
+.crt-scan, .crt-grille, .crt-bar, .crt-vig {
+  content:""; position:absolute; inset:0; z-index:5; pointer-events:none; border-radius:inherit;
+}
+/* Scanlines: darken every other 1px line — the visible interlace. */
+.crt-scan {
+  background:repeating-linear-gradient(0deg,
+    rgba(0,0,0,.55) 0 1px, rgba(0,0,0,0) 1px 3px);
+  mix-blend-mode:multiply;
+  animation:crt-flicker 90ms steps(2) infinite;
+}
+/* Aperture grille: vertical R/G/B phosphor stripes, adding light. */
+.crt-grille {
+  background:repeating-linear-gradient(90deg,
+    rgba(255,0,60,.22) 0 1px, rgba(0,255,90,.14) 1px 2px, rgba(60,120,255,.22) 2px 3px);
+  mix-blend-mode:screen; opacity:.7;
+}
+/* Bright refresh band sweeping top→bottom, continuously. Painted as a moving
+   background (not a positioned element) so it never extends the panel's scroll. */
+.crt-bar {
+  background:linear-gradient(180deg,
+    rgba(180,255,210,0) 0, rgba(180,255,210,.14) 45%, rgba(120,255,190,.22) 50%,
+    rgba(180,255,210,.14) 55%, rgba(180,255,210,0) 100%);
+  background-size:100% 26%; background-repeat:no-repeat; mix-blend-mode:screen;
+  animation:crt-sweep 5s linear infinite;
+}
+/* Curved-glass sheen (top-left) over the corner vignette. */
+.crt-vig {
+  background:
+    radial-gradient(120% 90% at 28% 8%, rgba(255,255,255,.06) 0, transparent 42%),
+    radial-gradient(140% 140% at 50% 50%, transparent 55%, rgba(0,0,0,.6) 100%);
+}
+@keyframes crt-sweep { 0% { background-position:0 -30%; } 100% { background-position:0 130%; } }
+@keyframes crt-flicker { 0% { opacity:.86; } 100% { opacity:1; } }
+@media (prefers-reduced-motion: reduce) {
+  .crt-scan, .crt-bar, .dot { animation:none; }
+}
+</style>
+</head>
+<body>
+<nav class="nav">
+  <span class="brand"><span class="dot"></span><span class="grad">tmuxsnitch</span></span>
+  <span class="meta">live terminal mirror · CRT</span>
+</nav>
+<main class="stage">
+  <div class="glow"></div>
+  <div class="panel">
+    {{screen}}
+    <div class="crt-grille"></div>
+    <div class="crt-scan"></div>
+    <div class="crt-bar"></div>
+    <div class="crt-vig"></div>
+  </div>
+</main>
+<footer>Live over SSE — <a href="https://github.com/iksteen/tmuxsnitch">tmuxsnitch</a>.</footer>
+{{script}}
+</body>
+</html>

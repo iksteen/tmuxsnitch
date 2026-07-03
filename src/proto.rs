@@ -22,10 +22,16 @@ pub struct FontAsset {
     pub b64: String,
 }
 
-/// `/register` payload: the page CSS plus the fonts it references.
+/// `/register` payload: the page CSS, the viewer template, and the fonts the CSS
+/// references. The client renders locally, so it owns the template too and pushes
+/// it here; the hub just fills it per request.
 #[derive(Serialize, Deserialize)]
 pub struct RegisterBody {
     pub css: String,
+    /// Viewer HTML template with `{{style}}`/`{{screen}}`/`{{script}}` tokens.
+    /// `default` (empty) so the hub falls back to its built-in for older clients.
+    #[serde(default)]
+    pub template: String,
     #[serde(default)]
     pub fonts: Vec<FontAsset>,
 }

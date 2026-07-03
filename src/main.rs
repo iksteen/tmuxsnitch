@@ -164,6 +164,7 @@ async fn main() -> Result<()> {
     // Done once here for both modes.
     fonts::resolve_generics(&mut config);
     let fonts = Arc::new(fonts::collect_fonts(&config));
+    let template = Arc::new(config.template_html().context("loading viewer template")?);
     let config = Arc::new(config);
 
     let interactive = !args.exec.is_empty();
@@ -179,7 +180,7 @@ async fn main() -> Result<()> {
         let base = url.trim_end_matches('/');
         println!("tmuxsnitch: pushing live to {base}; view at {base}/s/{id}");
         let (rx, notifier) = start_backend(interactive, &args.exec, args.target.clone(), config.clone(), resolver)?;
-        return client::run(url, key, id, config, fonts, rx, notifier).await;
+        return client::run(url, key, id, config, fonts, template, rx, notifier).await;
     }
 
     // Standalone live viewer: serve fonts at /fonts/<index>.
@@ -204,6 +205,7 @@ async fn main() -> Result<()> {
         config,
         font_css: Arc::new(font_css),
         fonts,
+        template,
         live_rx,
     };
     axum::serve(listener, server::app(state)).await?;

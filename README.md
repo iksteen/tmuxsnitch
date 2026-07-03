@@ -93,7 +93,7 @@ needs the secret. A client whose key isn't on the hub's `--allow` list is reject
 |------|------------|---------|
 | `--target <t>` | standalone, client | tmux target (`session` or `session:window`); default = current window |
 | `--exec <cmd>…` | standalone, client | mirror an interactive PTY command instead of tmux (put last) |
-| `--config <path>` | standalone, client | TOML config (fonts + `symbol_map`); omit for defaults |
+| `--config <path>` | standalone, client | TOML config (fonts, `symbol_map`, `template`); omit for defaults |
 | `--bind <addr>` | standalone, hub | HTTP listen address (default `127.0.0.1:8080`) |
 | `--serve` | hub | run as a hub (no tmux/config needed) |
 | `--allow <id>` | hub | a session id permitted to push; repeat per client. Others get `403` |
@@ -163,6 +163,35 @@ lock to exactly one cell (powerline separators tile seamlessly), which plain fal
 rendering at the font's own advance — doesn't do. Separators (`U+E0B0–E0D4`) stretch to
 fill; other icons fit proportionally. `config.kitty.toml` reproduces kitty's zero-config
 powerline rendering by serving kitty's bundled `Symbols Nerd Font Mono` as a fallback.
+
+## Templating
+
+Two built-in themes ship: `default` (dark) and `crt` (the same, with a pure-CSS CRT
+overlay — scanlines, phosphor bloom, flicker, vignette). Pick one in your `--config`:
+
+```toml
+theme = "crt"
+```
+
+For a fully custom page, point `template` at a full HTML document (this overrides
+`theme`) with three tokens the renderer fills at serve time:
+
+| Token | Filled with |
+|-------|-------------|
+| `{{style}}` | the generated `<style>` — terminal cell CSS + served-font `@font-face` |
+| `{{screen}}` | the live `<div id="screen">…</div>` the SSE updater swaps (keep the id) |
+| `{{script}}` | the `<script>` that subscribes to the event stream |
+
+```toml
+# config.toml
+template = "my-viewer.html"
+```
+
+Everything around those tokens is yours — nav, wrapper, footer, extra `<style>`. Only
+`{{screen}}`'s `#screen` id is load-bearing (the updater targets it); the others can be
+placed anywhere in the document. Terminal content that happens to contain a literal
+token string is left intact. In hub mode the client pushes its template to the hub, so
+custom themes work off-box too.
 
 ## Security notes
 

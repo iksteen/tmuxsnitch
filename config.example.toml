@@ -9,6 +9,16 @@ default_font = ["monospace", "Symbols Nerd Font Mono"]
 font_size_px = 14.0
 line_height  = 1.2
 
+# Built-in viewer theme: "default" (dark) or "crt" (dark + a CSS CRT overlay:
+# scanlines, phosphor bloom, flicker). Ignored if `template` is set below.
+# theme = "crt"
+
+# Custom viewer page. Overrides `theme`. The file is a full HTML document with
+# three tokens filled at serve time: {{style}} (terminal CSS + @font-face),
+# {{screen}} (the live #screen div — keep its id), {{script}} (the SSE updater).
+# Everything else is yours.
+# template = "my-viewer.html"
+
 # Kitty-style symbol_map: map Unicode codepoint ranges to a specific font.
 # First matching entry wins. Ranges accept "U+XXXX", "U+XXXX-U+YYYY", or "0xXXXX".
 [[symbol_map]]

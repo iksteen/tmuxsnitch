@@ -29,6 +29,8 @@ use tower_http::compression::CompressionLayer;
 
 struct Session {
     css: String,
+    /// Viewer template the client pushed (empty → the hub's built-in default).
+    template: String,
     /// Latest fragment; `watch` hands the current value to each new viewer.
     frame: watch::Sender<String>,
     /// Fonts the client uploaded, keyed as the CSS references them (`key` → (mime,
@@ -138,11 +140,12 @@ async fn register(
     match map.get_mut(&id) {
         Some(s) => {
             s.css = reg.css;
+            s.template = reg.template;
             s.fonts = fonts;
         }
         None => {
             let (frame, _) = watch::channel(render::banner("waiting for client…"));
-            map.insert(id.clone(), Session { css: reg.css, frame, fonts });
+            map.insert(id.clone(), Session { css: reg.css, template: reg.template, frame, fonts });
             // First registration for this id (a new client, or after a hub
             // restart) — announce where to watch it. Stream reconnects re-hit the
             // Some branch, so this doesn't spam. Honor reverse-proxy headers so the
@@ -214,7 +217,9 @@ async fn view(State(st): State<HubState>, Path(id): Path<String>) -> Response {
         return (StatusCode::NOT_FOUND, "unknown session").into_response();
     };
     let script = render::sse_script(&format!("/s/{id}/events"));
-    Html(render::page(&s.css, &s.frame.borrow(), &script)).into_response()
+    // Empty template = an older client that didn't push one; use the built-in.
+    let template = if s.template.is_empty() { render::DEFAULT_TEMPLATE } else { &s.template };
+    Html(render::page(template, &s.css, &s.frame.borrow(), &script)).into_response()
 }
 
 async fn events(State(st): State<HubState>, Path(id): Path<String>) -> Response {

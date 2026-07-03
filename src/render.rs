@@ -30,15 +30,27 @@ pub fn font_face_css(fonts: &[FontFile], url_prefix: &str) -> String {
 const DEFAULT_FG: (u8, u8, u8) = (0xd0, 0xd0, 0xd0);
 const DEFAULT_BG: (u8, u8, u8) = (0x00, 0x00, 0x00);
 
+/// Built-in viewer template (n3o-style dark chrome). A template is a full HTML
+/// document with three tokens the renderer fills: `{{style}}` (the generated
+/// terminal CSS + `@font-face`), `{{screen}}` (the `#screen` div the SSE updater
+/// swaps), and `{{script}}` (that updater). Override via `--config`'s `template`.
+pub const DEFAULT_TEMPLATE: &str = include_str!("template.html");
+
+/// Built-in CRT theme: the default chrome plus a pure-CSS CRT overlay (scanlines,
+/// phosphor bloom, flicker, vignette). Selected with `theme = "crt"`.
+pub const CRT_TEMPLATE: &str = include_str!("template-crt.html");
+
 /// Everything that goes inside `<style>`: the served-font `@font-face` rules plus
 /// the config-derived base CSS. Computed by whoever owns the config (the standalone
 /// server or a push client); the hub just stores and re-emits it, so it renders
 /// nothing.
 pub fn head_css(font_css: &str, config: &Config) -> String {
+    // The terminal backdrop lives on #screen (not body) so a template controls the
+    // surrounding page background; #screen stays black wherever it's placed.
     let base_css = format!(
-        "html,body {{ margin:0; background:#000; }}\n\
+        "html,body {{ margin:0; }}\n\
          #screen {{ font-family:{stack}; font-size:{fs}px; --lh:{lh}px; \
-         line-height:var(--lh); color:{fg}; }}\n\
+         line-height:var(--lh); color:{fg}; background:#000; }}\n\
          .screen {{ position:relative; }}\n\
          .pane {{ position:absolute; white-space:pre; overflow:hidden; \
          box-sizing:border-box; }}\n\
@@ -54,16 +66,15 @@ pub fn head_css(font_css: &str, config: &Config) -> String {
     format!("{font_css}{base_css}")
 }
 
-/// Assemble the full page from a ready `<style>` body, the initial `#screen`
-/// fragment, and the updater `<script>`.
-pub fn page(head_css: &str, fragment: &str, script: &str) -> String {
-    format!(
-        "<!doctype html>\n<html><head><meta charset=\"utf-8\">\n\
-         <title>tmuxsnitch</title>\n<style>\n{head_css}</style>\n</head>\n\
-         <body>\n<div id=\"screen\">{fragment}</div>\n\
-         <script>\n{script}\n</script>\n\
-         </body></html>",
-    )
+/// Fill a viewer `template` with the terminal `<style>`, the `#screen` fragment,
+/// and the updater `<script>`. Tokens: `{{style}}`, `{{screen}}`, `{{script}}`.
+/// `{{screen}}` is filled last and its replacement is never re-scanned, so a
+/// literal `{{script}}` the user typed into the terminal can't corrupt the page.
+pub fn page(template: &str, head_css: &str, fragment: &str, script: &str) -> String {
+    template
+        .replace("{{style}}", &format!("<style>\n{head_css}</style>"))
+        .replace("{{script}}", &format!("<script>\n{script}\n</script>"))
+        .replace("{{screen}}", &format!("<div id=\"screen\">{fragment}</div>"))
 }
 
 /// SSE updater: subscribe to `events_path` and swap `#screen` on each push.
@@ -76,8 +87,8 @@ pub fn sse_script(events_path: &str) -> String {
 }
 
 /// Standalone page (local tmux → local viewer): streams live from `/events`.
-pub fn render_page(fragment: &str, font_css: &str, config: &Config) -> String {
-    page(&head_css(font_css, config), fragment, &sse_script("/events"))
+pub fn render_page(template: &str, fragment: &str, font_css: &str, config: &Config) -> String {
+    page(template, &head_css(font_css, config), fragment, &sse_script("/events"))
 }
 
 /// Red in-page error banner (shared by every mode's failure path).
@@ -456,6 +467,28 @@ mod tests {
         // A plain letter next to it stays plain text (not SVG).
         let plain = render_fragment(&window_from("a", 2, 1), &cfg, &res);
         assert!(!plain.contains("<svg"), "plain text should not be SVG: {plain}");
+    }
+
+    #[test]
+    fn page_fills_template_tokens() {
+        let tmpl = "<head>{{style}}</head><body>{{screen}}{{script}}</body>";
+        // Fragment contains a literal token the user "typed" — it must survive
+        // verbatim (screen is filled last and never re-scanned).
+        let html = page(tmpl, "CSS", "hi {{script}} there", "JS");
+        assert!(html.contains("<style>\nCSS</style>"), "{html}");
+        assert!(html.contains("<div id=\"screen\">hi {{script}} there</div>"), "{html}");
+        assert!(html.contains("<script>\nJS\n</script>"), "{html}");
+        // Exactly one real script block (the typed token wasn't expanded).
+        assert_eq!(html.matches("<script>").count(), 1, "typed token got expanded: {html}");
+    }
+
+    #[test]
+    fn builtin_templates_have_all_tokens() {
+        for (name, tmpl) in [("default", DEFAULT_TEMPLATE), ("crt", CRT_TEMPLATE)] {
+            for tok in ["{{style}}", "{{screen}}", "{{script}}"] {
+                assert!(tmpl.contains(tok), "{name} template missing {tok}");
+            }
+        }
     }
 
     #[test]

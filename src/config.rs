@@ -28,6 +28,27 @@ pub struct Config {
     /// Named font sources referenced by `default_font` / `symbol_map[].font`.
     #[serde(default)]
     pub fonts: HashMap<String, FontSource>,
+
+    /// Which built-in viewer theme to use (`default` or `crt`). Ignored when
+    /// `template` points at a custom file.
+    #[serde(default)]
+    pub theme: Theme,
+
+    /// Path to a custom viewer HTML template. Tokens `{{style}}` / `{{screen}}` /
+    /// `{{script}}` are filled in (see [`crate::render::DEFAULT_TEMPLATE`]). Omit
+    /// to use one of the built-in `theme`s.
+    #[serde(default)]
+    pub template: Option<PathBuf>,
+}
+
+/// Built-in viewer theme.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    #[default]
+    Default,
+    /// Dark chrome with a CSS CRT overlay (scanlines, phosphor bloom, flicker).
+    Crt,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -92,6 +113,8 @@ impl Default for Config {
             line_height: default_line_height(),
             symbol_map: Vec::new(),
             fonts: HashMap::new(),
+            theme: Theme::default(),
+            template: None,
         }
     }
 }
@@ -109,6 +132,19 @@ impl Config {
     pub fn line_height_px(&self) -> f32 {
         self.font_size_px * self.line_height
     }
+
+    /// The viewer template: a configured file, else the selected built-in `theme`.
+    pub fn template_html(&self) -> Result<String> {
+        match &self.template {
+            Some(p) => std::fs::read_to_string(p)
+                .with_context(|| format!("reading template {}", p.display())),
+            None => Ok(match self.theme {
+                Theme::Default => crate::render::DEFAULT_TEMPLATE,
+                Theme::Crt => crate::render::CRT_TEMPLATE,
+            }
+            .to_string()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -123,5 +159,20 @@ mod tests {
         assert_eq!(many.default_font, vec!["Menlo", "NF"]);
         let absent: Config = toml::from_str("").unwrap();
         assert_eq!(absent.default_font, vec!["monospace", DEFAULT_SYMBOL_FONT]);
+    }
+
+    #[test]
+    fn theme_selects_builtin_template() {
+        // Default theme → the default chrome; no CRT overlay.
+        let def = Config::default().template_html().unwrap();
+        assert_eq!(def, crate::render::DEFAULT_TEMPLATE);
+
+        // theme = "crt" → the CRT template.
+        let crt: Config = toml::from_str("theme = \"crt\"").unwrap();
+        assert_eq!(crt.template_html().unwrap(), crate::render::CRT_TEMPLATE);
+
+        // An explicit template file wins over theme (points at a missing path → err).
+        let both: Config = toml::from_str("theme = \"crt\"\ntemplate = \"/no/such/file\"").unwrap();
+        assert!(both.template_html().is_err());
     }
 }
