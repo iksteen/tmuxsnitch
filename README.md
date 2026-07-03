@@ -118,10 +118,19 @@ blip) the client re-registers and reconnects automatically.
 
 ## Fonts
 
+`default_font` can be a single family or a **fallback stack** — `["Text Font", "Nerd
+Font"]`. The browser resolves each character against the stack in order, so a Nerd Font
+listed after your text font covers every glyph the text font lacks. That reproduces
+Kitty's fallback with no `symbol_map` ranges at all (see `config.kitty.toml`).
+
 Each `[fonts."Name"]` entry is either embedded (`path = "..."` → base64 `@font-face`,
 self-contained page) or referenced by an installed family (`system = "..."`). Font
 family is an axis of the span style, so an override breaks a run exactly like a color
 change — see `config.example.toml`.
+
+`symbol_map` is still useful alongside the stack: its matched glyphs are SVG-scaled to
+lock to exactly one cell (powerline separators tile seamlessly), which plain fallback —
+rendering at the font's own advance — doesn't do.
 
 Symbol glyphs (Nerd Font / powerline) are scaled to the cell via SVG: separators
 (`U+E0B0–E0D4`) stretch to fill so segments tile seamlessly, other icons fit

@@ -233,15 +233,15 @@ fn cell_box_style(cell: &StyledCell, is_cursor: bool) -> String {
     s
 }
 
-/// The base font stack: the configured default family with a `monospace` last
-/// resort (unless the default already is the `monospace` generic).
+/// The base font stack: the configured families in order, with a `monospace`
+/// last resort appended unless already present. The browser resolves each glyph
+/// against this stack, giving Kitty-style per-character fallback for free.
 fn font_stack(config: &Config) -> String {
-    let d = quote_family(&config.default_font);
-    if config.default_font == "monospace" {
-        d
-    } else {
-        format!("{d},monospace")
+    let mut fams: Vec<String> = config.default_font.iter().map(|f| quote_family(f)).collect();
+    if !config.default_font.iter().any(|f| f == "monospace") {
+        fams.push("monospace".to_string());
     }
+    fams.join(",")
 }
 
 fn resolve_rgb(c: Color) -> Option<(u8, u8, u8)> {
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn symbol_map_overrides_font() {
         let mut cfg = Config::default();
-        cfg.default_font = "Menlo".into();
+        cfg.default_font = vec!["Menlo".into()];
         cfg.symbol_map = vec![SymbolMap {
             ranges: vec!["U+E0A0-U+E0D4".into()],
             font: "Symbols Nerd Font".into(),
@@ -391,6 +391,19 @@ mod tests {
             .filter_map(|s| s.split("ch").next()?.parse::<u16>().ok())
             .sum();
         assert_eq!(sum, 10, "run widths don't tile the row: {html}");
+    }
+
+    #[test]
+    fn font_list_becomes_a_css_fallback_stack() {
+        // A multi-family default_font emits every family in order (browser does
+        // per-glyph fallback), with monospace appended as last resort.
+        let mut cfg = Config::default();
+        cfg.default_font = vec!["Menlo".into(), "Symbols Nerd Font Mono".into()];
+        let css = head_css("", &cfg);
+        assert!(
+            css.contains("font-family:'Menlo','Symbols Nerd Font Mono',monospace;"),
+            "font stack missing/ordered wrong: {css}"
+        );
     }
 
     #[test]

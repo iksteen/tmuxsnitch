@@ -9,9 +9,12 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Base monospace family used when no `symbol_map` entry matches.
-    #[serde(default = "default_font")]
-    pub default_font: String,
+    /// Base font stack: one family, or a list tried in order. The browser picks,
+    /// per character, the first family in the stack that has a glyph for it — so
+    /// listing a Nerd Font after your text font emulates Kitty's fallback without
+    /// any `symbol_map` ranges. Accepts a string or an array of strings.
+    #[serde(default = "default_font", deserialize_with = "string_or_vec")]
+    pub default_font: Vec<String>,
     /// Terminal font size in px.
     #[serde(default = "default_font_size")]
     pub font_size_px: f32,
@@ -47,8 +50,25 @@ pub struct FontSource {
     pub system: Option<String>,
 }
 
-fn default_font() -> String {
-    "monospace".to_string()
+fn default_font() -> Vec<String> {
+    vec!["monospace".to_string()]
+}
+
+/// Accept either `default_font = "Menlo"` or `default_font = ["Menlo", "NF"]`.
+fn string_or_vec<'de, D>(d: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(d)? {
+        OneOrMany::One(s) => vec![s],
+        OneOrMany::Many(v) => v,
+    })
 }
 fn default_font_size() -> f32 {
     14.0
@@ -81,5 +101,20 @@ impl Config {
     /// Line height in px (`font_size_px * line_height`).
     pub fn line_height_px(&self) -> f32 {
         self.font_size_px * self.line_height
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_font_accepts_string_or_list() {
+        let one: Config = toml::from_str("default_font = \"Menlo\"").unwrap();
+        assert_eq!(one.default_font, vec!["Menlo"]);
+        let many: Config = toml::from_str("default_font = [\"Menlo\", \"NF\"]").unwrap();
+        assert_eq!(many.default_font, vec!["Menlo", "NF"]);
+        let absent: Config = toml::from_str("").unwrap();
+        assert_eq!(absent.default_font, vec!["monospace"]);
     }
 }

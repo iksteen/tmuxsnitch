@@ -1,6 +1,11 @@
 # tmuxsnitch example config. Pass with `--config config.toml`.
 
-# Base monospace family (used when no symbol_map entry matches a character).
+# Base font: one family, or a fallback stack tried in order. With a list, the
+# browser picks per character the first family that has the glyph — list a Nerd
+# Font after your text font to get Kitty-style fallback with no symbol_map, e.g.
+#   default_font = ["Noto Sans Mono", "Symbols Nerd Font Mono"]
+# (see config.kitty.toml). symbol_map below is still available when you want the
+# override glyphs SVG-scaled to lock to exactly one cell.
 default_font = "monospace"
 font_size_px = 14.0
 line_height  = 1.2
