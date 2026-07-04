@@ -219,12 +219,20 @@ export function apply(m) {
     else
         applyBanner(m);
 }
+function connect(events) {
+    const es = new EventSource(events);
+    es.onmessage = (e) => apply(JSON.parse(e.data));
+    es.onerror = () => {
+        if (es.readyState === EventSource.CLOSED) {
+            setTimeout(() => connect(events), 2000);
+        }
+    };
+}
 function main() {
     const boot = window.SHELLGLASS;
     setConfig(boot.cfg);
     screenEl = document.getElementById("screen");
-    const es = new EventSource(boot.events);
-    es.onmessage = (e) => apply(JSON.parse(e.data));
+    connect(boot.events);
 }
 if (typeof document !== "undefined" && window.SHELLGLASS) {
     main();

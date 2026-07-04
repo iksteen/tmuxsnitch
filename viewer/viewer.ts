@@ -339,12 +339,27 @@ export function apply(m: Msg): void {
   else applyBanner(m);
 }
 
+// EventSource only auto-retries network blips (readyState CONNECTING); on an HTTP
+// error — e.g. the hub restarted and 404s the session until its client
+// re-registers — it CLOSEs permanently and the page would go dead. Rebuild it on
+// CLOSED with a fixed retry; the server sends a full frame on every (re)connect,
+// so no client state needs resetting. The last screen stays frozen meanwhile.
+// ponytail: fixed 2s retry, no backoff — it's one idle HTTP request per tick.
+function connect(events: string): void {
+  const es = new EventSource(events);
+  es.onmessage = (e) => apply(JSON.parse(e.data) as Msg);
+  es.onerror = () => {
+    if (es.readyState === EventSource.CLOSED) {
+      setTimeout(() => connect(events), 2000);
+    }
+  };
+}
+
 function main(): void {
   const boot = (window as unknown as { SHELLGLASS: { events: string; cfg: Cfg } }).SHELLGLASS;
   setConfig(boot.cfg);
   screenEl = document.getElementById("screen")!;
-  const es = new EventSource(boot.events);
-  es.onmessage = (e) => apply(JSON.parse(e.data) as Msg);
+  connect(boot.events);
 }
 
 // Only bootstrap in the browser; importing this module in Node (tests) is inert.
