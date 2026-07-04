@@ -24,6 +24,14 @@ use tokio::sync::watch;
 /// Frame cap: coalesce bursts of PTY output into at most ~30 renders per second.
 const MIN_FRAME: Duration = Duration::from_millis(33);
 
+/// Reset every input mode an app could have switched on, for the hub-outage pause:
+/// normal keypad (`ESC >`), normal cursor keys, bracketed paste off, and all xterm
+/// mouse-reporting modes + encodings off. Turning off a mode that isn't on is a
+/// no-op, so this is safe to fire blind — the restore side re-arms from the parser
+/// (`input_mode_formatted`), which knows the app's actual current modes.
+const INPUT_MODES_OFF: &[u8] =
+    b"\x1b>\x1b[?1l\x1b[?2004l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l";
+
 /// Everything the screen thread applies. `Data`/`Resize` come from the PTY and the
 /// size poller; `HubDown`/`HubUp` from the push client via [`Notifier`]; `Shutdown`
 /// from the child waiter.
@@ -210,17 +218,27 @@ fn screen_thread(
                 raw.leave(); // back to cooked so the notice reads normally
                 // The app may have left the screen mid-redraw or with dangling
                 // attributes/cursor state, so reset and clear before the notice —
-                // we don't know what state the screen is in.
+                // we don't know what state the screen is in. Also blanket-disable
+                // the input modes the app may have switched on (mouse reporting,
+                // bracketed paste, application keypad/cursor): the app is paused
+                // but the real terminal would keep them, and e.g. tmux's mouse
+                // mode turns every click into escape-sequence garbage typed over
+                // the cooked-mode notice.
                 let _ = out.write_all(b"\x1b[0m\x1b[?25h\x1b[2J\x1b[H");
+                let _ = out.write_all(INPUT_MODES_OFF);
                 let _ = write!(out, "\x1b[33mshellglass: {msg}\x1b[0m\r\n");
                 let _ = out.flush();
             }
             Some(Msg::HubUp) if !connected => {
                 connected = true;
                 raw.enter();
-                // Repaint the (now up-to-date) screen over the notice text.
+                // Repaint the (now up-to-date) screen over the notice text, and
+                // restore the input modes to whatever the app has enabled *now* —
+                // the parser kept processing while paused, so this re-arms mouse
+                // reporting etc. even if the app changed modes mid-outage.
                 let _ = out.write_all(b"\x1b[2J\x1b[H");
                 let _ = out.write_all(&parser.screen().contents_formatted());
+                let _ = out.write_all(&parser.screen().input_mode_formatted());
                 let _ = out.flush();
                 dirty = true;
             }
