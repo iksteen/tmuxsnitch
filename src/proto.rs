@@ -55,7 +55,7 @@ pub const KEY_HEADER: &str = "x-shellglass-key";
 /// fails loudly at `/register` (403, "register its session id") instead of
 /// streaming frames the other side silently drops. The cost of a bump is that
 /// operators re-run `print-id` and update `--allow` + view URLs; keys stay valid.
-const SALT: &[u8] = b"shellglass/session-id/v2";
+const SALT: &[u8] = b"shellglass/session-id/v3";
 
 /// Underivable session id for a secret key: Argon2id (memory- and compute-hard)
 /// rendered as lowercase hex. Memory-hardness makes brute-forcing a weak secret

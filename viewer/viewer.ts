@@ -14,47 +14,41 @@
 // A color is null (default), a 0-255 palette index, or an [r,g,b] triple.
 export type Color = null | number | [number, number, number];
 
+// Flags arrive as 1 (absent = false); all checks are truthiness-based.
+type Flag = 0 | 1 | boolean;
+
 export interface Cell {
   t?: string; // text (grapheme); absent = blank
   f?: Color; // fg
   g?: Color; // bg
-  b?: boolean; // bold
-  d?: boolean; // dim
-  i?: boolean; // italic
-  u?: boolean; // underline
-  n?: boolean; // inverse
-  w?: boolean; // wide (two columns)
+  b?: Flag; // bold
+  d?: Flag; // dim
+  i?: Flag; // italic
+  u?: Flag; // underline
+  n?: Flag; // inverse
+  w?: Flag; // wide (two columns)
 }
 
 export type Cur = [number, number] | null;
 
-// A cell's style attributes (everything but the text), keyed like Cell.
+// A cell's style attributes (everything but the text), keyed like Cell. Flags
+// arrive as 1 (absent = false); truthiness checks handle both.
 export type Style = Omit<Cell, "t">;
 
-// Columnar cell block: dense text array + sparse style map (only non-plain cells).
-// A text entry is a glyph string, or the number 0 for a blank cell (cheaper than
-// "" and common). Empty arrays/maps are omitted, so a blank row is `{}`.
-export interface Block {
-  t?: (string | number)[];
-  s?: Record<number, Style>;
-}
+// A text entry: a string is one cell per CODEPOINT (consecutive single-codepoint
+// glyphs merged — "foo" is three cells), 0 is a blank cell, and a one-element
+// array ["…"] is a single cell holding a multi-codepoint grapheme (combining
+// marks), which a merged string could not represent unambiguously.
+export type TextEntry = string | number | [string];
 
-// A diff rectangle is a Block plus its position/size (serde flattens the block in).
-interface WireRect extends Block {
-  top: number;
-  left: number;
-  w: number;
-  h: number;
-}
+// A style run over the block's cell indices: [start, len, style].
+export type StyleRun = [number, number, Style];
 
-// A decoded rectangle: cells materialized from the columnar block.
-interface Rect {
-  top: number;
-  left: number;
-  w: number;
-  h: number;
-  cells: Cell[];
-}
+// Columnar cell block, positional: [text] or [text, style-runs].
+export type Block = [TextEntry[]] | [TextEntry[], StyleRun[]];
+
+// A changed line, positional: [row, left, text] or [row, left, text, style-runs].
+type WireRow = [number, number, TextEntry[]] | [number, number, TextEntry[], StyleRun[]];
 
 interface FullMsg {
   t: "f";
@@ -66,21 +60,29 @@ interface FullMsg {
 interface DiffMsg {
   t: "d";
   cur: Cur;
-  rects: WireRect[];
+  rows: WireRow[];
 }
 
-// Materialize a columnar block into per-cell objects (the form renderRow consumes).
-export function decodeBlock(block: Block): Cell[] {
-  const t = block.t ?? [];
-  const s = block.s;
-  const cells: Cell[] = new Array(t.length);
-  for (let i = 0; i < t.length; i++) {
-    const v = t[i];
-    const text = typeof v === "string" ? v : ""; // 0 → blank
-    const st = s && s[i];
-    cells[i] = st ? { t: text, ...st } : { t: text };
+// Materialize text entries + style runs into per-cell objects (the form renderRow
+// consumes). for..of on a string iterates CODEPOINTS (unlike split(""), which
+// would shred surrogate pairs), matching the encoder's merge rule exactly.
+export function decodeCells(text: TextEntry[], runs?: StyleRun[]): Cell[] {
+  const cells: Cell[] = [];
+  for (const v of text) {
+    if (typeof v === "number") cells.push({ t: "" });
+    else if (typeof v === "string") for (const ch of v) cells.push({ t: ch });
+    else cells.push({ t: v[0] });
+  }
+  for (const [start, len, st] of runs ?? []) {
+    for (let i = start; i < start + len && i < cells.length; i++) {
+      cells[i] = { t: cells[i].t, ...st };
+    }
   }
   return cells;
+}
+
+export function decodeBlock(block: Block): Cell[] {
+  return decodeCells(block[0] ?? [], block[1]);
 }
 interface BannerMsg {
   t: "b";
@@ -267,30 +269,27 @@ interface ScreenState {
 let screen: ScreenState = { cells: [], cur: null, rowEls: [] };
 let screenEl: HTMLElement;
 
-// Update the screen's cell buffer + cursor from a diff (with decoded rects),
-// returning the rows to re-render (changed rects plus the old and new cursor rows).
+// Update the screen's cell buffer + cursor from decoded line patches, returning
+// the rows to re-render (changed lines plus the old and new cursor rows).
 // DOM-free, so it's unit-tested.
 export function patchCells(
   state: { cells: Cell[][]; cur: Cur },
-  dp: { cur: Cur; rects: Rect[] },
+  dp: { cur: Cur; rows: { r: number; l: number; cells: Cell[] }[] },
 ): Set<number> {
   const dirty = new Set<number>();
   if (state.cur) dirty.add(state.cur[0]);
   if (dp.cur) dirty.add(dp.cur[0]);
   state.cur = dp.cur;
-  for (const rect of dp.rects) {
-    for (let dy = 0; dy < rect.h; dy++) {
-      const r = rect.top + dy;
-      let row = state.cells[r];
-      if (!row) {
-        row = [];
-        state.cells[r] = row;
-      }
-      for (let dx = 0; dx < rect.w; dx++) {
-        row[rect.left + dx] = rect.cells[dy * rect.w + dx];
-      }
-      dirty.add(r);
+  for (const patch of dp.rows) {
+    let row = state.cells[patch.r];
+    if (!row) {
+      row = [];
+      state.cells[patch.r] = row;
     }
+    for (let dx = 0; dx < patch.cells.length; dx++) {
+      row[patch.l + dx] = patch.cells[dx];
+    }
+    dirty.add(patch.r);
   }
   return dirty;
 }
@@ -313,14 +312,12 @@ function applyFull(m: FullMsg): void {
 }
 
 function applyDiff(m: DiffMsg): void {
-  const rects: Rect[] = m.rects.map((r) => ({
-    top: r.top,
-    left: r.left,
-    w: r.w,
-    h: r.h,
-    cells: decodeBlock(r),
+  const rows = m.rows.map(([r, l, text, runs]) => ({
+    r,
+    l,
+    cells: decodeCells(text, runs),
   }));
-  const dirty = patchCells(screen, { cur: m.cur, rects });
+  const dirty = patchCells(screen, { cur: m.cur, rows });
   for (const r of dirty) {
     const el = screen.rowEls[r];
     if (!el) continue;

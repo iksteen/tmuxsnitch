@@ -99,30 +99,54 @@ test("fill glyphs render as stretched SVG, plain text does not", () => {
   assert.doesNotMatch(plain, /<svg/);
 });
 
-test("patchCells writes rect cells and reports dirty rows", () => {
+test("patchCells writes line patches and reports dirty rows", () => {
   const state = { cells: [[{ t: "a" }, { t: "b" }]], cur: null as [number, number] | null };
   const dirty = patchCells(state, {
     cur: [0, 1],
-    rects: [{ top: 0, left: 1, w: 1, h: 1, cells: [{ t: "X" }] }],
+    rows: [{ r: 0, l: 1, cells: [{ t: "X" }] }],
   });
-  assert.equal(state.cells[0][1].t, "X", "rect cell written");
+  assert.equal(state.cells[0][1].t, "X", "patched cell written");
   assert.deepEqual(state.cur, [0, 1], "cursor updated");
   assert.ok(dirty.has(0), "changed + cursor row is dirty");
 });
 
 test("patchCells marks both old and new cursor rows dirty", () => {
   const state = { cells: [[{ t: "a" }], [{ t: "b" }]], cur: [0, 0] as [number, number] | null };
-  const dirty = patchCells(state, { cur: [1, 0], rects: [] });
+  const dirty = patchCells(state, { cur: [1, 0], rows: [] });
   assert.ok(dirty.has(0), "old cursor row");
   assert.ok(dirty.has(1), "new cursor row");
 });
 
-test("decodeBlock materializes columnar text + sparse style", () => {
-  // "a" plain, "B" bold+red (idx 1), "c" plain — only index 1 has a style entry.
-  const cells = decodeBlock({ t: ["a", "B", "c"], s: { 1: { f: 1, b: true } } });
-  assert.deepEqual(cells, [{ t: "a" }, { t: "B", f: 1, b: true }, { t: "c" }]);
-  // A blank cell rides as 0 and decodes to empty text (rendered as a space).
-  assert.deepEqual(decodeBlock({ t: ["a", 0] }), [{ t: "a" }, { t: "" }]);
-  // A blank/omitted block decodes to no cells.
-  assert.deepEqual(decodeBlock({}), []);
+test("decodeBlock expands runs, blanks, clusters, and style runs", () => {
+  // "aBc" is one merged run — one cell per codepoint; the style run covers B.
+  const cells = decodeBlock([["aBc"], [[1, 1, { f: 1, b: 1 }]]]);
+  assert.deepEqual(cells, [{ t: "a" }, { t: "B", f: 1, b: 1 }, { t: "c" }]);
+  // A blank cell rides as 0 between runs.
+  assert.deepEqual(decodeBlock([["a", 0, "b"]]), [{ t: "a" }, { t: "" }, { t: "b" }]);
+  // Strings split by CODEPOINT: an astral glyph is one cell, not two UTF-16 units.
+  assert.deepEqual(decodeBlock([["x🚀y"]]), [{ t: "x" }, { t: "🚀" }, { t: "y" }]);
+  // A multi-codepoint grapheme cell arrives as ["…"] and stays one cell.
+  assert.deepEqual(decodeBlock([["a", ["é"], "b"]]), [
+    { t: "a" },
+    { t: "é" },
+    { t: "b" },
+  ]);
+  // A style run spans multiple cells with one entry.
+  assert.deepEqual(decodeBlock([["abcd"], [[0, 3, { d: 1 }]]]), [
+    { t: "a", d: 1 },
+    { t: "b", d: 1 },
+    { t: "c", d: 1 },
+    { t: "d" },
+  ]);
+  // An empty block decodes to no cells.
+  assert.deepEqual(decodeBlock([[]]), []);
+});
+
+test("flags as 1 style like true (weight, reverse, dim, wide)", () => {
+  assert.equal(cellStyle({ f: 1, b: 1 }, false), "color:#cd0000;font-weight:bold;");
+  assert.equal(cellStyle({ n: 1 }, false), "color:#000000;background:#d0d0d0;");
+  assert.equal(cellStyle({ d: 1 }, false), "color:#787878;");
+  // Wide flag as 1 advances two columns.
+  const split = renderRow([{ t: "世", w: 1 }, { t: "a", b: 1 }], -1);
+  assert.match(split, /left:2ch;width:1ch;font-weight:bold;">a</);
 });

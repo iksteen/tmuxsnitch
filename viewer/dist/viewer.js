@@ -1,14 +1,23 @@
-export function decodeBlock(block) {
-    const t = block.t ?? [];
-    const s = block.s;
-    const cells = new Array(t.length);
-    for (let i = 0; i < t.length; i++) {
-        const v = t[i];
-        const text = typeof v === "string" ? v : "";
-        const st = s && s[i];
-        cells[i] = st ? { t: text, ...st } : { t: text };
+export function decodeCells(text, runs) {
+    const cells = [];
+    for (const v of text) {
+        if (typeof v === "number")
+            cells.push({ t: "" });
+        else if (typeof v === "string")
+            for (const ch of v)
+                cells.push({ t: ch });
+        else
+            cells.push({ t: v[0] });
+    }
+    for (const [start, len, st] of runs ?? []) {
+        for (let i = start; i < start + len && i < cells.length; i++) {
+            cells[i] = { t: cells[i].t, ...st };
+        }
     }
     return cells;
+}
+export function decodeBlock(block) {
+    return decodeCells(block[0] ?? [], block[1]);
 }
 let cfg;
 export function setConfig(c) {
@@ -160,19 +169,16 @@ export function patchCells(state, dp) {
     if (dp.cur)
         dirty.add(dp.cur[0]);
     state.cur = dp.cur;
-    for (const rect of dp.rects) {
-        for (let dy = 0; dy < rect.h; dy++) {
-            const r = rect.top + dy;
-            let row = state.cells[r];
-            if (!row) {
-                row = [];
-                state.cells[r] = row;
-            }
-            for (let dx = 0; dx < rect.w; dx++) {
-                row[rect.left + dx] = rect.cells[dy * rect.w + dx];
-            }
-            dirty.add(r);
+    for (const patch of dp.rows) {
+        let row = state.cells[patch.r];
+        if (!row) {
+            row = [];
+            state.cells[patch.r] = row;
         }
+        for (let dx = 0; dx < patch.cells.length; dx++) {
+            row[patch.l + dx] = patch.cells[dx];
+        }
+        dirty.add(patch.r);
     }
     return dirty;
 }
@@ -192,14 +198,12 @@ function applyFull(m) {
     };
 }
 function applyDiff(m) {
-    const rects = m.rects.map((r) => ({
-        top: r.top,
-        left: r.left,
-        w: r.w,
-        h: r.h,
-        cells: decodeBlock(r),
+    const rows = m.rows.map(([r, l, text, runs]) => ({
+        r,
+        l,
+        cells: decodeCells(text, runs),
     }));
-    const dirty = patchCells(screen, { cur: m.cur, rects });
+    const dirty = patchCells(screen, { cur: m.cur, rows });
     for (const r of dirty) {
         const el = screen.rowEls[r];
         if (!el)
