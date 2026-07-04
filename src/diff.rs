@@ -8,11 +8,12 @@
 //! (`viewer.ts`) applies; the push client emits the identical format, so one
 //! encoder/decoder pair covers both hops.
 //!
-//! - `{"t":"f", w, h, cur, rows:[block,…]}` — a full snapshot (sent to each viewer
+//! - `{"t":"f", w, h, c?, r:[block,…]}` — a full snapshot (sent to each viewer
 //!   on connect, and whenever the screen size changes).
-//! - `{"t":"d", cur, rows:[[r, l, text, style?],…]}` — changed lines only: row
+//! - `{"t":"d", c?, r:[[row, left, text, style?],…]}` — changed lines only: row
 //!   index, the cell index the span starts at, then the block. The viewer patches
-//!   its cell buffer and re-renders the affected rows.
+//!   its cell buffer and re-renders the affected rows. `c` is the cursor [row,
+//!   col]; absent = hidden.
 //! - `{"t":"b", html}` — an error banner.
 //!
 //! A block (see [`CellBlock`]) is positional `[text]` / `[text, style]`: `text` is
@@ -233,12 +234,16 @@ enum WireMsg<'a> {
     Full {
         w: u16,
         h: usize,
+        #[serde(rename = "c", skip_serializing_if = "Option::is_none")]
         cur: Option<(u16, u16)>,
+        #[serde(rename = "r")]
         rows: Vec<CellBlock<'a>>,
     },
     #[serde(rename = "d")]
     Diff {
+        #[serde(rename = "c", skip_serializing_if = "Option::is_none")]
         cur: Option<(u16, u16)>,
+        #[serde(rename = "r")]
         rows: Vec<WireRow<'a>>,
     },
     #[serde(rename = "b")]
@@ -591,13 +596,17 @@ enum WireMsgIn {
     #[serde(rename = "f")]
     Full {
         w: u16,
-        // The row count is implied by `rows`; the wire's `h` is for the viewer.
+        // The row count is implied by `r`; the wire's `h` is for the viewer.
+        #[serde(rename = "c", default)]
         cur: Option<(u16, u16)>,
+        #[serde(rename = "r")]
         rows: Vec<CellBlockIn>,
     },
     #[serde(rename = "d")]
     Diff {
+        #[serde(rename = "c", default)]
         cur: Option<(u16, u16)>,
+        #[serde(rename = "r")]
         rows: Vec<WireRowIn>,
     },
     #[serde(rename = "b")]
@@ -1059,7 +1068,7 @@ mod tests {
         b.rows[0][6].bold = true;
         let msg = diff_message(&a, &b).unwrap();
         assert!(
-            msg.contains(r#""rows":[[0,4,["O WO"],[[0,3,{"b":1}]]]]"#),
+            msg.contains(r#""r":[[0,4,["O WO"],[[0,3,{"b":1}]]]]"#),
             "positional line, merged text run, style run with 1-flag: {msg}"
         );
     }
@@ -1075,14 +1084,14 @@ mod tests {
         b.rows[0][0].fg = Color::Idx(174);
         let msg = diff_message(&a, &b).unwrap();
         assert!(
-            msg.contains(r#""rows":[[0,0,"y",{"f":174}]]"#),
+            msg.contains(r#""r":[[0,0,"y",{"f":174}]]"#),
             "compact styled single cell: {msg}"
         );
         // Plain single cell drops the style element entirely.
         let c = grid(&["z spinner"]);
         let msg2 = diff_message(&b, &c).unwrap();
         assert!(
-            msg2.contains(r#""rows":[[0,0,"z"]]"#),
+            msg2.contains(r#""r":[[0,0,"z"]]"#),
             "compact plain single cell: {msg2}"
         );
         // Both round-trip through the hub-side decoder.
@@ -1143,8 +1152,8 @@ mod tests {
         a.cursor = Some((0, 0));
         b.cursor = Some((0, 2));
         let msg = diff_message(&a, &b).expect("cursor move is a change");
-        assert!(msg.contains("\"cur\":[0,2]"), "carries new cursor: {msg}");
-        assert!(msg.contains("\"rows\":[]"), "no line patches: {msg}");
+        assert!(msg.contains("\"c\":[0,2]"), "carries new cursor: {msg}");
+        assert!(msg.contains("\"r\":[]"), "no line patches: {msg}");
     }
 
     #[test]
@@ -1162,7 +1171,9 @@ mod tests {
         let full = full_message_grid(&g);
         assert!(full.starts_with("{\"t\":\"f\""), "{full}");
         // Rows are positional blocks: text merged into one run, no style part.
-        assert!(full.contains(r#""rows":[[["hi"]]]"#), "{full}");
+        assert!(full.contains(r#""r":[[["hi"]]]"#), "{full}");
+        // Hidden cursor is omitted entirely, not "c":null.
+        assert!(!full.contains("\"c\":"), "hidden cursor omitted: {full}");
         let banner = banner_message("oops");
         assert_eq!(banner, "{\"t\":\"b\",\"html\":\"oops\"}");
     }

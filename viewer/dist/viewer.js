@@ -186,29 +186,30 @@ export function patchCells(state, dp) {
     return dirty;
 }
 function applyFull(m) {
-    const rows = m.rows.map(decodeBlock);
+    const cur = m.c ?? null;
+    const rows = m.r.map(decodeBlock);
     let html = `<div class="screen" style="width:${m.w}ch;height:calc(${m.h} * var(--lh));">`;
     for (let r = 0; r < rows.length; r++) {
-        html += `<div class="row">${renderRow(rows[r], cursorCol(m.cur, r))}</div>`;
+        html += `<div class="row">${renderRow(rows[r], cursorCol(cur, r))}</div>`;
     }
     html += "</div>";
     screenEl.innerHTML = html;
     const screenDiv = screenEl.firstElementChild;
     screen = {
         cells: rows,
-        cur: m.cur,
+        cur,
         rowEls: Array.from(screenDiv.children),
     };
 }
 function applyDiff(m) {
-    const rows = m.rows.map(([r, l, text, style]) => ({
+    const rows = m.r.map(([r, l, text, style]) => ({
         r,
         l,
         cells: typeof text === "string"
             ? [style ? { t: text, ...style } : { t: text }]
             : decodeCells(text, style),
     }));
-    const dirty = patchCells(screen, { cur: m.cur, rows });
+    const dirty = patchCells(screen, { cur: m.c ?? null, rows });
     for (const r of dirty) {
         const el = screen.rowEls[r];
         if (!el)

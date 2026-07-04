@@ -60,13 +60,13 @@ interface FullMsg {
   t: "f";
   w: number;
   h: number;
-  cur: Cur;
-  rows: Block[];
+  c?: Cur; // cursor [row, col]; absent = hidden
+  r: Block[];
 }
 interface DiffMsg {
   t: "d";
-  cur: Cur;
-  rows: WireRow[];
+  c?: Cur; // absent = hidden
+  r: WireRow[];
 }
 
 // Materialize text entries + style runs into per-cell objects (the form renderRow
@@ -305,10 +305,11 @@ export function patchCells(
 }
 
 function applyFull(m: FullMsg): void {
-  const rows = m.rows.map(decodeBlock);
+  const cur = m.c ?? null;
+  const rows = m.r.map(decodeBlock);
   let html = `<div class="screen" style="width:${m.w}ch;height:calc(${m.h} * var(--lh));">`;
   for (let r = 0; r < rows.length; r++) {
-    html += `<div class="row">${renderRow(rows[r], cursorCol(m.cur, r))}</div>`;
+    html += `<div class="row">${renderRow(rows[r], cursorCol(cur, r))}</div>`;
   }
   html += "</div>";
   screenEl.innerHTML = html;
@@ -316,13 +317,13 @@ function applyFull(m: FullMsg): void {
   const screenDiv = screenEl.firstElementChild!;
   screen = {
     cells: rows,
-    cur: m.cur,
+    cur,
     rowEls: Array.from(screenDiv.children) as HTMLElement[],
   };
 }
 
 function applyDiff(m: DiffMsg): void {
-  const rows = m.rows.map(([r, l, text, style]) => ({
+  const rows = m.r.map(([r, l, text, style]) => ({
     r,
     l,
     cells:
@@ -330,7 +331,7 @@ function applyDiff(m: DiffMsg): void {
         ? [style ? { t: text, ...(style as Style) } : { t: text }]
         : decodeCells(text, style as StyleRun[] | undefined),
   }));
-  const dirty = patchCells(screen, { cur: m.cur, rows });
+  const dirty = patchCells(screen, { cur: m.c ?? null, rows });
   for (const r of dirty) {
     const el = screen.rowEls[r];
     if (!el) continue;
