@@ -67,7 +67,13 @@ footer { max-width:1140px; width:100%; margin:0 auto; padding:24px clamp(16px,5v
    fringe. Overlays are pointer-events:none so the text stays selectable. */
 .stage { perspective:1600px; }
 .panel {
-  position:relative; max-width:100%; max-height:100%; overflow:auto;
+  /* border-box so max-width/height:100% cap the padded box — content-box would
+     let the panel's own padding overshoot the stage into the footer.
+     overflow:hidden at fit (the fit script switches to auto when zoomed in):
+     always-auto is a scrollbar trap — the fit is exact, so a transiently shown
+     scrollbar steals the pixels that make the other axis overflow, and the two
+     sustain each other. */
+  position:relative; box-sizing:border-box; max-width:100%; max-height:100%; overflow:hidden;
   scrollbar-width:thin; scrollbar-color:var(--border) transparent;
   touch-action:none; /* we own touch: one finger pans, two-finger pinch zooms */
   padding:26px 30px; border:none; border-radius:26px / 34px;
@@ -195,7 +201,12 @@ body:has(#crt:not(:checked)) #screen { filter:none; text-shadow:none; }
     const cs = getComputedStyle(el);
     return parseFloat(cs[a]) + parseFloat(cs[b]);
   };
-  const apply = () => { scr.style.zoom = fitZ * userZ; };
+  const apply = () => {
+    scr.style.zoom = fitZ * userZ;
+    // Scrollbars only when magnified — at fit the content fits by construction,
+    // and overflow:auto there is a scrollbar trap (see the .panel comment).
+    panel.style.overflow = userZ > 1 ? 'auto' : 'hidden';
+  };
   const fit = () => {
     const box = scr.firstElementChild;
     if (!box) return;
@@ -207,7 +218,12 @@ body:has(#crt:not(:checked)) #screen { filter:none; text-shadow:none; }
       - pads(panel, 'paddingLeft', 'paddingRight');
     const availH = stage.clientHeight - pads(stage, 'paddingTop', 'paddingBottom')
       - pads(panel, 'paddingTop', 'paddingBottom');
-    fitZ = Math.min(1, availW / box.offsetWidth, availH / box.offsetHeight);
+    // Fractional measurement (offsetWidth rounds), and a hair under the exact
+    // fit — the panel cap binds exactly, so a sub-pixel overshoot would flash
+    // scrollbars. At natural size (no shrink) keep zoom exactly 1 for crispness.
+    const b = box.getBoundingClientRect();
+    const z = Math.min(availW / b.width, availH / b.height);
+    fitZ = z >= 1 ? 1 : z * 0.999;
     apply();
     panel.scrollLeft = sl;
     panel.scrollTop = st;
