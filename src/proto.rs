@@ -73,8 +73,9 @@ pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 /// Frame a payload for the streaming push body: `[u32 BE length][payload bytes]`.
 /// A persistent POST carries a sequence of these, so the client never waits for a
 /// per-frame HTTP response (that round-trip is what made the hub feel laggy). The
-/// payload is a JSON-encoded [`crate::model::Frame`]; the hub diffs successive
-/// frames into the compact deltas it streams to viewers.
+/// payload is a [`crate::diff`] wire message — a full picture on (re)connect, then
+/// rectangle deltas — which the hub applies to its own matrix and forwards to
+/// viewers verbatim.
 pub fn frame_encode(payload: &str) -> Vec<u8> {
     let mut v = Vec::with_capacity(4 + payload.len());
     v.extend_from_slice(&(payload.len() as u32).to_be_bytes());

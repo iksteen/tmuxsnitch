@@ -1,11 +1,10 @@
 //! Parser-agnostic intermediate representation. Nothing here depends on `vt100`,
 //! so the input/parse layer can be swapped without touching the renderer.
 //!
-//! These types are also the diff/stream wire format: a backend pushes a [`Frame`]
-//! (a `Grid` snapshot, or an error `Banner`) which the client (`client.rs`) may
-//! serialize to a hub, and [`crate::diff`] turns successive `Grid`s into the compact
-//! rectangle deltas the browser renderer applies. Cell serialization is deliberately
-//! compact (short keys, defaults omitted) — a blank cell is `{}`.
+//! These are in-memory types only — the wire format (compact columnar cells,
+//! rectangle deltas) lives entirely in [`crate::diff`]. Only [`Color`] carries
+//! serde impls, because the wire's cell styles embed it (compact: `Default` is
+//! omitted by the container, `Idx(i)` is the bare number, `Rgb` is `[r,g,b]`).
 
 use serde::de::{self, SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
@@ -77,30 +76,19 @@ impl<'de> Deserialize<'de> for Color {
 }
 
 /// One rendered cell. Wide (double-width) cells carry their glyph and are marked
-/// `wide`; their trailing continuation column is dropped during parsing. Serde keys
-/// are single letters and every default is omitted, so a blank cell is `{}` and a
-/// plain letter is `{"t":"a"}`.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// `wide`; their trailing continuation column is dropped during parsing.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StyledCell {
     /// Grapheme content. Empty string means a blank cell (rendered as a space).
-    #[serde(rename = "t", default, skip_serializing_if = "String::is_empty")]
     pub text: String,
-    #[serde(rename = "f", default, skip_serializing_if = "is_default_color")]
     pub fg: Color,
-    #[serde(rename = "g", default, skip_serializing_if = "is_default_color")]
     pub bg: Color,
-    #[serde(rename = "b", default, skip_serializing_if = "is_false")]
     pub bold: bool,
-    #[serde(rename = "d", default, skip_serializing_if = "is_false")]
     pub dim: bool,
-    #[serde(rename = "i", default, skip_serializing_if = "is_false")]
     pub italic: bool,
-    #[serde(rename = "u", default, skip_serializing_if = "is_false")]
     pub underline: bool,
-    #[serde(rename = "n", default, skip_serializing_if = "is_false")]
     pub inverse: bool,
     /// Occupies two terminal columns.
-    #[serde(rename = "w", default, skip_serializing_if = "is_false")]
     pub wide: bool,
 }
 
@@ -114,7 +102,7 @@ pub(crate) fn is_false(b: &bool) -> bool {
 
 /// The terminal screen as cells. `rows[r]` holds the visible cells of row `r`, with
 /// wide continuation columns already removed (so a row may be shorter than `cols`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Grid {
     /// Nominal column count (the screen width in cells).
     pub cols: u16,
@@ -124,10 +112,36 @@ pub struct Grid {
 }
 
 /// What a backend publishes on the frame channel: a live screen snapshot, or an
-/// error banner to show in place of the screen. The client serializes this to the
-/// hub; the standalone server and hub both feed it to [`crate::diff::Live`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// error banner to show in place of the screen. The client streams its wire-encoded
+/// deltas to the hub; the standalone server and hub both keep the current `Frame`
+/// in a [`crate::diff::Live`].
+#[derive(Debug, Clone, PartialEq)]
 pub enum Frame {
     Screen(Grid),
     Banner(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn color_serde_is_compact_and_roundtrips() {
+        // Idx rides as a bare number, Rgb as an array.
+        assert_eq!(serde_json::to_string(&Color::Idx(9)).unwrap(), "9");
+        assert_eq!(
+            serde_json::to_string(&Color::Rgb(1, 2, 3)).unwrap(),
+            "[1,2,3]"
+        );
+        // Deserialization accepts all three forms (null = Default).
+        assert_eq!(serde_json::from_str::<Color>("9").unwrap(), Color::Idx(9));
+        assert_eq!(
+            serde_json::from_str::<Color>("[1,2,3]").unwrap(),
+            Color::Rgb(1, 2, 3)
+        );
+        assert_eq!(
+            serde_json::from_str::<Color>("null").unwrap(),
+            Color::Default
+        );
+    }
 }

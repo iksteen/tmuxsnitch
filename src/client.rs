@@ -2,13 +2,15 @@
 //! remote hub instead of serving them.
 //!
 //! It registers the page CSS once (`/register`), then opens a single long-lived
-//! `/stream` POST and writes length-prefixed frames into its body as the live
-//! task produces them. Because frames flow over one persistent connection, the
-//! client never blocks on a per-frame HTTP round-trip — that round-trip is what
-//! made a remote hub feel laggy. If the connection drops (hub restart, network
-//! blip) it re-registers and reopens.
+//! `/stream` POST and writes length-prefixed wire messages into its body: a full
+//! picture first, then only the deltas against what was already sent (the exact
+//! messages the hub forwards to its viewers verbatim). Because they flow over one
+//! persistent connection, the client never blocks on a per-frame HTTP round-trip —
+//! that round-trip is what made a remote hub feel laggy. If the connection drops
+//! (hub restart, network blip) it re-registers and reopens with a fresh full.
 
 use crate::config::Config;
+use crate::diff;
 use crate::fonts::{self, FontFile, Resolver};
 use crate::model::Frame;
 use crate::proto::{KEY_HEADER, RegisterBody, frame_encode};
@@ -132,12 +134,9 @@ enum End {
     Disconnected,
 }
 
-/// Length-prefix a frame for the push body: the wire payload is the JSON-encoded
-/// [`Frame`] (the hub diffs successive frames into per-viewer deltas).
-fn encode_frame(frame: &Frame) -> Bytes {
-    Bytes::from(frame_encode(
-        &serde_json::to_string(frame).unwrap_or_default(),
-    ))
+/// Length-prefix a wire message for the push body.
+fn encode_msg(msg: &str) -> Bytes {
+    Bytes::from(frame_encode(msg))
 }
 
 /// Open one streaming POST and pump frames until either the live task ends or the
@@ -156,25 +155,33 @@ async fn stream_push(
         .body(body)
         .send();
 
-    // Feeder: send the current frame immediately, then every subsequent change.
-    // A bounded channel + the watch's latest-only semantics give backpressure: if
-    // the network stalls, we hold and coalesce, always sending the freshest frame.
-    // ponytail: each frame is the full screen JSON — larger than the old HTML.
-    // Diff this link next (the hub already diffs per viewer; the client could send
-    // deltas and the hub apply them), but the fan-out win is on the viewer SSE.
+    // Feeder: this connection starts with a full picture (the hub knows nothing, or
+    // only a stale matrix from before a drop), then streams only the deltas against
+    // what we've already sent — the same wire messages the hub forwards verbatim to
+    // its viewers. A resize is a layout change, which encode_delta turns into a
+    // fresh full automatically. A bounded channel + the watch's latest-only
+    // semantics give backpressure: if the network stalls, we hold and coalesce, and
+    // the next delta is computed against the last frame actually sent.
     let feeder = async {
-        let cur = rx.borrow_and_update().clone();
-        if tx.send(Ok(encode_frame(&cur))).await.is_err() {
+        let mut prev = rx.borrow_and_update().clone();
+        if tx
+            .send(Ok(encode_msg(&diff::full_message(&prev))))
+            .await
+            .is_err()
+        {
             return false; // body consumer gone (connection dropped)
         }
         loop {
             if rx.changed().await.is_err() {
                 return true; // live task ended
             }
-            let f = rx.borrow_and_update().clone();
-            if tx.send(Ok(encode_frame(&f))).await.is_err() {
+            let next = rx.borrow_and_update().clone();
+            if let Some(msg) = diff::encode_delta(&prev, &next)
+                && tx.send(Ok(encode_msg(&msg))).await.is_err()
+            {
                 return false;
             }
+            prev = next;
         }
     };
 

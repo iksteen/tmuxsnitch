@@ -1,10 +1,13 @@
 //! Multi-session hub server: receives pushes from clients and serves viewers.
 //!
-//! It renders nothing — a client pushes its page CSS + render config (`/register`)
-//! then streams JSON frames over a single persistent `/stream` POST, keyed by
-//! `session_id(secret)`; the hub diffs them per session ([`diff::Live`]). Viewers
-//! open `/s/<id>` and stream cell deltas from `/s/<id>/events`. The id is the read
-//! capability; the secret (never sent to viewers) is the write capability.
+//! It renders nothing and re-diffs nothing — a client pushes its page CSS + render
+//! config (`/register`) then streams pre-encoded wire messages (a full picture,
+//! then deltas) over a single persistent `/stream` POST, keyed by
+//! `session_id(secret)`. The hub applies each message to the session's full matrix
+//! ([`diff::Live::publish_wire`], so late-joining viewers get a correct snapshot)
+//! and forwards the bytes to viewers verbatim. Viewers open `/s/<id>` and stream
+//! from `/s/<id>/events`. The id is the read capability; the secret (never sent to
+//! viewers) is the write capability.
 
 use crate::diff;
 use crate::fonts::CACHE_CONTROL_FONT;
@@ -221,12 +224,12 @@ async fn stream(State(st): State<HubState>, headers: HeaderMap, body: Body) -> R
         match proto::frame_drain(&mut buf) {
             Ok(frames) => {
                 for f in frames {
-                    // Each frame is a JSON-encoded Frame; publishing computes the
-                    // per-viewer deltas. Skip a malformed frame rather than dropping
-                    // the whole session (e.g. a version-skewed client).
-                    if let Ok(frame) = serde_json::from_str::<Frame>(&f) {
-                        live.publish(Arc::new(frame));
-                    }
+                    // Each payload is a wire message (full/diff/banner) the client
+                    // encoded. publish_wire applies it to the session's matrix and
+                    // forwards the bytes verbatim — and skips malformed or
+                    // out-of-sync ones rather than dropping the whole session
+                    // (e.g. a version-skewed client).
+                    live.publish_wire(&f);
                 }
             }
             Err(()) => break, // corrupt length prefix — drop the connection

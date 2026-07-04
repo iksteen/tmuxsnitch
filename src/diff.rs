@@ -1,11 +1,14 @@
 //! Diff-once, broadcast-to-all live streaming.
 //!
-//! A backend publishes successive [`Frame`]s to a [`Live`]. `Live` computes the
-//! delta from the previous frame **once** and broadcasts a single pre-encoded
-//! message to every subscribed viewer — no per-connection recomputation and no
-//! retained per-connection state. The wire messages are compact JSON the browser
-//! renderer (`viewer.ts`) applies. Cells are columnar (see [`CellBlock`]): a dense
-//! text array plus a sparse per-index style map, so plain text costs only its glyphs.
+//! A publisher feeds successive states into a [`Live`] — the standalone server
+//! publishes [`Frame`]s (deltas are computed here, once), the hub publishes the
+//! client's already-encoded wire messages (applied to the stored frame, forwarded
+//! **verbatim** — no recomputation). Every subscribed viewer gets the same
+//! pre-encoded message. The wire messages are compact JSON the browser renderer
+//! (`viewer.ts`) applies; the push client emits the identical format, so one
+//! encoder/decoder pair covers both hops. Cells are columnar (see [`CellBlock`]):
+//! a dense text array plus a sparse per-index style map, so plain text costs only
+//! its glyphs.
 //!
 //! - `{"t":"f", w, h, cur, rows:[block,…]}` — a full snapshot (sent to each viewer
 //!   on connect, and whenever the screen size changes).
@@ -18,11 +21,20 @@
 //! sharing an identical span merged vertically into one rectangle.
 //! ponytail: identical-span merge only; a bounding-rect merge over *overlapping*
 //! spans would send fewer rects but more (unchanged) cells — add if a workload wants it.
+//!
+//! Connecting is **lock-free** (`/s/<id>/events` is public — the id is the read
+//! capability — so a connect flood must not be able to stall the publisher): deltas
+//! are broadcast tagged with a monotonic sequence number, the current state lives in
+//! an [`ArcSwap`] snapshot stamped with the seq it reflects, and a viewer subscribes,
+//! loads the snapshot, and skips any delta the snapshot already covers. Each SSE
+//! event carries its seq as the `id:` line (`e.lastEventId` in the browser — the
+//! native hook for a future `Last-Event-ID` resume).
 
-use crate::model::{Color, Frame, Grid, StyledCell};
+use arc_swap::ArcSwap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use serde::{Serialize, Serializer};
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -31,17 +43,38 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
+use crate::model::{Color, Frame, Grid, StyledCell};
+
 /// Broadcast backlog per session. A viewer that falls this many frames behind gets
 /// a `Lagged` and is resynced with a fresh full snapshot — never a silent desync.
 /// ponytail: fixed; raise if slow viewers resync too often under bursty output.
 const BACKLOG: usize = 64;
 
-/// The live publisher for one session. Holds the current full [`Frame`] (for connect
-/// snapshots) and a broadcast of pre-encoded delta messages, both coordinated by one
-/// mutex so a connecting viewer can atomically snapshot-and-subscribe.
+/// The state a connecting viewer snapshots: the current frame, the sequence number
+/// of the last delta it reflects, and a lazily-encoded full message (memoized so a
+/// connect flood costs at most one encode per published frame, then pointer clones).
+struct State {
+    seq: u64,
+    frame: Arc<Frame>,
+    full: OnceLock<Arc<str>>,
+}
+
+impl State {
+    fn full_msg(&self) -> Arc<str> {
+        self.full
+            .get_or_init(|| Arc::from(full_message(&self.frame)))
+            .clone()
+    }
+}
+
+/// The live publisher for one session. Publishing is serialized by `writer` (two
+/// pushers for one session contend only with each other); connecting never takes a
+/// lock — see the module docs for the seq-reconciliation argument.
 pub struct Live {
-    current: Mutex<Arc<Frame>>,
-    diffs: broadcast::Sender<Arc<str>>,
+    state: ArcSwap<State>,
+    /// Serializes publishers; connects never touch it.
+    writer: Mutex<()>,
+    diffs: broadcast::Sender<(u64, Arc<str>)>,
 }
 
 impl Live {
@@ -50,7 +83,12 @@ impl Live {
     pub fn new(initial: Arc<Frame>) -> Arc<Live> {
         let (diffs, _) = broadcast::channel(BACKLOG);
         Arc::new(Live {
-            current: Mutex::new(initial),
+            state: ArcSwap::from_pointee(State {
+                seq: 0,
+                frame: initial,
+                full: OnceLock::new(),
+            }),
+            writer: Mutex::new(()),
             diffs,
         })
     }
@@ -69,43 +107,90 @@ impl Live {
         live
     }
 
-    /// The current full frame, for an initial server-side paint.
+    /// The current full frame, for an initial server-side paint. Lock-free.
     pub fn current(&self) -> Arc<Frame> {
-        Arc::clone(&self.current.lock().unwrap())
+        self.state.load().frame.clone()
     }
 
-    /// Publish the next frame: encode its delta from the current frame once, swap it
-    /// in, and broadcast. The send happens under the lock so it's atomic with any
-    /// concurrent [`connect`](Live::connect) snapshot+subscribe — a viewer either
-    /// snapshots the old frame and receives this delta, or snapshots the new frame
-    /// and skips it, never both or neither.
+    /// Publish the next frame (standalone path): encode its delta from the current
+    /// frame once, then commit it. No-op if nothing viewers see changed.
     pub fn publish(&self, next: Arc<Frame>) {
-        let mut cur = self.current.lock().unwrap();
-        let msg = encode_delta(&cur, &next);
-        *cur = next;
-        if let Some(msg) = msg {
-            let _ = self.diffs.send(msg); // Err only means no viewers — fine.
-        }
+        let guard = self.writer.lock().unwrap();
+        let state = self.state.load();
+        let Some(msg) = encode_delta(&state.frame, &next) else {
+            return;
+        };
+        self.commit(&guard, state.seq + 1, next, msg);
+    }
+
+    /// Publish an already-encoded wire message (hub path): apply it to the stored
+    /// frame and forward the received bytes verbatim — no re-diff, no re-encode.
+    /// Malformed or out-of-sync messages (a diff while the state is a banner) are
+    /// dropped so viewers never receive something they can't apply.
+    pub fn publish_wire(&self, msg: &str) {
+        // Parse outside the writer lock; only apply+commit are serialized.
+        let Ok(wire) = serde_json::from_str::<WireMsgIn>(msg) else {
+            return;
+        };
+        let guard = self.writer.lock().unwrap();
+        let state = self.state.load();
+        let Some(next) = apply_wire(&state.frame, wire) else {
+            return;
+        };
+        self.commit(&guard, state.seq + 1, Arc::new(next), Arc::from(msg));
+    }
+
+    /// Store the new state, THEN broadcast — that order is what makes lock-free
+    /// connects sound: a delta sent before a viewer subscribes implies its state was
+    /// stored before the viewer's snapshot load, so the snapshot's seq covers it and
+    /// the viewer's skip is correct; a delta sent after the subscribe is received,
+    /// and is skipped iff the snapshot already includes it.
+    fn commit(
+        &self,
+        _writer: &std::sync::MutexGuard<'_, ()>,
+        seq: u64,
+        frame: Arc<Frame>,
+        msg: Arc<str>,
+    ) {
+        self.state.store(Arc::new(State {
+            seq,
+            frame,
+            full: OnceLock::new(),
+        }));
+        let _ = self.diffs.send((seq, msg)); // Err only means no viewers — fine.
     }
 
     /// Subscribe a viewer: an SSE response that emits a full snapshot first, then
-    /// each broadcast delta. On `Lagged` (viewer overflowed the backlog) it resyncs
-    /// with a fresh full snapshot and carries on.
+    /// each broadcast delta. **Takes no locks** — subscribe first, snapshot second,
+    /// and skip deltas the snapshot already covers (seq ≤ snapshot's). On `Lagged`
+    /// (viewer overflowed the backlog) it resyncs with a fresh snapshot, raising the
+    /// skip threshold — stale retained deltas are discarded exactly, not replayed.
     pub fn connect(self: &Arc<Self>) -> Response {
-        let (full, rx) = {
-            let cur = self.current.lock().unwrap();
-            (full_message(&cur), self.diffs.subscribe())
-        };
+        let rx = self.diffs.subscribe();
+        let snap = self.state.load_full();
+        let full = snap.full_msg();
+        let mut threshold = snap.seq;
+        let head = tokio_stream::once(Ok::<_, Infallible>(
+            Event::default().id(snap.seq.to_string()).data(&*full),
+        ));
         let me = Arc::clone(self);
-        let head = tokio_stream::once(Ok::<_, Infallible>(Event::default().data(full)));
-        let tail = BroadcastStream::new(rx).map(move |r| {
-            let data = match r {
-                Ok(msg) => msg.to_string(),
+        let tail = BroadcastStream::new(rx).filter_map(move |r| {
+            let (seq, data) = match r {
+                Ok((seq, msg)) => {
+                    if seq <= threshold {
+                        return None; // already included in the snapshot we sent
+                    }
+                    (seq, msg)
+                }
                 Err(BroadcastStreamRecvError::Lagged(_)) => {
-                    full_message(&me.current.lock().unwrap())
+                    let snap = me.state.load_full();
+                    threshold = snap.seq;
+                    (snap.seq, snap.full_msg())
                 }
             };
-            Ok::<_, Infallible>(Event::default().data(data))
+            Some(Ok::<_, Infallible>(
+                Event::default().id(seq.to_string()).data(&*data),
+            ))
         });
         Sse::new(head.chain(tail))
             .keep_alive(KeepAlive::default())
@@ -114,7 +199,8 @@ impl Live {
 }
 
 /// Encode the delta from `cur` to `next`, or `None` if nothing viewers see changed.
-fn encode_delta(cur: &Frame, next: &Frame) -> Option<Arc<str>> {
+/// Also used by the push client to stream the same deltas to the hub.
+pub fn encode_delta(cur: &Frame, next: &Frame) -> Option<Arc<str>> {
     let msg = match (cur, next) {
         (Frame::Banner(old), Frame::Banner(new)) if old == new => return None,
         (_, Frame::Banner(html)) => banner_message(html),
@@ -125,7 +211,8 @@ fn encode_delta(cur: &Frame, next: &Frame) -> Option<Arc<str>> {
 }
 
 /// The full-snapshot message for a frame (banner frames snapshot as a banner).
-fn full_message(frame: &Frame) -> String {
+/// Also used by the push client on each (re)connect to seed the hub's matrix.
+pub fn full_message(frame: &Frame) -> String {
     match frame {
         Frame::Screen(g) => full_message_grid(g),
         Frame::Banner(html) => banner_message(html),
@@ -352,6 +439,178 @@ fn grid_rects<'a>(old: &Grid, new: &'a Grid) -> Vec<WireRect<'a>> {
     rects
 }
 
+// ── wire decode + apply (the hub side of the client→hub diff stream) ─────────
+//
+// Owned mirrors of the borrow-encoding wire types above. The hub deserializes each
+// received message just enough to keep its own full matrix current (so late-joining
+// viewers get a correct snapshot), then forwards the original bytes untouched.
+
+#[derive(Deserialize)]
+#[serde(tag = "t")]
+enum WireMsgIn {
+    #[serde(rename = "f")]
+    Full {
+        w: u16,
+        // The row count is implied by `rows`; the wire's `h` is for the viewer.
+        cur: Option<(u16, u16)>,
+        rows: Vec<CellBlockIn>,
+    },
+    #[serde(rename = "d")]
+    Diff {
+        cur: Option<(u16, u16)>,
+        rects: Vec<WireRectIn>,
+    },
+    #[serde(rename = "b")]
+    Banner { html: String },
+}
+
+#[derive(Deserialize)]
+struct WireRectIn {
+    top: usize,
+    left: usize,
+    w: usize,
+    h: usize,
+    #[serde(flatten)]
+    block: CellBlockIn,
+}
+
+#[derive(Deserialize, Default)]
+struct CellBlockIn {
+    #[serde(rename = "t", default)]
+    text: Vec<TextIn>,
+    // String keys: JSON object keys always arrive as strings, and the flatten /
+    // internally-tagged containers these ride in buffer through serde's Content,
+    // which loses serde_json's integer-key conversion. Parsed in decode_block.
+    #[serde(rename = "s", default)]
+    style: BTreeMap<String, CellStyleIn>,
+}
+
+/// Mirror of [`Text`]: the number `0` is a blank cell, a string is a glyph.
+enum TextIn {
+    Blank,
+    Glyph(String),
+}
+
+impl<'de> Deserialize<'de> for TextIn {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<TextIn, D::Error> {
+        struct TextVisitor;
+        impl<'de> Visitor<'de> for TextVisitor {
+            type Value = TextIn;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("0 (blank) or a glyph string")
+            }
+            fn visit_u64<E: de::Error>(self, _: u64) -> Result<TextIn, E> {
+                Ok(TextIn::Blank)
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<TextIn, E> {
+                Ok(TextIn::Glyph(v.to_string()))
+            }
+            fn visit_string<E: de::Error>(self, v: String) -> Result<TextIn, E> {
+                Ok(TextIn::Glyph(v))
+            }
+        }
+        d.deserialize_any(TextVisitor)
+    }
+}
+
+/// Mirror of [`CellStyle`]; every field defaults so a sparse entry stays sparse.
+#[derive(Deserialize, Default)]
+struct CellStyleIn {
+    #[serde(rename = "f", default)]
+    fg: Color,
+    #[serde(rename = "g", default)]
+    bg: Color,
+    #[serde(rename = "b", default)]
+    bold: bool,
+    #[serde(rename = "d", default)]
+    dim: bool,
+    #[serde(rename = "i", default)]
+    italic: bool,
+    #[serde(rename = "u", default)]
+    underline: bool,
+    #[serde(rename = "n", default)]
+    inverse: bool,
+    #[serde(rename = "w", default)]
+    wide: bool,
+}
+
+/// Materialize a columnar block into cells (mirror of `viewer.ts::decodeBlock`).
+fn decode_block(block: CellBlockIn) -> Vec<StyledCell> {
+    let mut style = block.style;
+    block
+        .text
+        .into_iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let text = match t {
+                TextIn::Blank => String::new(),
+                TextIn::Glyph(g) => g,
+            };
+            match style.remove(&i.to_string()) {
+                Some(s) => StyledCell {
+                    text,
+                    fg: s.fg,
+                    bg: s.bg,
+                    bold: s.bold,
+                    dim: s.dim,
+                    italic: s.italic,
+                    underline: s.underline,
+                    inverse: s.inverse,
+                    wide: s.wide,
+                },
+                None => StyledCell {
+                    text,
+                    ..Default::default()
+                },
+            }
+        })
+        .collect()
+}
+
+/// Apply a decoded wire message to the previous frame, yielding the new one — the
+/// state transition `viewer.ts` performs, mirrored so the hub's matrix stays in
+/// lockstep with every browser. `None` = drop the message (a diff arriving while
+/// the state is a banner is a desync; forwarding it would corrupt viewers too).
+fn apply_wire(prev: &Frame, msg: WireMsgIn) -> Option<Frame> {
+    match msg {
+        WireMsgIn::Full { w, cur, rows } => Some(Frame::Screen(Grid {
+            cols: w,
+            rows: rows.into_iter().map(decode_block).collect(),
+            cursor: cur,
+        })),
+        WireMsgIn::Banner { html } => Some(Frame::Banner(html)),
+        WireMsgIn::Diff { cur, rects } => {
+            let Frame::Screen(grid) = prev else {
+                return None;
+            };
+            let mut grid = grid.clone();
+            for rect in rects {
+                let cells = decode_block(rect.block);
+                for dy in 0..rect.h {
+                    let Some(row) = grid.rows.get_mut(rect.top + dy) else {
+                        continue; // out-of-range row: same_layout should prevent this
+                    };
+                    for dx in 0..rect.w {
+                        let cell = cells.get(dy * rect.w + dx).cloned().unwrap_or_default();
+                        let i = rect.left + dx;
+                        if i < row.len() {
+                            row[i] = cell;
+                        } else {
+                            // Mirror viewer.ts: a jagged row can grow — pad then push.
+                            while row.len() < i {
+                                row.push(StyledCell::default());
+                            }
+                            row.push(cell);
+                        }
+                    }
+                }
+            }
+            grid.cursor = cur;
+            Some(Frame::Screen(grid))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,21 +754,131 @@ mod tests {
         );
     }
 
+    // ── decode/apply round trips (hub matrix must mirror every viewer) ────────
+
+    /// Apply an encoded wire message string onto a frame, as the hub does.
+    fn apply(prev: &Frame, msg: &str) -> Option<Frame> {
+        apply_wire(prev, serde_json::from_str::<WireMsgIn>(msg).unwrap())
+    }
+
+    /// Grid equality up to trailing blank cells per row (a diff that shrinks a row
+    /// leaves explicit blanks where the origin simply has a shorter row — same
+    /// rendering, different cell count).
+    fn assert_grid_equiv(a: &Grid, b: &Grid) {
+        let trim = |g: &Grid| {
+            let mut g = g.clone();
+            for row in &mut g.rows {
+                while row.last() == Some(&StyledCell::default()) {
+                    row.pop();
+                }
+            }
+            g
+        };
+        assert_eq!(trim(a), trim(b));
+    }
+
     #[test]
-    fn compact_cells_omit_defaults() {
-        // A blank cell serializes to {} and a plain letter to {"t":"x"}.
-        let g = grid(&["x"]);
-        let json = serde_json::to_string(&g.rows[0]).unwrap();
-        assert_eq!(json, "[{\"t\":\"x\"}]");
-        let blank_json = serde_json::to_string(&StyledCell::default()).unwrap();
-        assert_eq!(blank_json, "{}");
-        // A 256-color index rides as a bare number; rgb as an array.
-        let mut c = cell('y');
-        c.fg = Color::Idx(9);
-        c.bg = Color::Rgb(1, 2, 3);
-        assert_eq!(
-            serde_json::to_string(&c).unwrap(),
-            "{\"t\":\"y\",\"f\":9,\"g\":[1,2,3]}"
+    fn full_message_roundtrips_through_apply() {
+        // Wide + styled + blank cells all survive encode → decode → grid.
+        let mut g = grid(&["a世c", "xyz"]);
+        g.rows[0][1].wide = true;
+        g.rows[0][2].fg = Color::Idx(9);
+        g.rows[0][2].bg = Color::Rgb(1, 2, 3);
+        g.rows[0][2].bold = true;
+        g.rows[1].push(StyledCell::default()); // trailing blank rides as 0
+        g.cursor = Some((1, 2));
+        let prev = Frame::Banner("old".into());
+        let applied = apply(&prev, &full_message_grid(&g)).expect("full applies");
+        assert_eq!(applied, Frame::Screen(g));
+    }
+
+    #[test]
+    fn diff_message_roundtrips_through_apply() {
+        // Styled change + jagged row growth + cursor move, applied at the "hub".
+        // Diffs only ever happen between same-layout grids, so pin cols.
+        let mut a = grid(&["hello", "sh"]);
+        let mut b = grid(&["heLLo", "sh $ ls -la"]);
+        a.cols = 11;
+        b.rows[0][2].fg = Color::Idx(2);
+        b.rows[0][2].inverse = true;
+        a.cursor = Some((0, 0));
+        b.cursor = Some((1, 10));
+        let msg = diff_message(&a, &b).expect("changes → diff");
+        let applied = apply(&Frame::Screen(a), &msg).expect("diff applies");
+        let Frame::Screen(applied) = applied else {
+            panic!("diff yields a screen")
+        };
+        assert_grid_equiv(&applied, &b);
+    }
+
+    #[test]
+    fn diff_apply_handles_row_shrink() {
+        // The new row is shorter; the diff writes explicit blanks over the tail.
+        // (Same layout — only the row contents shrink, not the grid.)
+        let a = grid(&["longline"]);
+        let mut b = grid(&["log"]);
+        b.cols = a.cols;
+        let msg = diff_message(&a, &b).expect("shrink → diff");
+        let Frame::Screen(applied) = apply(&Frame::Screen(a), &msg).unwrap() else {
+            panic!("screen")
+        };
+        assert_grid_equiv(&applied, &b);
+    }
+
+    #[test]
+    fn diff_on_banner_is_dropped() {
+        let a = grid(&["abc"]);
+        let b = grid(&["abX"]);
+        let msg = diff_message(&a, &b).unwrap();
+        assert!(
+            apply(&Frame::Banner("waiting".into()), &msg).is_none(),
+            "a diff can't apply to a banner — must be dropped, not forwarded"
         );
+    }
+
+    #[test]
+    fn publish_wire_updates_current_and_forwards_verbatim() {
+        let live = Live::new(Arc::new(Frame::Banner("waiting".into())));
+        let mut rx = live.diffs.subscribe();
+
+        let g = grid(&["hi"]);
+        let full = full_message_grid(&g);
+        live.publish_wire(&full);
+        assert_eq!(*live.current(), Frame::Screen(g.clone()), "matrix updated");
+        let (seq, fwd) = rx.try_recv().expect("full forwarded");
+        assert_eq!((seq, &*fwd), (1, full.as_str()), "verbatim bytes, seq 1");
+
+        // A diff advances both the matrix and the seq, still verbatim.
+        let g2 = grid(&["hX"]);
+        let dmsg = diff_message(&g, &g2).unwrap();
+        live.publish_wire(&dmsg);
+        assert_eq!(*live.current(), Frame::Screen(g2), "diff applied to matrix");
+        let (seq, fwd) = rx.try_recv().expect("diff forwarded");
+        assert_eq!((seq, &*fwd), (2, dmsg.as_str()));
+
+        // Garbage and out-of-sync messages are dropped, not forwarded.
+        live.publish_wire("not json");
+        let live2 = Live::new(Arc::new(Frame::Banner("waiting".into())));
+        let mut rx2 = live2.diffs.subscribe();
+        live2.publish_wire(&dmsg); // diff while state is a banner
+        assert!(rx.try_recv().is_err(), "garbage not forwarded");
+        assert!(rx2.try_recv().is_err(), "diff-on-banner not forwarded");
+    }
+
+    #[test]
+    fn snapshot_seq_covers_prior_deltas() {
+        // The lock-free connect contract: a snapshot loaded after publishes reports
+        // the seq of the last delta, so a viewer skips everything ≤ it.
+        let live = Live::new(Arc::new(Frame::Screen(grid(&["a"]))));
+        live.publish(Arc::new(Frame::Screen(grid(&["b"]))));
+        live.publish(Arc::new(Frame::Screen(grid(&["c"]))));
+        let snap = live.state.load();
+        assert_eq!(snap.seq, 2, "two deltas published");
+        assert_eq!(*snap.frame, Frame::Screen(grid(&["c"])));
+        // The memoized full reflects the latest state.
+        assert!(snap.full_msg().contains("\"c\""));
+        // An unchanged publish is a no-op (no seq bump, no message).
+        live.publish(Arc::new(Frame::Screen(grid(&["c"]))));
+        assert_eq!(live.state.load().seq, 2);
     }
 }
