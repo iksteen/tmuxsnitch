@@ -48,7 +48,7 @@ PTY output bytes → vt100::Parser → model::Grid (StyledCell cells)
 - `viewer/viewer.ts` — the live browser renderer (TypeScript): applies full/diff/banner messages to an in-memory cell grid and re-renders dirty rows. **It must mirror `render.rs` byte-for-byte** (run coalescing, absolute `left:{col}ch` positioning, SVG symbol cells, palette/dim/reverse math) — nothing enforces this at build time, so change them together. `build.rs` compiles it (local `tsc`, else the committed `viewer/dist/viewer.js`), bakes it in via `include_str!`, and both servers serve it at `/viewer.js`.
 - `render.rs` — the Rust reference renderer (`render_fragment`, kept in lockstep with `viewer.ts`), used for the standalone `GET /` initial paint; also builds `@font-face` CSS, the render-config JSON handed to the browser, and fills the page template.
 - `fonts.rs` — `symbol_map` codepoint→family resolution + locating font files via `fontdb` (extracts a single face from `.ttc`) so viewers render glyphs with no local install. `fc-match` is consulted only to resolve a CSS generic like `monospace`.
-- `config.rs` — TOML config (`default_font` stack, `symbol_map`, `theme`/`template`).
+- `config.rs` — TOML config (`default_font` stack, `symbol_map`, `template`). The built-in template carries an in-page CRT-effect toggle (off by default, localStorage-persisted) — there is no `theme` option.
 - `proto.rs` — client/hub wire contract.
 
 ## Capability model (proto.rs)

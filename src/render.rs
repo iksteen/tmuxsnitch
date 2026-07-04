@@ -38,15 +38,12 @@ pub fn font_face_css(fonts: &[FontFile], url_prefix: &str) -> String {
 const DEFAULT_FG: (u8, u8, u8) = (0xd0, 0xd0, 0xd0);
 const DEFAULT_BG: (u8, u8, u8) = (0x00, 0x00, 0x00);
 
-/// Built-in viewer template (n3o-style dark chrome). A template is a full HTML
-/// document with three tokens the renderer fills: `{{style}}` (the generated
-/// terminal CSS + `@font-face`), `{{screen}}` (the `#screen` div the SSE updater
-/// swaps), and `{{script}}` (that updater). Override via `--config`'s `template`.
+/// Built-in viewer template (n3o-style dark chrome, with an in-page CRT-effect
+/// toggle, off by default). A template is a full HTML document with three tokens
+/// the renderer fills: `{{style}}` (the generated terminal CSS + `@font-face`),
+/// `{{screen}}` (the `#screen` div the live renderer fills), and `{{script}}`
+/// (the scripts that boot it). Override via `--config`'s `template`.
 pub const DEFAULT_TEMPLATE: &str = include_str!("template.html");
-
-/// Built-in CRT theme: the default chrome plus a pure-CSS CRT overlay (scanlines,
-/// phosphor bloom, flicker, vignette). Selected with `theme = "crt"`.
-pub const CRT_TEMPLATE: &str = include_str!("template-crt.html");
 
 /// Everything that goes inside `<style>`: the served-font `@font-face` rules plus
 /// the config-derived base CSS. Computed by whoever owns the config (the standalone
@@ -631,12 +628,15 @@ mod tests {
     }
 
     #[test]
-    fn builtin_templates_have_all_tokens() {
-        for (name, tmpl) in [("default", DEFAULT_TEMPLATE), ("crt", CRT_TEMPLATE)] {
-            for tok in ["{{style}}", "{{screen}}", "{{script}}"] {
-                assert!(tmpl.contains(tok), "{name} template missing {tok}");
-            }
+    fn builtin_template_has_all_tokens() {
+        for tok in ["{{style}}", "{{screen}}", "{{script}}"] {
+            assert!(DEFAULT_TEMPLATE.contains(tok), "template missing {tok}");
         }
+        // The CRT toggle ships off: effects only when the viewer opts in.
+        assert!(
+            DEFAULT_TEMPLATE.contains("id=\"crt\">"),
+            "CRT checkbox must not default to checked"
+        );
     }
 
     #[test]

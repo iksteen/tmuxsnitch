@@ -176,15 +176,12 @@ powerline rendering by serving kitty's bundled `Symbols Nerd Font Mono` as a fal
 
 ## Templating
 
-Two built-in themes ship: `default` (dark) and `crt` (the same, with a pure-CSS CRT
-overlay — scanlines, phosphor bloom, flicker, vignette). Pick one in your `--config`:
+The built-in page is a dark chrome with a **CRT toggle** in the nav — a pure-CSS CRT
+overlay (scanlines, phosphor bloom, flicker, vignette), off by default and remembered
+per browser in localStorage.
 
-```toml
-theme = "crt"
-```
-
-For a fully custom page, point `template` at a full HTML document (this overrides
-`theme`) with three tokens the renderer fills at serve time:
+For a fully custom page, point `template` at a full HTML document with three tokens
+the renderer fills at serve time:
 
 | Token | Filled with |
 |-------|-------------|
@@ -201,7 +198,7 @@ Everything around those tokens is yours — nav, wrapper, footer, extra `<style>
 `{{screen}}`'s `#screen` id is load-bearing (the updater targets it); the others can be
 placed anywhere in the document. Terminal content that happens to contain a literal
 token string is left intact. In hub mode the client pushes its template to the hub, so
-custom themes work off-box too.
+custom pages work off-box too.
 
 ## Security notes
 
@@ -236,6 +233,6 @@ custom themes work off-box too.
 ## Status
 
 Mirror an interactive command in a PTY (the `script(1)` model, one screen) with live
-rendering, standalone + client/hub push, viewer templating (default + CRT themes), and
-optional hub TLS (own cert or ACME/Let's Encrypt). Not yet: scrollback, multiple
-sessions/panes in one view.
+rendering, standalone + client/hub push, viewer templating (built-in page with a CRT
+toggle, or a custom template), and optional hub TLS (own cert or ACME/Let's Encrypt).
+Not yet: scrollback, multiple sessions/panes in one view.
