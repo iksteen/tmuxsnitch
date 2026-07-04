@@ -34,7 +34,7 @@ PTY output bytes → vt100::Parser → model::Grid (StyledCell cells)
   → SSE → viewer.js renders cells → HTML in the browser
 ```
 
-**Input backend** — `pty.rs` (`render_setup` in `main.rs`) produces a `watch::Receiver<Arc<Frame>>` of structured screen snapshots (`Frame::Screen(Grid)`). It runs one command in a PTY (`script(1)` model); one parser, one screen. A single `screen` thread owns raw mode + stdout + parser so hub-connection notices can pause/repaint cleanly, and snapshots at a 30fps cap (`MIN_FRAME`). The command defaults to `$SHELL`; `SIGWINCH` reflows both the PTY and the parser. Unix only.
+**Input backend** — `pty.rs` (started from `main.rs`; in push mode only after the first successful hub registration, so a down hub retries before the command runs) produces a `watch::Receiver<Arc<Frame>>` of structured screen snapshots (`Frame::Screen(Grid)`). It runs one command in a PTY (`script(1)` model); one parser, one screen. A single `screen` thread owns raw mode + stdout + parser so hub-connection notices can pause/repaint cleanly, and snapshots at a 30fps cap (`MIN_FRAME`). The command defaults to `$SHELL`; `SIGWINCH` reflows both the PTY and the parser. Unix only.
 
 **Three serving modes** (all in `main.rs`):
 - Standalone (`server.rs`) — local axum server: `GET /` page, `GET /events` SSE deltas, `GET /viewer.js` the baked renderer.

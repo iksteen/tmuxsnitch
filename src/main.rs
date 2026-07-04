@@ -221,21 +221,18 @@ fn gen_key() -> Result<()> {
     Ok(())
 }
 
-/// The shared render setup for `serve` and `push`: load config, resolve fonts, and
-/// build the input backend. Returns everything the two modes need to run.
-struct Rendered {
+/// Config-derived state shared by `serve` and `push`: fonts resolved and read,
+/// template loaded. Deliberately does NOT start the PTY — `push` must register
+/// with the hub first, so a bad hub address or a down hub is reported (and
+/// retried) before the terminal is switched to raw mode and the command runs.
+struct Setup {
     config: Arc<Config>,
     resolver: Arc<Resolver>,
     fonts: Arc<Vec<FontFile>>,
     template: Arc<String>,
-    rx: tokio::sync::watch::Receiver<Arc<model::Frame>>,
-    notifier: Option<pty::Notifier>,
 }
 
-/// Load config + fonts and start the PTY backend. The caller prints its URL *before*
-/// this returns, because the PTY switches the terminal to raw mode and anything
-/// printed after would corrupt the session.
-fn render_setup(source: SourceArgs) -> Result<Rendered> {
+fn setup(source: &SourceArgs) -> Result<Setup> {
     let mut config = match &source.config {
         Some(path) => Config::load(path)?,
         None => Config::default(),
@@ -247,53 +244,55 @@ fn render_setup(source: SourceArgs) -> Result<Rendered> {
     fonts::resolve_generics(&mut config);
     let fonts = Arc::new(fonts::collect_fonts(&config));
     let template = Arc::new(config.template_html().context("loading viewer template")?);
-    let config = Arc::new(config);
-
-    // The backend emits structured frames; color/glyph rendering happens in the
-    // browser (and the initial paint via the resolver held here), so it no longer
-    // needs the config or resolver.
-    let (rx, notifier) = pty::start(&source.command())?;
-    Ok(Rendered {
-        config,
+    Ok(Setup {
+        config: Arc::new(config),
         resolver,
         fonts,
         template,
-        rx,
-        notifier: Some(notifier),
     })
 }
 
 /// Standalone live viewer: render locally and serve the page + SSE over HTTP.
 async fn run_serve(source: SourceArgs, bind_addr: &str) -> Result<()> {
     let listener = bind(bind_addr)?;
-    let desc = describe_source(&source);
-    let r = render_setup(source)?;
-    // Print the URL before a PTY backend switches the terminal to raw mode.
+    let s = setup(&source)?;
+    // Print the URL before the PTY switches the terminal to raw mode.
     println!(
-        "shellglass: mirroring {desc} at http://{}/",
+        "shellglass: mirroring {} at http://{}/",
+        describe_source(&source),
         listener.local_addr()?
     );
+    let (rx, _notifier) = pty::start(&source.command())?;
     let state = AppState {
-        font_css: Arc::new(render::font_face_css(&r.fonts, "/fonts/")),
-        config: r.config,
-        resolver: r.resolver,
-        fonts: r.fonts,
-        template: r.template,
-        live: diff::Live::spawn(r.rx),
+        font_css: Arc::new(render::font_face_css(&s.fonts, "/fonts/")),
+        config: s.config,
+        resolver: s.resolver,
+        fonts: s.fonts,
+        template: s.template,
+        live: diff::Live::spawn(rx),
     };
     axum::serve(listener, server::app(state)).await?;
     Ok(())
 }
 
-/// Client mode: render locally and push frames to a remote hub.
+/// Client mode: render locally and push frames to a remote hub. The PTY (and the
+/// command) start only once the hub has accepted a registration — `client::run`
+/// invokes the closure after the first successful register.
 async fn run_push(url: String, key: String, source: SourceArgs) -> Result<()> {
     let id = proto::session_id(&key);
     let base = url.trim_end_matches('/');
-    // Print the view URL before starting the backend (PTY raw mode) — see render_setup.
+    // Print the view URL before the backend can take the terminal (PTY raw mode).
     println!("shellglass: pushing live to {base}; view at {base}/s/{id}");
-    let r = render_setup(source)?;
+    let s = setup(&source)?;
     client::run(
-        url, key, id, r.config, r.resolver, r.fonts, r.template, r.rx, r.notifier,
+        url,
+        key,
+        id,
+        s.config,
+        s.resolver,
+        s.fonts,
+        s.template,
+        || pty::start(&source.command()),
     )
     .await
 }

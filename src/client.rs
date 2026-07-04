@@ -1,13 +1,16 @@
 //! Push client: run the live PTY pipeline locally, but stream its frames to a
 //! remote hub instead of serving them.
 //!
-//! It registers the page CSS once (`/register`), then opens a single long-lived
-//! `/stream` POST and writes length-prefixed wire messages into its body: a full
-//! picture first, then only the deltas against what was already sent (the exact
-//! messages the hub forwards to its viewers verbatim). Because they flow over one
-//! persistent connection, the client never blocks on a per-frame HTTP round-trip —
-//! that round-trip is what made a remote hub feel laggy. If the connection drops
-//! (hub restart, network blip) it re-registers and reopens with a fresh full.
+//! It registers with the hub (`/register`, retrying until the hub is reachable)
+//! **before** starting the PTY and the command — a down hub never leaves a
+//! half-started session, and a rejected key fails cleanly before the terminal is
+//! taken over. It then opens a single long-lived `/stream` POST and writes
+//! length-prefixed wire messages into its body: a full picture first, then only
+//! the deltas against what was already sent (the exact messages the hub forwards
+//! to its viewers verbatim). Because they flow over one persistent connection,
+//! the client never blocks on a per-frame HTTP round-trip — that round-trip is
+//! what made a remote hub feel laggy. If the connection drops (hub restart,
+//! network blip) it re-registers and reopens with a fresh full.
 
 use crate::config::Config;
 use crate::diff;
@@ -34,8 +37,10 @@ pub async fn run(
     resolver: Arc<Resolver>,
     fonts: Arc<Vec<FontFile>>,
     template: Arc<String>,
-    mut rx: watch::Receiver<Arc<Frame>>,
-    notifier: Option<crate::pty::Notifier>,
+    // Starts the PTY backend (raw mode, the command itself). Invoked only after the
+    // hub has accepted a registration, so a down or misconfigured hub is reported —
+    // and retried — before the command runs and the terminal is taken over.
+    start: impl FnOnce() -> Result<(watch::Receiver<Arc<Frame>>, crate::pty::Notifier)>,
 ) -> Result<()> {
     let base = base_url.trim_end_matches('/').to_string();
     let http = reqwest::Client::new();
@@ -52,35 +57,43 @@ pub async fn run(
     };
     let reg_body = Bytes::from(serde_json::to_vec(&reg).context("encoding register payload")?);
 
-    let mut first = true;
+    let mut start = Some(start);
+    // The PTY backend, started after the first successful registration. Until then
+    // outage reports go to stderr (the terminal is still ours); after, the notifier
+    // pauses/restores the raw session cleanly.
+    let mut backend: Option<(watch::Receiver<Arc<Frame>>, crate::pty::Notifier)> = None;
     // Whether we've reported the hub as unreachable (so we report down/up once per
-    // outage, not every retry). In PTY mode this drives a clean pause/restore of the
-    // terminal via the notifier; otherwise it's a plain stderr log.
+    // outage, not every retry).
     let mut down = false;
     loop {
         // Register (also re-registers the CSS after a hub restart) before opening
         // the stream. register is a clean request/response that fails fast when the
         // hub is down, so the reconnect loop spins here — cheaply — until it's back,
-        // instead of hanging on a stream POST to an unreachable hub.
+        // instead of hanging on a stream POST to an unreachable hub. Startup and
+        // mid-session failures take the same path; only a rejected key is fatal
+        // (retrying can't fix it).
+        let notifier = backend.as_ref().map(|(_, n)| n);
         match register(&http, &base, &key, &reg_body).await {
             Reg::Ok => {
-                first = false;
                 if down {
-                    report_up(&notifier);
+                    report_up(notifier);
                     down = false;
+                }
+                if backend.is_none() {
+                    // Hub reachable and key accepted — now take the terminal and
+                    // launch the command.
+                    backend = Some(start.take().expect("started once")()?);
                 }
             }
             Reg::Forbidden => bail!(
                 "hub rejected this key: register its session id on the hub \
                  (run `print-id --key <secret>`, add it to the hub's --allow)"
             ),
-            Reg::Unreachable(e) if first => return Err(e).context("registering with hub"),
-            Reg::Rejected(s) if first => bail!("hub rejected the registration (HTTP {s})"),
             // Retry either way, but say which it is — an HTTP response means the hub
             // is reachable, so don't call it "unreachable".
             Reg::Unreachable(e) => {
                 if !down {
-                    report_down(&notifier, &format!("hub unreachable ({e}); retrying"));
+                    report_down(notifier, &format!("hub unreachable ({e}); retrying"));
                     down = true;
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
@@ -89,7 +102,7 @@ pub async fn run(
             Reg::Rejected(s) => {
                 if !down {
                     report_down(
-                        &notifier,
+                        notifier,
                         &format!("hub rejected the request (HTTP {s}); retrying"),
                     );
                     down = true;
@@ -99,14 +112,12 @@ pub async fn run(
             }
         }
 
-        match stream_push(&http, &base, &key, &mut rx).await {
+        let (rx, _) = backend.as_mut().expect("backend started on first Ok");
+        match stream_push(&http, &base, &key, rx).await {
             End::LiveDone => break, // PTY backend ended — nothing left to push
             End::Disconnected => {
                 // Transient — let the next register decide if it's a real outage, so
-                // a quick reconnect doesn't flash a pause in PTY mode.
-                if notifier.is_none() {
-                    eprintln!("shellglass: push connection dropped; reconnecting");
-                }
+                // a quick reconnect doesn't flash a pause in the terminal.
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
         }
@@ -114,16 +125,17 @@ pub async fn run(
     Ok(())
 }
 
-/// Report the hub as unreachable: pause+announce in the terminal (PTY mode) or log.
-fn report_down(notifier: &Option<crate::pty::Notifier>, msg: &str) {
+/// Report the hub as unreachable: pause+announce in the terminal (PTY running) or
+/// log to stderr (still ours before the first successful registration).
+fn report_down(notifier: Option<&crate::pty::Notifier>, msg: &str) {
     match notifier {
         Some(n) => n.hub_down(msg),
         None => eprintln!("shellglass: {msg}"),
     }
 }
 
-/// Report the hub as reachable again: restore the terminal (PTY mode) or stay quiet.
-fn report_up(notifier: &Option<crate::pty::Notifier>) {
+/// Report the hub as reachable again: restore the terminal, or stay quiet pre-PTY.
+fn report_up(notifier: Option<&crate::pty::Notifier>) {
     if let Some(n) = notifier {
         n.hub_up();
     }
@@ -193,11 +205,12 @@ async fn stream_push(
     }
 }
 
-/// Outcome of a register attempt. `Forbidden` is always fatal; the two failure
-/// kinds are fatal only at startup (otherwise a transient condition to retry).
-/// They're split so we word them honestly: `Unreachable` means no HTTP response
-/// (hub down / network), `Rejected` means the hub answered with a bad status —
-/// cause left unstated (could be version skew, a proxy, a transient hub error).
+/// Outcome of a register attempt. `Forbidden` is fatal (retrying can't fix a key
+/// the hub doesn't allow); the two failure kinds are always retried — at startup
+/// that means the command doesn't launch until the hub is reachable. They're
+/// split so we word them honestly: `Unreachable` means no HTTP response (hub
+/// down / network), `Rejected` means the hub answered with a bad status — cause
+/// left unstated (could be version skew, a proxy, a transient hub error).
 enum Reg {
     Ok,
     Forbidden,
