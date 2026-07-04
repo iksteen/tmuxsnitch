@@ -151,6 +151,26 @@ test("decodeBlock expands runs, blanks, clusters, and style runs", () => {
   assert.deepEqual(decodeBlock([[]]), []);
 });
 
+test("single-cell diff rows decode via apply dispatch shape", () => {
+  // The applyDiff dispatch: a string third element is one cell (whole string =
+  // the grapheme), with an optional style OBJECT. Mirror that logic here.
+  const decodeRow = (row: [number, number, unknown, unknown?]) => {
+    const [r, l, text, style] = row;
+    return {
+      r,
+      l,
+      cells:
+        typeof text === "string"
+          ? [style ? { t: text, ...(style as object) } : { t: text }]
+          : [],
+    };
+  };
+  assert.deepEqual(decodeRow([25, 0, "✶", { f: 174 }]).cells, [{ t: "✶", f: 174 }]);
+  assert.deepEqual(decodeRow([5, 3, "x"]).cells, [{ t: "x" }]);
+  // A bare cluster string is one cell in this form — no wrapper needed.
+  assert.deepEqual(decodeRow([1, 2, "é"]).cells, [{ t: "é" }]);
+});
+
 test("flags as 1 style like true (weight, reverse, dim, wide)", () => {
   assert.equal(cellStyle({ f: 1, b: 1 }, false), "color:#cd0000;font-weight:bold;");
   assert.equal(cellStyle({ n: 1 }, false), "color:#000000;background:#d0d0d0;");

@@ -245,30 +245,80 @@ enum WireMsg<'a> {
     Banner { html: &'a str },
 }
 
-/// One changed line, positional: `[row, left, text]` or `[row, left, text, style]`
-/// — `left` is the cell index the span starts at. Line-only and tuple-framed on
-/// purpose — measured (see `zz_measure_wire_cost`), merging lines into rectangles
-/// never paid (padding scales with width), and the object envelope was pure
-/// overhead once the shape was fixed.
+/// One changed line, positional — `left` is the cell index the span starts at.
+/// Two forms, distinguished by the third element's type:
+/// - `[row, left, text-entries, style-runs?]` — the general line span.
+/// - `[row, left, "…", {style}?]` — a single changed cell (spinners, typing echo:
+///   the most common diff by far), the whole string being that cell's grapheme —
+///   no entry array, no run framing, and clusters need no `["…"]` wrapper here.
+///
+/// Line-only and tuple-framed on purpose — measured (see `zz_measure_wire_cost`),
+/// merging lines into rectangles never paid (padding scales with width), and the
+/// object envelope was pure overhead once the shape was fixed.
 #[derive(Debug)]
-struct WireRow<'a> {
-    r: usize,
-    l: usize,
-    block: CellBlock<'a>,
+enum WireRow<'a> {
+    Line {
+        r: usize,
+        l: usize,
+        block: CellBlock<'a>,
+    },
+    Cell {
+        r: usize,
+        l: usize,
+        cell: &'a StyledCell,
+    },
+}
+
+#[cfg(test)]
+impl WireRow<'_> {
+    fn pos(&self) -> (usize, usize) {
+        match self {
+            WireRow::Line { r, l, .. } | WireRow::Cell { r, l, .. } => (*r, *l),
+        }
+    }
+    fn text(&self) -> String {
+        match self {
+            WireRow::Line { block, .. } => block
+                .text
+                .iter()
+                .map(|t| match t {
+                    Text::Run(g) => g.as_str(),
+                    Text::Cluster(g) => g,
+                    Text::Blank => "",
+                })
+                .collect(),
+            WireRow::Cell { cell, .. } => cell.text.clone(),
+        }
+    }
 }
 
 impl Serialize for WireRow<'_> {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeSeq;
-        let n = if self.block.style.is_empty() { 3 } else { 4 };
-        let mut seq = s.serialize_seq(Some(n))?;
-        seq.serialize_element(&self.r)?;
-        seq.serialize_element(&self.l)?;
-        seq.serialize_element(&self.block.text)?;
-        if !self.block.style.is_empty() {
-            seq.serialize_element(&self.block.style)?;
+        match self {
+            WireRow::Line { r, l, block } => {
+                let n = if block.style.is_empty() { 3 } else { 4 };
+                let mut seq = s.serialize_seq(Some(n))?;
+                seq.serialize_element(r)?;
+                seq.serialize_element(l)?;
+                seq.serialize_element(&block.text)?;
+                if !block.style.is_empty() {
+                    seq.serialize_element(&block.style)?;
+                }
+                seq.end()
+            }
+            WireRow::Cell { r, l, cell } => {
+                let plain = is_plain(cell);
+                let mut seq = s.serialize_seq(Some(if plain { 3 } else { 4 }))?;
+                seq.serialize_element(r)?;
+                seq.serialize_element(l)?;
+                seq.serialize_element(&cell.text)?;
+                if !plain {
+                    seq.serialize_element(&cell_style(cell))?;
+                }
+                seq.end()
+            }
         }
-        seq.end()
     }
 }
 
@@ -502,7 +552,8 @@ fn row_span(old: &[StyledCell], new: &[StyledCell]) -> Option<(usize, usize)> {
     lo.map(|l| (l, hi))
 }
 
-/// Changed lines for the screen: each row's minimal changed cell-index span.
+/// Changed lines for the screen: each row's minimal changed cell-index span, as
+/// the compact single-cell form when the span is one cell wide.
 fn grid_rows<'a>(old: &Grid, new: &'a Grid) -> Vec<WireRow<'a>> {
     old.rows
         .iter()
@@ -510,11 +561,19 @@ fn grid_rows<'a>(old: &Grid, new: &'a Grid) -> Vec<WireRow<'a>> {
         .enumerate()
         .filter_map(|(r, (o, n))| {
             let (lo, hi) = row_span(o, n)?;
-            let cells = (lo..=hi).map(|i| n.get(i).unwrap_or(blank()));
-            Some(WireRow {
-                r,
-                l: lo,
-                block: cell_block(cells),
+            Some(if lo == hi {
+                WireRow::Cell {
+                    r,
+                    l: lo,
+                    cell: n.get(lo).unwrap_or(blank()),
+                }
+            } else {
+                let cells = (lo..=hi).map(|i| n.get(i).unwrap_or(blank()));
+                WireRow::Line {
+                    r,
+                    l: lo,
+                    block: cell_block(cells),
+                }
             })
         })
         .collect()
@@ -545,11 +604,77 @@ enum WireMsgIn {
     Banner { html: String },
 }
 
-/// Mirror of [`WireRow`]: positional `[r, l, text]` or `[r, l, text, style]`.
+/// Mirror of [`WireRow`], both forms: `[r, l, entries, runs?]` (line span) and
+/// `[r, l, "…", {style}?]` (single cell), dispatched on the third element's type.
+/// Either way it lands as a [`CellBlockIn`] so the apply path has one shape.
 struct WireRowIn {
     r: usize,
     l: usize,
     block: CellBlockIn,
+}
+
+/// The third tuple element: a bare string is one cell, an array is text entries.
+enum RowTextIn {
+    Single(String),
+    Entries(Vec<TextIn>),
+}
+
+impl<'de> Deserialize<'de> for RowTextIn {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<RowTextIn, D::Error> {
+        struct RowTextVisitor;
+        impl<'de> Visitor<'de> for RowTextVisitor {
+            type Value = RowTextIn;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a single-cell string or an array of text entries")
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<RowTextIn, E> {
+                Ok(RowTextIn::Single(v.to_string()))
+            }
+            fn visit_string<E: de::Error>(self, v: String) -> Result<RowTextIn, E> {
+                Ok(RowTextIn::Single(v))
+            }
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<RowTextIn, A::Error> {
+                let mut entries = Vec::new();
+                while let Some(t) = seq.next_element()? {
+                    entries.push(t);
+                }
+                Ok(RowTextIn::Entries(entries))
+            }
+        }
+        d.deserialize_any(RowTextVisitor)
+    }
+}
+
+/// The optional fourth tuple element: a `{style}` object (single-cell form) or an
+/// array of `[start, len, style]` runs (line form).
+enum RowStyleIn {
+    Style(CellStyleIn),
+    Runs(Vec<(usize, usize, CellStyleIn)>),
+}
+
+impl<'de> Deserialize<'de> for RowStyleIn {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<RowStyleIn, D::Error> {
+        struct RowStyleVisitor;
+        impl<'de> Visitor<'de> for RowStyleVisitor {
+            type Value = RowStyleIn;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a style object or an array of style runs")
+            }
+            fn visit_map<A: de::MapAccess<'de>>(self, map: A) -> Result<RowStyleIn, A::Error> {
+                Ok(RowStyleIn::Style(CellStyleIn::deserialize(
+                    de::value::MapAccessDeserializer::new(map),
+                )?))
+            }
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<RowStyleIn, A::Error> {
+                let mut runs = Vec::new();
+                while let Some(r) = seq.next_element()? {
+                    runs.push(r);
+                }
+                Ok(RowStyleIn::Runs(runs))
+            }
+        }
+        d.deserialize_any(RowStyleVisitor)
+    }
 }
 
 impl<'de> Deserialize<'de> for WireRowIn {
@@ -568,14 +693,28 @@ impl<'de> Deserialize<'de> for WireRowIn {
                     .next_element()?
                     .ok_or_else(|| de::Error::missing_field("left"))?;
                 let text = seq
-                    .next_element()?
+                    .next_element::<RowTextIn>()?
                     .ok_or_else(|| de::Error::missing_field("text"))?;
-                let style = seq.next_element()?.unwrap_or_default();
-                Ok(WireRowIn {
-                    r,
-                    l,
-                    block: CellBlockIn { text, style },
-                })
+                let style = seq.next_element::<RowStyleIn>()?;
+                let block = match (text, style) {
+                    (RowTextIn::Single(s), st) => CellBlockIn {
+                        text: vec![TextIn::Cluster(s)],
+                        style: match st {
+                            Some(RowStyleIn::Style(cs)) => vec![(0, 1, cs)],
+                            Some(RowStyleIn::Runs(runs)) => runs,
+                            None => Vec::new(),
+                        },
+                    },
+                    (RowTextIn::Entries(text), st) => CellBlockIn {
+                        text,
+                        style: match st {
+                            Some(RowStyleIn::Runs(runs)) => runs,
+                            Some(RowStyleIn::Style(cs)) => vec![(0, 1, cs)],
+                            None => Vec::new(),
+                        },
+                    },
+                };
+                Ok(WireRowIn { r, l, block })
             }
         }
         d.deserialize_seq(RowVisitor)
@@ -777,18 +916,6 @@ mod tests {
         }
     }
 
-    /// The block's glyphs concatenated (blanks contribute nothing), for assertions.
-    fn glyphs(b: &CellBlock) -> String {
-        b.text
-            .iter()
-            .map(|t| match t {
-                Text::Run(g) => g.as_str(),
-                Text::Cluster(g) => g,
-                Text::Blank => "",
-            })
-            .collect()
-    }
-
     /// Wire-cost meter, inert without SG_CORPUS. Replays real terminal recordings
     /// through vt100 with the production 33ms frame coalescing and reports the
     /// exact encoded bytes of the diff stream plus a final full snapshot — the
@@ -889,9 +1016,8 @@ mod tests {
         let b = grid(&["abc", "dXf"]);
         let rows = grid_rows(&a, &b);
         assert_eq!(rows.len(), 1, "one changed row → one line patch");
-        let p = &rows[0];
-        assert_eq!((p.r, p.l), (1, 1), "line span bounds the cell");
-        assert_eq!(glyphs(&p.block), "X");
+        assert_eq!(rows[0].pos(), (1, 1), "span bounds the cell");
+        assert_eq!(rows[0].text(), "X");
     }
 
     #[test]
@@ -903,10 +1029,10 @@ mod tests {
         let a = Grid { cols: 30, ..a };
         let rows = grid_rows(&a, &b);
         assert_eq!(rows.len(), 2);
-        assert_eq!((rows[0].r, rows[0].l), (0, 1));
-        assert_eq!(glyphs(&rows[0].block), "QQ");
-        assert_eq!((rows[1].r, rows[1].l), (1, 1));
-        assert!(glyphs(&rows[1].block).starts_with("WWWW"));
+        assert_eq!(rows[0].pos(), (0, 1));
+        assert_eq!(rows[0].text(), "QQ");
+        assert_eq!(rows[1].pos(), (1, 1));
+        assert!(rows[1].text().starts_with("WWWW"));
     }
 
     #[test]
@@ -916,8 +1042,8 @@ mod tests {
         let b = grid(&["Xbcd", "efgh", "ijYl"]);
         let rows = grid_rows(&a, &b);
         assert_eq!(rows.len(), 2);
-        assert_eq!((rows[0].r, rows[0].l), (0, 0));
-        assert_eq!((rows[1].r, rows[1].l), (2, 2));
+        assert_eq!(rows[0].pos(), (0, 0));
+        assert_eq!(rows[1].pos(), (2, 2));
     }
 
     #[test]
@@ -939,10 +1065,55 @@ mod tests {
     }
 
     #[test]
-    fn multi_codepoint_grapheme_rides_as_cluster() {
-        // A combining-mark cell must not merge into a run — it gets ["…"] form.
+    fn single_cell_updates_use_the_compact_form() {
+        // A spinner tick: one styled cell → [r, l, "…", {style}] — no entry
+        // array, no run framing.
+        let mut a = grid(&["x spinner"]);
+        let mut b = grid(&["y spinner"]);
+        a.cols = 9;
+        b.cols = 9;
+        b.rows[0][0].fg = Color::Idx(174);
+        let msg = diff_message(&a, &b).unwrap();
+        assert!(
+            msg.contains(r#""rows":[[0,0,"y",{"f":174}]]"#),
+            "compact styled single cell: {msg}"
+        );
+        // Plain single cell drops the style element entirely.
+        let c = grid(&["z spinner"]);
+        let msg2 = diff_message(&b, &c).unwrap();
+        assert!(
+            msg2.contains(r#""rows":[[0,0,"z"]]"#),
+            "compact plain single cell: {msg2}"
+        );
+        // Both round-trip through the hub-side decoder.
+        let applied = apply(&Frame::Screen(a), &msg).unwrap();
+        assert_eq!(applied, Frame::Screen(b.clone()));
+        let applied2 = apply(&Frame::Screen(b), &msg2).unwrap();
+        assert_eq!(applied2, Frame::Screen(c));
+    }
+
+    #[test]
+    fn single_cell_cluster_needs_no_wrapper() {
+        // In the single-cell form the whole string IS the cell, so a combining
+        // grapheme rides bare.
         let a = grid(&["ab"]);
         let mut b = grid(&["xb"]);
+        b.rows[0][0].text = "e\u{0301}".to_string();
+        let msg = diff_message(&a, &b).unwrap();
+        assert!(
+            msg.contains(r#"[0,0,"é"]"#) || msg.contains("[0,0,\"e\u{301}\"]"),
+            "bare cluster string: {msg}"
+        );
+        let applied = apply(&Frame::Screen(a), &msg).unwrap();
+        assert_eq!(applied, Frame::Screen(b));
+    }
+
+    #[test]
+    fn multi_codepoint_grapheme_rides_as_cluster() {
+        // In a multi-cell line span, a combining-mark cell must not merge into a
+        // run — it gets the ["…"] form.
+        let a = grid(&["ab"]);
+        let mut b = grid(&["xY"]);
         b.rows[0][0].text = "e\u{0301}".to_string(); // é as e + combining accent
         let msg = diff_message(&a, &b).unwrap();
         assert!(

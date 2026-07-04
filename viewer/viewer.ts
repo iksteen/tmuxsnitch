@@ -47,8 +47,14 @@ export type StyleRun = [number, number, Style];
 // Columnar cell block, positional: [text] or [text, style-runs].
 export type Block = [TextEntry[]] | [TextEntry[], StyleRun[]];
 
-// A changed line, positional: [row, left, text] or [row, left, text, style-runs].
-type WireRow = [number, number, TextEntry[]] | [number, number, TextEntry[], StyleRun[]];
+// A changed line, positional. Two forms by the third element's type:
+// [row, left, entries, runs?] — a line span; [row, left, "…", {style}?] — a
+// single changed cell (the whole string is that cell's grapheme).
+type WireRow =
+  | [number, number, TextEntry[]]
+  | [number, number, TextEntry[], StyleRun[]]
+  | [number, number, string]
+  | [number, number, string, Style];
 
 interface FullMsg {
   t: "f";
@@ -316,10 +322,13 @@ function applyFull(m: FullMsg): void {
 }
 
 function applyDiff(m: DiffMsg): void {
-  const rows = m.rows.map(([r, l, text, runs]) => ({
+  const rows = m.rows.map(([r, l, text, style]) => ({
     r,
     l,
-    cells: decodeCells(text, runs),
+    cells:
+      typeof text === "string"
+        ? [style ? { t: text, ...(style as Style) } : { t: text }]
+        : decodeCells(text, style as StyleRun[] | undefined),
   }));
   const dirty = patchCells(screen, { cur: m.cur, rows });
   for (const r of dirty) {

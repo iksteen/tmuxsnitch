@@ -201,10 +201,12 @@ function applyFull(m) {
     };
 }
 function applyDiff(m) {
-    const rows = m.rows.map(([r, l, text, runs]) => ({
+    const rows = m.rows.map(([r, l, text, style]) => ({
         r,
         l,
-        cells: decodeCells(text, runs),
+        cells: typeof text === "string"
+            ? [style ? { t: text, ...style } : { t: text }]
+            : decodeCells(text, style),
     }));
     const dirty = patchCells(screen, { cur: m.cur, rows });
     for (const r of dirty) {
