@@ -98,7 +98,7 @@ pub async fn run(
         }
 
         match stream_push(&http, &base, &key, &mut rx).await {
-            End::LiveDone => break, // tmux/control task ended — nothing left to push
+            End::LiveDone => break, // PTY backend ended — nothing left to push
             End::Disconnected => {
                 // Transient — let the next register decide if it's a real outage, so
                 // a quick reconnect doesn't flash a pause in PTY mode.
