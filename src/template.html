@@ -166,9 +166,13 @@ body:has(#crt:not(:checked)) #screen { filter:none; text-shadow:none; }
 // Persist the CRT toggle across reloads. Runs before <main> so the stored state is
 // applied before the panel paints (no flash of effects). localStorage is wrapped —
 // a viewer with it disabled still gets a working toggle, just not a remembered one.
+// A `?crt` query param flips the default to ON, but only when there is no stored
+// choice — an explicit toggle always wins over the URL.
 (() => {
   const c = document.getElementById('crt');
-  try { if (localStorage.getItem('shellglass-crt') === 'on') c.checked = true; } catch (e) {}
+  let stored = null;
+  try { stored = localStorage.getItem('shellglass-crt'); } catch (e) {}
+  c.checked = stored ? stored === 'on' : new URLSearchParams(location.search).has('crt');
   c.addEventListener('change', () => {
     try { localStorage.setItem('shellglass-crt', c.checked ? 'on' : 'off'); } catch (e) {}
   });
