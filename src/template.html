@@ -55,7 +55,10 @@ a { color:var(--accent-2); text-decoration:none; }
     radial-gradient(700px 300px at 22% 0%, color-mix(in oklab,var(--accent) 22%,transparent), transparent 70%),
     radial-gradient(640px 280px at 82% 0%, color-mix(in oklab,var(--accent-2) 18%,transparent), transparent 70%);
 }
-footer { max-width:1140px; width:100%; margin:0 auto; padding:24px clamp(16px,5vw,40px);
+/* Same height as the nav (padding 14px, ~1-line content), so the stage sits
+   symmetrically between the two bars and centering in the stage IS centering
+   in the window. */
+footer { max-width:1140px; width:100%; margin:0 auto; padding:14px clamp(16px,5vw,40px);
   color:var(--text-mute); font-size:13px; border-top:1px solid var(--border); }
 
 /* ── CRT tube ─────────────────────────────────────────────────────────────
