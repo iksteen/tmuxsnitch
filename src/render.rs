@@ -435,7 +435,6 @@ mod tests {
             height: h,
             panes: vec![Pane {
                 geom: PaneGeom {
-                    id: "%0".into(),
                     left: 0,
                     top: 0,
                     width: w,
@@ -636,7 +635,6 @@ mod tests {
             height: 24,
             panes: vec![Pane {
                 geom: PaneGeom {
-                    id: "%1".into(),
                     left: 41,
                     top: 0,
                     width: 39,

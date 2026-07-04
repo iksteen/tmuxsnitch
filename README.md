@@ -1,17 +1,11 @@
 # shellglass
 
 A live glass over your shell: mirror a terminal session as live **HTML** in your browser.
-Rendering is always **live** — terminal state is kept in a long-lived vt100 parser and
-pushed to the browser over SSE, with no polling and no per-tick subprocess — and carries
-Kitty-style `symbol_map` font overrides (map Unicode codepoint ranges to specific fonts,
-e.g. Nerd Font glyph ranges).
-
-Two input backends:
-
-- **tmux** — attach a persistent `tmux -C` control-mode client and mirror a window's full
-  multi-pane layout, updated live from tmux's incremental `%output` stream.
-- **PTY** (`--exec`) — run any interactive command in a pseudo-terminal (the `script(1)`
-  model): the command runs in your terminal, the browser watches. No tmux; one pane.
+You run an interactive command in a pseudo-terminal (the `script(1)` model) — it runs in
+your terminal, the browser watches. Rendering is always **live** — terminal state is kept
+in a long-lived vt100 parser and pushed to the browser over SSE, with no polling and no
+per-tick subprocess — and carries Kitty-style `symbol_map` font overrides (map Unicode
+codepoint ranges to specific fonts, e.g. Nerd Font glyph ranges).
 
 Two ways to serve it:
 
@@ -20,16 +14,17 @@ Two ways to serve it:
   the session at a URL. Good for sharing off-box.
 
 ```sh
-shellglass serve --target work                         # mirror tmux session "work", watch at :8080
-shellglass serve --exec bash -l                        # or mirror a PTY: work in this shell, watch it
-shellglass push https://hub --key … --exec bash        # or stream it to a hub
+shellglass serve                                  # mirror your $SHELL, watch at :8080
+shellglass serve -- bash -l                        # or a specific command
+shellglass push https://hub --key … -- bash        # or stream it to a hub
 ```
 
 Each mode is a subcommand: `serve` (self-contained local viewer), `push` (stream to a
 hub), `hub` (run a hub), plus `gen-key` / `print-id` helpers. Run `shellglass <cmd>
---help` for a command's flags. For `--exec`, the command plus its args go **last**. The terminal is switched to raw mode
-for the session and restored when the command exits (which also quits shellglass). Unix
-only.
+--help` for a command's flags. The command to mirror goes **last**, after any flags (use
+`--` to separate it); omit it to mirror your `$SHELL`. The terminal is switched to raw
+mode for the session and restored when the command exits (which also quits shellglass).
+Unix only.
 
 ## Build
 
@@ -41,9 +36,8 @@ cargo build --release
 ## Quickstart: standalone (one shell)
 
 ```sh
-tmux new-session -d -s demo                       # a session to mirror
-./target/release/shellglass serve --target demo --bind 127.0.0.1:8080
-# open http://127.0.0.1:8080/
+./target/release/shellglass serve --bind 127.0.0.1:8080     # mirror your $SHELL
+# open http://127.0.0.1:8080/ — the browser mirrors this terminal live
 ```
 
 ## Quickstart: hub + client (two shells)
@@ -67,17 +61,15 @@ ID='<the printed id>'
 ./target/release/shellglass hub --bind 127.0.0.1:8080 --allow "$ID"
 ```
 
-The hub needs no tmux and no config — it just relays what clients push.
+The hub needs no config — it just relays what clients push.
 For access from other machines, bind `0.0.0.0:8080` and use the host's address.
 
 ### Shell B — the client
 
 ```sh
-tmux new-session -d -s demo                       # skip if you have a session
-
 # same secret as the hub was configured for
 export SHELLGLASS_KEY='change-me-to-a-long-random-secret'
-./target/release/shellglass push http://127.0.0.1:8080 --target demo
+./target/release/shellglass push http://127.0.0.1:8080 -- bash -l
 ```
 
 The client prints its view URL on startup:
@@ -102,7 +94,7 @@ needs the secret. A client whose key isn't on the hub's `--allow` list is reject
 |---------|--------------|
 | `serve` | self-contained: render locally and serve the viewer over HTTP |
 | `push <url>` | client: render locally, stream frames to the hub at `<url>` |
-| `hub` | run as a hub: relay clients' pushes (no tmux/config needed) |
+| `hub` | run as a hub: relay clients' pushes (no config needed) |
 | `gen-key` | generate a random secret key, print it with its session id, and exit |
 | `print-id` | print the session id for `--key` and exit |
 
@@ -110,8 +102,7 @@ Flags by command:
 
 | Flag | Commands | Meaning |
 |------|----------|---------|
-| `--target <t>` | serve, push | tmux target (`session` or `session:window`); default = current window |
-| `--exec <cmd>…` | serve, push | mirror an interactive PTY command instead of tmux (put last) |
+| `[CMD]…` (positional) | serve, push | interactive command to mirror in a PTY; put it last (after `--`). Omit for your `$SHELL` |
 | `--config <path>` | serve, push | TOML config (fonts, `symbol_map`, `template`); omit for defaults |
 | `--bind <addr>` | serve, hub | HTTP listen address (default `127.0.0.1:8080`) |
 | `--key <secret>` | push, print-id | secret key (or `SHELLGLASS_KEY` env var) |
@@ -130,24 +121,22 @@ public id. It's computed once per client connection, not per frame. Use
 ## How it works
 
 ```
-tmux -C (control mode)  ── %output ─►  per-pane vt100 parsers (seeded once via capture-pane)
+command in a PTY  ── output bytes ─►  long-lived vt100 parser
   → parser-agnostic StyledCell grid   → symbol_map font resolution
-  → HTML (absolute-positioned panes, coalesced <span> runs)
-  → SSE fragment on a watch channel  → browser swaps #screen
+  → HTML (absolute-positioned, coalesced <span> runs)
+  → SSE fragment on a watch channel   → browser swaps #screen
 ```
 
-The `--exec` PTY backend joins this pipeline at the vt100-parser stage — one parser, one
-pane — so everything downstream (grid → HTML → SSE) is shared with the tmux path.
-
-Live tracking follows the target session's **current window** and needs the tmux server
-running at launch. Attaching a control-mode client sizes it to the current window so it
-won't resize your real session. Errors (no tmux server / bad target) show as an in-page
-banner rather than a failed request. In hub mode the client renders everything and
-pushes frames over a **single persistent streaming connection** (not a request per
-frame), so throughput isn't gated by round-trip latency; the hub just stores and
-re-serves the latest CSS + fragment, plus the fonts the client uploaded. If the
+The command runs in a pseudo-terminal you drive from your own terminal (the `script(1)`
+model): its output is teed to your screen immediately and, in parallel, fed to a
+long-lived vt100 parser that the renderer turns into HTML at up to 30fps. Terminal
+resizes (`SIGWINCH`) reflow both the PTY and the browser. In hub mode the client renders
+everything and pushes frames over a **single persistent streaming connection** (not a
+request per frame), so throughput isn't gated by round-trip latency; the hub just stores
+and re-serves the latest CSS + fragment, plus the fonts the client uploaded. If the
 connection drops (hub restart, network blip) the client re-registers and reconnects
-automatically.
+automatically — and the local session pauses cleanly, showing the outage in your terminal
+until it's back.
 
 ## Fonts
 
@@ -244,7 +233,7 @@ custom themes work off-box too.
 
 ## Status
 
-Two backends — tmux control-mode (full pane layout, single active window) and a PTY
-(`--exec`, one pane) — with live rendering, standalone + client/hub push, viewer
-templating (default + CRT themes), and optional hub TLS (own cert or ACME/Let's Encrypt).
-Not yet: scrollback, multi-window/session tab bar, window switching within a session.
+Mirror an interactive command in a PTY (the `script(1)` model, one screen) with live
+rendering, standalone + client/hub push, viewer templating (default + CRT themes), and
+optional hub TLS (own cert or ACME/Let's Encrypt). Not yet: scrollback, multiple
+sessions/panes in one view.

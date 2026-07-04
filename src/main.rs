@@ -1,17 +1,15 @@
-//! shellglass — mirror a tmux window's full pane layout as live HTML.
+//! shellglass — mirror an interactive terminal command as live HTML.
 
 mod client;
 mod config;
 mod fonts;
 mod hub;
-mod live;
 mod model;
 mod parse;
 mod proto;
 mod pty;
 mod render;
 mod server;
-mod tmux;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -22,7 +20,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Parser, Debug)]
-#[command(name = "shellglass", about = "Mirror a tmux window as live HTML")]
+#[command(
+    name = "shellglass",
+    about = "Mirror an interactive terminal command as live HTML"
+)]
 struct Cli {
     #[command(subcommand)]
     action: Action,
@@ -67,22 +68,33 @@ enum Action {
     Hub(HubArgs),
 }
 
-/// The terminal source, shared by `view` and `push` (both render locally).
+/// The terminal source, shared by `serve` and `push` (both render locally).
 #[derive(clap::Args, Debug)]
 struct SourceArgs {
-    /// tmux target (e.g. `session` or `session:window`); default = current window.
-    #[arg(short, long)]
-    target: Option<String>,
-
-    /// Mirror an interactive command in a PTY instead of tmux (the `script(1)`
-    /// model): the command runs in your terminal, the browser watches. Everything
-    /// after it is the command + args, so put it last, e.g. `--exec bash -l`.
-    #[arg(long, num_args = 1.., allow_hyphen_values = true, value_name = "CMD")]
-    exec: Vec<String>,
-
     /// Path to a TOML config (fonts + `symbol_map`). Optional.
     #[arg(short, long)]
     config: Option<PathBuf>,
+
+    /// Interactive command to mirror in a PTY (the `script(1)` model): it runs in
+    /// your terminal, the browser watches. Put it last, after any flags — e.g.
+    /// `serve -- bash -l`. Defaults to your `$SHELL` when omitted.
+    #[arg(
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        value_name = "CMD"
+    )]
+    command: Vec<String>,
+}
+
+impl SourceArgs {
+    /// The command to run, defaulting to the user's `$SHELL` (then `/bin/sh`).
+    fn command(&self) -> Vec<String> {
+        if self.command.is_empty() {
+            vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())]
+        } else {
+            self.command.clone()
+        }
+    }
 }
 
 /// Secret key whose `argon2id` hash is the shareable session id, shared by
@@ -218,9 +230,9 @@ struct Rendered {
     notifier: Option<pty::Notifier>,
 }
 
-/// Load config + fonts and start the input backend (PTY if `--exec`, else tmux). The
-/// caller prints its URL *before* this returns a PTY backend, because a PTY switches
-/// the terminal to raw mode and anything printed after would corrupt the session.
+/// Load config + fonts and start the PTY backend. The caller prints its URL *before*
+/// this returns, because the PTY switches the terminal to raw mode and anything
+/// printed after would corrupt the session.
 fn render_setup(source: SourceArgs) -> Result<Rendered> {
     let mut config = match &source.config {
         Some(path) => Config::load(path)?,
@@ -235,18 +247,13 @@ fn render_setup(source: SourceArgs) -> Result<Rendered> {
     let template = Arc::new(config.template_html().context("loading viewer template")?);
     let config = Arc::new(config);
 
-    let (rx, notifier) = if source.exec.is_empty() {
-        (live::start(source.target, config.clone(), resolver), None)
-    } else {
-        let (rx, n) = pty::start(&source.exec, config.clone(), resolver)?;
-        (rx, Some(n))
-    };
+    let (rx, notifier) = pty::start(&source.command(), config.clone(), resolver)?;
     Ok(Rendered {
         config,
         fonts,
         template,
         rx,
-        notifier,
+        notifier: Some(notifier),
     })
 }
 
@@ -286,14 +293,7 @@ async fn run_push(url: String, key: String, source: SourceArgs) -> Result<()> {
 
 /// One-line description of what a source mirrors, for the startup log.
 fn describe_source(source: &SourceArgs) -> String {
-    if source.exec.is_empty() {
-        format!(
-            "tmux target {:?} (live)",
-            source.target.as_deref().unwrap_or("<current>")
-        )
-    } else {
-        format!("`{}` (pty)", source.exec.join(" "))
-    }
+    format!("`{}`", source.command().join(" "))
 }
 
 /// Serve the hub, terminating TLS per `tls`. Plain HTTP keeps the `SO_REUSEADDR`

@@ -1,8 +1,8 @@
 //! PTY backend: run an interactive command in a pseudo-terminal that you drive
 //! from your own terminal, while mirroring its screen to the browser — the
-//! `script(1)` model. Unlike the tmux backend there are no panes: one PTY feeds a
-//! single [`vt100::Parser`], rendered as one full-window fragment by the shared
-//! renderer with the same 30fps cap. Unix only (raw mode + `TIOCGWINSZ`).
+//! `script(1)` model. One PTY feeds a single [`vt100::Parser`], rendered as one
+//! full-window fragment by the renderer at a 30fps cap. Unix only (raw mode +
+//! `TIOCGWINSZ`).
 //!
 //! One `screen` thread owns everything that touches the real terminal — the raw
 //! mode, stdout, and the vt100 parser — so hub-connection notices can be shown
@@ -24,7 +24,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
-/// Same 30fps ceiling as the tmux backend (see `live::MIN_FRAME`).
+/// Frame cap: coalesce bursts of PTY output into at most ~30 renders per second.
 const MIN_FRAME: Duration = Duration::from_millis(33);
 
 /// Everything the screen thread applies. `Data`/`Resize` come from the PTY and the
@@ -271,7 +271,6 @@ fn render_screen(parser: &vt100::Parser, config: &Config, resolver: &Resolver) -
         height: rows,
         panes: vec![Pane {
             geom: PaneGeom {
-                id: "%0".into(),
                 left: 0,
                 top: 0,
                 width: cols,

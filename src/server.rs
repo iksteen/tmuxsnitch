@@ -1,5 +1,5 @@
-//! Standalone live viewer: mirror local tmux to a local browser. A background
-//! control-mode task (see [`crate::live`]) publishes fragments on a `watch`
+//! Standalone live viewer: mirror a local PTY command to a local browser. The PTY
+//! backend (see [`crate::pty`]) publishes rendered `#screen` fragments on a `watch`
 //! channel; `GET /` serves the page and `GET /events` streams updates over SSE.
 
 use crate::config::Config;

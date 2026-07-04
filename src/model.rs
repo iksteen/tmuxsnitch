@@ -39,10 +39,9 @@ pub struct Grid {
     pub cursor: Option<(u16, u16)>,
 }
 
-/// Placement of a pane within its window, in cell units (from tmux).
+/// Placement of a pane within its window, in cell units.
 #[derive(Debug, Clone)]
 pub struct PaneGeom {
-    pub id: String,
     pub left: u16,
     pub top: u16,
     pub width: u16,
