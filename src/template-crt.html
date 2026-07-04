@@ -35,6 +35,10 @@ a { color:var(--accent-2); text-decoration:none; }
   100% { box-shadow:0 0 0 0 transparent; }
 }
 .nav .meta { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.5px; color:var(--text-mute); }
+.nav-right { display:flex; align-items:center; gap:16px; }
+.toggle { display:inline-flex; align-items:center; gap:7px; cursor:pointer; user-select:none;
+  font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.5px; color:var(--text-mute); }
+.toggle input { accent-color:var(--accent); margin:0; }
 .stage { position:relative; display:flex; justify-content:center;
   padding:clamp(28px,5vw,56px) clamp(16px,5vw,40px); }
 .glow {
@@ -111,13 +115,40 @@ footer { max-width:1140px; margin:0 auto; padding:24px clamp(16px,5vw,40px) 48px
 @media (prefers-reduced-motion: reduce) {
   .crt-scan, .crt-bar, .dot { animation:none; }
 }
+/* Header toggle: unchecking "CRT" flattens the tube — hide the overlays and drop
+   phosphor bloom, chromatic fringe, glass curve + vignette, leaving plain text.
+   Pure CSS via :has(); the checkbox state is persisted to localStorage below. */
+body:has(#crt:not(:checked)) .crt-scan,
+body:has(#crt:not(:checked)) .crt-grille,
+body:has(#crt:not(:checked)) .crt-bar,
+body:has(#crt:not(:checked)) .crt-vig { display:none; }
+body:has(#crt:not(:checked)) .panel {
+  filter:none; transform:none;
+  box-shadow:0 40px 90px -20px rgba(0,0,0,.9), 0 0 0 1px var(--border);
+}
+body:has(#crt:not(:checked)) #screen { filter:none; text-shadow:none; }
 </style>
 </head>
 <body>
 <nav class="nav">
   <span class="brand"><span class="dot"></span><span class="grad">shellglass</span></span>
-  <span class="meta">live terminal mirror · CRT</span>
+  <span class="nav-right">
+    <span class="meta">live terminal mirror</span>
+    <label class="toggle"><input type="checkbox" id="crt" checked>CRT</label>
+  </span>
 </nav>
+<script>
+// Persist the CRT toggle across reloads. Runs before <main> so the stored state is
+// applied before the panel paints (no flash of effects). localStorage is wrapped —
+// a viewer with it disabled still gets a working toggle, just not a remembered one.
+(() => {
+  const c = document.getElementById('crt');
+  try { if (localStorage.getItem('shellglass-crt') === 'off') c.checked = false; } catch (e) {}
+  c.addEventListener('change', () => {
+    try { localStorage.setItem('shellglass-crt', c.checked ? 'on' : 'off'); } catch (e) {}
+  });
+})();
+</script>
 <main class="stage">
   <div class="glow"></div>
   <div class="panel">
