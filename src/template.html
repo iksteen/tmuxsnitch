@@ -67,8 +67,12 @@ footer { max-width:1140px; width:100%; margin:0 auto; padding:14px clamp(16px,5v
    the shader: .crt-scan (darkening scanlines, multiply), .crt-grille (RGB
    aperture mask, screen), .crt-bar (bright rolling refresh band), .crt-vig
    (glass sheen + vignette). #screen itself gets phosphor bloom + a chromatic
-   fringe. Overlays are pointer-events:none so the text stays selectable. */
+   fringe. Overlays are pointer-events:none so the text stays selectable.
+   The overlays live in .tube WITH the terminal — the fit script zooms the
+   tube, so scanlines/grille are phosphor-space: they magnify and pan with the
+   content instead of staying glued to the glass at 1 screen pixel. */
 .stage { perspective:1600px; }
+.tube { position:relative; width:fit-content; }
 .panel {
   /* border-box so max-width/height:100% cap the padded box — content-box would
      let the panel's own padding overshoot the stage into the footer.
@@ -173,11 +177,13 @@ body:has(#crt:not(:checked)) #screen { filter:none; text-shadow:none; }
 <main class="stage">
   <div class="glow"></div>
   <div class="panel">
-    {{screen}}
-    <div class="crt-grille"></div>
-    <div class="crt-scan"></div>
-    <div class="crt-bar"></div>
-    <div class="crt-vig"></div>
+    <div class="tube">
+      {{screen}}
+      <div class="crt-grille"></div>
+      <div class="crt-scan"></div>
+      <div class="crt-bar"></div>
+      <div class="crt-vig"></div>
+    </div>
   </div>
 </main>
 <footer>Live over SSE — <a href="https://github.com/iksteen/shellglass">shellglass</a>.</footer>
@@ -192,10 +198,13 @@ body:has(#crt:not(:checked)) #screen { filter:none; text-shadow:none; }
 // left-drag stays free for text selection. Re-fits when the grid resizes
 // (#screen is fit-content, so a new frame size moves its box) or the viewport
 // does (the stage resizes). Stable: the stage is viewport-driven (flex-basis 0),
-// so zooming #screen can't change the space we measure against. Runs after
-// <footer> so the first measurement already sees the final page layout.
+// so zooming the tube can't change the space we measure against. The zoom goes
+// on .tube (terminal + CRT overlays) so the shader layers scale and pan with
+// the content. Runs after <footer> so the first measurement already sees the
+// final page layout.
 (() => {
   const scr = document.getElementById('screen');
+  const tube = document.querySelector('.tube');
   const stage = document.querySelector('.stage');
   const panel = document.querySelector('.panel');
   let fitZ = 1; // shrink-to-fit factor (≤ 1), from the layout
@@ -205,7 +214,7 @@ body:has(#crt:not(:checked)) #screen { filter:none; text-shadow:none; }
     return parseFloat(cs[a]) + parseFloat(cs[b]);
   };
   const apply = () => {
-    scr.style.zoom = fitZ * userZ;
+    tube.style.zoom = fitZ * userZ;
     // Scrollbars only when magnified — at fit the content fits by construction,
     // and overflow:auto there is a scrollbar trap (see the .panel comment).
     panel.style.overflow = userZ > 1 ? 'auto' : 'hidden';
@@ -216,7 +225,7 @@ body:has(#crt:not(:checked)) #screen { filter:none; text-shadow:none; }
     // Measuring at zoom 1 momentarily shrinks the content, which clamps the
     // panel's scroll position — capture and restore it around the measurement.
     const sl = panel.scrollLeft, st = panel.scrollTop;
-    scr.style.zoom = 1;
+    tube.style.zoom = 1;
     const availW = stage.clientWidth - pads(stage, 'paddingLeft', 'paddingRight')
       - pads(panel, 'paddingLeft', 'paddingRight');
     const availH = stage.clientHeight - pads(stage, 'paddingTop', 'paddingBottom')
