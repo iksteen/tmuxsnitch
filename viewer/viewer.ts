@@ -56,32 +56,33 @@ type WireRow =
   | [number, number, string]
   | [number, number, string, Style];
 
+// There is no "t" tag: each message type owns one payload key (d/r/c/l/b/v), and
+// apply() dispatches on which is present — `c` FIRST, since the single-cell form
+// flattens its style letters (f,g,b,d,i,u,n,w) into the envelope. The cursor is a
+// separate `p` key on every diff-family message.
 interface FullMsg {
-  t: "f";
+  d: Block[];
   w: number;
   h: number;
-  c?: Cur; // cursor [row, col]; absent = hidden
-  r: Block[];
+  p?: Cur; // cursor [row, col]; absent = hidden
 }
 // On diff-family messages the cursor is TRI-STATE: absent = unchanged,
-// null = became hidden, [row, col] = moved. Empty r is omitted (cursor-only).
+// null = became hidden, [row, col] = moved. A cursor-only move drops `r`,
+// leaving just { p }.
 interface DiffMsg {
-  t: "d";
-  c?: Cur;
   r?: WireRow[];
+  p?: Cur;
 }
-// A uniform span: r is the bare [row, left, "…"] tuple — ONE CELL PER CODEPOINT
+// A uniform span: c is the bare [row, left, "…"] tuple — ONE CELL PER CODEPOINT
 // — and the style flattened into the message applies to every cell.
 interface CellMsg extends Style {
-  t: "c";
-  c?: Cur;
-  r: [number, number, string];
+  c: [number, number, string];
+  p?: Cur;
 }
-// A single changed line: r is the bare [row, left, entries, runs?] tuple.
+// A single changed line: l is the bare [row, left, entries, runs?] tuple.
 interface LineMsg {
-  t: "l";
-  c?: Cur;
-  r: WireRow;
+  l: WireRow;
+  p?: Cur;
 }
 
 // Materialize text entries + style runs into per-cell objects (the form renderRow
@@ -106,15 +107,13 @@ export function decodeBlock(block: Block): Cell[] {
   return decodeCells(block[0] ?? [], block[1]);
 }
 interface BannerMsg {
-  t: "b";
-  html: string;
+  b: string;
 }
 // Version hello, first event of every SSE stream: the wire proto and the baked
 // viewer.js content tag. If either differs from what this page booted with, the
 // server was upgraded under us — reload to fetch the matching page + viewer.js
 // (guarded against reload storms).
 interface VersionMsg {
-  t: "v";
   v: number;
   js?: string;
 }
@@ -356,8 +355,8 @@ export function patchCells(
 }
 
 function applyFull(m: FullMsg): void {
-  const cur = m.c ?? null;
-  const rows = m.r.map(decodeBlock);
+  const cur = m.p ?? null;
+  const rows = m.d.map(decodeBlock);
   let html = `<div class="screen" style="width:${m.w}ch;height:calc(${m.h} * var(--lh));">`;
   for (let r = 0; r < rows.length; r++) {
     html += `<div class="row">${renderRow(rows[r], cursorCol(cur, r))}</div>`;
@@ -395,38 +394,41 @@ function applyPatches(cur: Cur | undefined, rows: { r: number; l: number; cells:
 }
 
 function applyDiff(m: DiffMsg): void {
-  applyPatches(m.c, (m.r ?? []).map(decodeRow));
+  applyPatches(m.p, (m.r ?? []).map(decodeRow));
 }
 
 function applyCell(m: CellMsg): void {
-  const { t: _t, c: _c, r, ...style } = m;
+  const { c: r, p: _p, ...style } = m;
   const styled = Object.keys(style).length > 0;
   const cells: Cell[] = [];
   for (const ch of r[2]) cells.push(styled ? { t: ch, ...style } : { t: ch });
-  applyPatches(m.c, [{ r: r[0], l: r[1], cells }]);
+  applyPatches(m.p, [{ r: r[0], l: r[1], cells }]);
 }
 
 function applyLine(m: LineMsg): void {
-  applyPatches(m.c, [decodeRow(m.r)]);
+  applyPatches(m.p, [decodeRow(m.l)]);
 }
 
 function applyBanner(m: BannerMsg): void {
-  screenEl.innerHTML = m.html;
+  screenEl.innerHTML = m.b;
   screen = { cells: [], cur: null, rowEls: [] };
 }
 
+// Tag-free dispatch on which payload key is present. `c` (cell) MUST come first —
+// its flattened style letters (b/d/w) would otherwise read as banner/full/wide.
+// A message with only `p` is a cursor-only diff.
 export function apply(m: Msg): void {
-  if (m.t === "v") {
+  if ("v" in m) {
     const wireChanged = proto !== undefined && m.v !== proto;
     const jsChanged = jsTag !== undefined && m.js !== undefined && m.js !== jsTag;
     if (wireChanged || jsChanged) reloadPage();
     return;
   }
-  if (m.t === "f") applyFull(m);
-  else if (m.t === "d") applyDiff(m);
-  else if (m.t === "c") applyCell(m);
-  else if (m.t === "l") applyLine(m);
-  else applyBanner(m);
+  if ("c" in m) applyCell(m);
+  else if ("l" in m) applyLine(m);
+  else if ("d" in m) applyFull(m);
+  else if ("b" in m) applyBanner(m);
+  else applyDiff(m); // { r?, p? } — includes cursor-only { p }
 }
 
 // EventSource only auto-retries network blips (readyState CONNECTING); on an HTTP

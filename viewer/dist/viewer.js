@@ -208,8 +208,8 @@ export function patchCells(state, dp) {
     return dirty;
 }
 function applyFull(m) {
-    const cur = m.c ?? null;
-    const rows = m.r.map(decodeBlock);
+    const cur = m.p ?? null;
+    const rows = m.d.map(decodeBlock);
     let html = `<div class="screen" style="width:${m.w}ch;height:calc(${m.h} * var(--lh));">`;
     for (let r = 0; r < rows.length; r++) {
         html += `<div class="row">${renderRow(rows[r], cursorCol(cur, r))}</div>`;
@@ -243,41 +243,41 @@ function applyPatches(cur, rows) {
     }
 }
 function applyDiff(m) {
-    applyPatches(m.c, (m.r ?? []).map(decodeRow));
+    applyPatches(m.p, (m.r ?? []).map(decodeRow));
 }
 function applyCell(m) {
-    const { t: _t, c: _c, r, ...style } = m;
+    const { c: r, p: _p, ...style } = m;
     const styled = Object.keys(style).length > 0;
     const cells = [];
     for (const ch of r[2])
         cells.push(styled ? { t: ch, ...style } : { t: ch });
-    applyPatches(m.c, [{ r: r[0], l: r[1], cells }]);
+    applyPatches(m.p, [{ r: r[0], l: r[1], cells }]);
 }
 function applyLine(m) {
-    applyPatches(m.c, [decodeRow(m.r)]);
+    applyPatches(m.p, [decodeRow(m.l)]);
 }
 function applyBanner(m) {
-    screenEl.innerHTML = m.html;
+    screenEl.innerHTML = m.b;
     screen = { cells: [], cur: null, rowEls: [] };
 }
 export function apply(m) {
-    if (m.t === "v") {
+    if ("v" in m) {
         const wireChanged = proto !== undefined && m.v !== proto;
         const jsChanged = jsTag !== undefined && m.js !== undefined && m.js !== jsTag;
         if (wireChanged || jsChanged)
             reloadPage();
         return;
     }
-    if (m.t === "f")
-        applyFull(m);
-    else if (m.t === "d")
-        applyDiff(m);
-    else if (m.t === "c")
+    if ("c" in m)
         applyCell(m);
-    else if (m.t === "l")
+    else if ("l" in m)
         applyLine(m);
-    else
+    else if ("d" in m)
+        applyFull(m);
+    else if ("b" in m)
         applyBanner(m);
+    else
+        applyDiff(m);
 }
 function connect(events) {
     const es = new EventSource(events);

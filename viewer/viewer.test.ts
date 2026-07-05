@@ -31,15 +31,15 @@ test("version hello reloads on wire or js mismatch, not on match", () => {
     reloads += 1;
   });
   setProto(3, "aabbcc");
-  apply({ t: "v", v: 3, js: "aabbcc" } as never);
+  apply({ v: 3, js: "aabbcc" } as never);
   assert.equal(reloads, 0, "matching hello is inert");
-  apply({ t: "v", v: 4, js: "aabbcc" } as never);
+  apply({ v: 4, js: "aabbcc" } as never);
   assert.equal(reloads, 1, "wire bump reloads");
-  apply({ t: "v", v: 3, js: "ddeeff" } as never);
+  apply({ v: 3, js: "ddeeff" } as never);
   assert.equal(reloads, 2, "viewer.js change reloads");
   // A page without boot versions (older HTML) never self-reloads.
   setProto(undefined, undefined);
-  apply({ t: "v", v: 9, js: "zz" } as never);
+  apply({ v: 9, js: "zz" } as never);
   assert.equal(reloads, 2);
 });
 
