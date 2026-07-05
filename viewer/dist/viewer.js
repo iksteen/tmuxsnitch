@@ -397,7 +397,8 @@ function powerlineOps(x0, y0, x1, y1, cp, light) {
     const ax = right ? x1 : x0;
     const bx = right ? x0 : x1;
     if (cp === 0xe0b0 || cp === 0xe0b2) {
-        return [{ t: "poly", pts: [[bx, y0], [ax, midY], [bx, y1]] }];
+        const bb = bx + (right ? -light : light);
+        return [{ t: "poly", pts: [[bb, y0], [ax, midY], [bb, y1]] }];
     }
     const t = lw(1, light);
     return [

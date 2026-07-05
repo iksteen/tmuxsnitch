@@ -560,7 +560,13 @@ function powerlineOps(x0: number, y0: number, x1: number, y1: number, cp: number
   const ax = right ? x1 : x0;
   const bx = right ? x0 : x1; // vertical base edge
   if (cp === 0xe0b0 || cp === 0xe0b2) {
-    return [{ t: "poly", pts: [[bx, y0], [ax, midY], [bx, y1]] }];
+    // Bleed the base one pixel past the cell edge, away from the apex. The DOM
+    // background of the abutting segment rounds its edge independently of the
+    // canvas grid, so a flush base leaves a sub-pixel seam; the neighbour on the
+    // base side is the triangle's own colour in a powerline prompt, so the
+    // overlap is invisible and closes the gap.
+    const bb = bx + (right ? -light : light);
+    return [{ t: "poly", pts: [[bb, y0], [ax, midY], [bb, y1]] }];
   }
   const t = lw(1, light);
   return [

@@ -228,10 +228,11 @@ test("glyphOps emits legacy-computing and powerline geometry", () => {
   // Horizontal one-eighth bar U+1FB76 (row 2): y in [3,6], full width.
   assert.deepEqual(ops(0x1fb76), [{ t: "rect", x: 0, y: 3, w: 16, h: 3 }]);
 
-  // Powerline E0B0 ►: one solid triangle, base on the left, apex mid-right.
-  assert.deepEqual(ops(0xe0b0), [{ t: "poly", pts: [[0, 0], [16, 12], [0, 24]] }]);
-  // E0B2 ◄: mirror — base on the right, apex mid-left.
-  assert.deepEqual(ops(0xe0b2), [{ t: "poly", pts: [[16, 0], [0, 12], [16, 24]] }]);
+  // Powerline E0B0 ►: one solid triangle, apex mid-right; the base bleeds 1px
+  // left of the cell edge to close the sub-pixel seam with the abutting segment.
+  assert.deepEqual(ops(0xe0b0), [{ t: "poly", pts: [[-1, 0], [16, 12], [-1, 24]] }]);
+  // E0B2 ◄: mirror — apex mid-left, base bleeds 1px right.
+  assert.deepEqual(ops(0xe0b2), [{ t: "poly", pts: [[17, 0], [0, 12], [17, 24]] }]);
   // E0B1 (hollow): two stroked edges, no fill.
   const hollow = ops(0xe0b1);
   assert.equal(hollow.length, 2);
