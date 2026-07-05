@@ -14,6 +14,20 @@ use std::fmt::Write as _;
 /// `viewer/dist/viewer.js`).
 pub const VIEWER_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/viewer.js"));
 
+/// Short content tag of the baked renderer, the second half of the page-reload
+/// version pair: the wire proto can be unchanged while viewer.js itself was
+/// (a render fix) — a mismatch on either reloads the page. Hashing the bytes
+/// means there is no hand-maintained JS version to forget to bump.
+pub fn viewer_tag() -> &'static str {
+    use std::hash::{Hash, Hasher};
+    static TAG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TAG.get_or_init(|| {
+        let mut h = std::hash::DefaultHasher::new();
+        VIEWER_JS.hash(&mut h);
+        format!("{:016x}", h.finish())
+    })
+}
+
 /// `@font-face` blocks for served fonts. Each references `{url_prefix}{index}`,
 /// where the index is the font's position (matching [`crate::fonts::font_assets`])
 /// — the standalone server serves those at `/fonts/…`, the hub per session at
@@ -97,9 +111,14 @@ pub fn sse_script(events_path: &str, cfg_json: &str) -> String {
     let events = serde_json::to_string(events_path).unwrap_or_else(|_| "\"/events\"".into());
     // The inline classic script runs at parse time (setting the config); the module
     // script is deferred by default and runs after, so the config is ready. viewer.js
-    // is an ES module, hence type="module".
+    // is an ES module, hence type="module". `proto`/`js` are this binary's wire
+    // version and baked-renderer content tag: the SSE stream re-announces both on
+    // every (re)connect, and the page reloads itself on mismatch (server upgraded
+    // under a loaded page — new wire format OR just a new viewer.js).
+    let proto = crate::diff::PROTO;
+    let js = viewer_tag();
     format!(
-        "<script>window.SHELLGLASS={{events:{events},cfg:{cfg}}};</script>\n\
+        "<script>window.SHELLGLASS={{events:{events},cfg:{cfg},proto:{proto},js:\"{js}\"}};</script>\n\
          <script type=\"module\" src=\"/viewer.js\"></script>"
     )
 }

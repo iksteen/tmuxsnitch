@@ -109,7 +109,16 @@ interface BannerMsg {
   t: "b";
   html: string;
 }
-type Msg = FullMsg | DiffMsg | CellMsg | LineMsg | BannerMsg;
+// Version hello, first event of every SSE stream: the wire proto and the baked
+// viewer.js content tag. If either differs from what this page booted with, the
+// server was upgraded under us — reload to fetch the matching page + viewer.js
+// (guarded against reload storms).
+interface VersionMsg {
+  t: "v";
+  v: number;
+  js?: string;
+}
+type Msg = FullMsg | DiffMsg | CellMsg | LineMsg | BannerMsg | VersionMsg;
 
 export interface Cfg {
   defFg: string; // default fg as #rrggbb (for reverse/dim materialization)
@@ -125,6 +134,30 @@ type RGB = [number, number, number];
 let cfg: Cfg;
 export function setConfig(c: Cfg): void {
   cfg = c;
+}
+
+// The wire-protocol version + viewer.js tag this page booted with
+// (window.SHELLGLASS.proto / .js).
+let proto: number | undefined;
+let jsTag: string | undefined;
+export function setProto(p: number | undefined, js?: string): void {
+  proto = p;
+  jsTag = js;
+}
+
+// Overridable for tests; guarded so a misbehaving server can't reload-loop us.
+export let reloadPage = (): void => {
+  try {
+    const last = Number(sessionStorage.getItem("sg-reload") ?? 0);
+    if (Date.now() - last < 5000) return;
+    sessionStorage.setItem("sg-reload", String(Date.now()));
+  } catch (e) {
+    /* no sessionStorage: still reload, worst case the server keeps kicking us */
+  }
+  location.reload();
+};
+export function setReloadPage(f: () => void): void {
+  reloadPage = f;
 }
 
 // ── color ─────────────────────────────────────────────────────────────────────
@@ -383,6 +416,12 @@ function applyBanner(m: BannerMsg): void {
 }
 
 export function apply(m: Msg): void {
+  if (m.t === "v") {
+    const wireChanged = proto !== undefined && m.v !== proto;
+    const jsChanged = jsTag !== undefined && m.js !== undefined && m.js !== jsTag;
+    if (wireChanged || jsChanged) reloadPage();
+    return;
+  }
   if (m.t === "f") applyFull(m);
   else if (m.t === "d") applyDiff(m);
   else if (m.t === "c") applyCell(m);
@@ -407,8 +446,11 @@ function connect(events: string): void {
 }
 
 function main(): void {
-  const boot = (window as unknown as { SHELLGLASS: { events: string; cfg: Cfg } }).SHELLGLASS;
+  const boot = (
+    window as unknown as { SHELLGLASS: { events: string; cfg: Cfg; proto?: number; js?: string } }
+  ).SHELLGLASS;
   setConfig(boot.cfg);
+  setProto(boot.proto, boot.js);
   screenEl = document.getElementById("screen")!;
   connect(boot.events);
 }

@@ -23,6 +23,26 @@ let cfg;
 export function setConfig(c) {
     cfg = c;
 }
+let proto;
+let jsTag;
+export function setProto(p, js) {
+    proto = p;
+    jsTag = js;
+}
+export let reloadPage = () => {
+    try {
+        const last = Number(sessionStorage.getItem("sg-reload") ?? 0);
+        if (Date.now() - last < 5000)
+            return;
+        sessionStorage.setItem("sg-reload", String(Date.now()));
+    }
+    catch (e) {
+    }
+    location.reload();
+};
+export function setReloadPage(f) {
+    reloadPage = f;
+}
 const BASE16 = [
     [0x00, 0x00, 0x00], [0xcd, 0x00, 0x00], [0x00, 0xcd, 0x00], [0xcd, 0xcd, 0x00],
     [0x00, 0x00, 0xee], [0xcd, 0x00, 0xcd], [0x00, 0xcd, 0xcd], [0xe5, 0xe5, 0xe5],
@@ -241,6 +261,13 @@ function applyBanner(m) {
     screen = { cells: [], cur: null, rowEls: [] };
 }
 export function apply(m) {
+    if (m.t === "v") {
+        const wireChanged = proto !== undefined && m.v !== proto;
+        const jsChanged = jsTag !== undefined && m.js !== undefined && m.js !== jsTag;
+        if (wireChanged || jsChanged)
+            reloadPage();
+        return;
+    }
     if (m.t === "f")
         applyFull(m);
     else if (m.t === "d")
@@ -264,6 +291,7 @@ function connect(events) {
 function main() {
     const boot = window.SHELLGLASS;
     setConfig(boot.cfg);
+    setProto(boot.proto, boot.js);
     screenEl = document.getElementById("screen");
     connect(boot.events);
 }

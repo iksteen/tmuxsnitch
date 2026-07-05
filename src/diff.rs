@@ -21,6 +21,9 @@
 //! - `{"t":"l", c?, r:[row, left, text, style?]}` — a single changed line that
 //!   isn't uniform (mixed styles, blanks-as-0, or cluster cells).
 //! - `{"t":"b", html}` — an error banner.
+//! - `{"t":"v", v, js}` — version hello, first event of every SSE stream: the
+//!   wire proto and the baked viewer.js content tag. A page that mismatches on
+//!   either reloads itself (see [`PROTO`]).
 //!
 //! A block (see [`CellBlock`]) is positional `[text]` / `[text, style]`: `text` is
 //! one cell per codepoint in merged strings (`["…"]` = one multi-codepoint-grapheme
@@ -50,6 +53,24 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::model::{Color, Frame, Grid, StyledCell};
+
+/// Viewer wire-protocol version. Injected into the page at serve time
+/// (`window.SHELLGLASS.proto`) and announced as the first SSE event on every
+/// (re)connect (`{"t":"v","v":N}`): a page whose baked viewer.js predates a
+/// server upgrade sees the mismatch on reconnect and reloads itself. Bump on
+/// any change to the viewer-facing message format. (The client→hub side is
+/// guarded separately by the session-id salt in `proto.rs`.)
+pub const PROTO: u32 = 3;
+
+/// The version-hello event data, sent at the head of every SSE stream: the wire
+/// proto plus the baked viewer.js content tag — the two things that decide
+/// whether a loaded page can keep consuming this stream.
+fn hello_message() -> String {
+    format!(
+        "{{\"t\":\"v\",\"v\":{PROTO},\"js\":\"{}\"}}",
+        crate::render::viewer_tag()
+    )
+}
 
 /// Broadcast backlog per session. A viewer that falls this many frames behind gets
 /// a `Lagged` and is resynced with a fresh full snapshot — never a silent desync.
@@ -176,6 +197,9 @@ impl Live {
         let snap = self.state.load_full();
         let full = snap.full_msg();
         let mut threshold = snap.seq;
+        // Version hello first (no id: it isn't a delta and shouldn't move
+        // lastEventId), then the full snapshot.
+        let hello = tokio_stream::once(Ok::<_, Infallible>(Event::default().data(hello_message())));
         let head = tokio_stream::once(Ok::<_, Infallible>(
             Event::default().id(snap.seq.to_string()).data(&*full),
         ));
@@ -198,7 +222,7 @@ impl Live {
                 Event::default().id(seq.to_string()).data(&*data),
             ))
         });
-        Sse::new(head.chain(tail))
+        Sse::new(hello.chain(head).chain(tail))
             .keep_alive(KeepAlive::default())
             .into_response()
     }
@@ -1186,6 +1210,14 @@ mod tests {
             msg.contains(r#""t":"l""#) && msg.contains(r#""r":[0,4,["O WO"],[[0,3,{"b":1}]]]"#),
             "single-line tag, merged text run, style run with 1-flag: {msg}"
         );
+    }
+
+    #[test]
+    fn version_hello_announces_proto_and_js_tag() {
+        let hello = hello_message();
+        assert!(hello.starts_with(&format!("{{\"t\":\"v\",\"v\":{PROTO},\"js\":\"")));
+        assert!(hello.contains(crate::render::viewer_tag()));
+        assert_eq!(PROTO, 3, "bump deliberately, with the wire format");
     }
 
     #[test]
