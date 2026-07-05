@@ -176,13 +176,21 @@ test("glyphOps emits pure device-pixel ops for the box/block range", () => {
   assert.equal(up.w, 2, "up arm heavy");
   assert.equal(down.w, 1, "down arm light");
 
-  // ═ double horizontal: two rails, no centre bar.
+  // ═ double horizontal: two rails at ±off (off = 2·light) about the centre.
   assert.deepEqual(ops(0x2550), [
-    { t: "rect", x: 0, y: 9, w: 10, h: 1 },
-    { t: "rect", x: 0, y: 11, w: 10, h: 1 },
+    { t: "rect", x: 0, y: 8, w: 10, h: 1 },
+    { t: "rect", x: 0, y: 12, w: 10, h: 1 },
   ]);
   // ╬ full double cross: 4 rails, centre hole preserved.
   assert.equal(ops(0x256c).length, 4);
+  // ╔ double corner: the outer rails reach the outer corner (3,8); the INNER rails
+  // stop at the inner corner (7,12) instead of crossing the gap to the outer corner.
+  assert.deepEqual(ops(0x2554), [
+    { t: "rect", x: 3, y: 8, w: 1, h: 12 }, // outer (left) vertical, top at the outer row
+    { t: "rect", x: 7, y: 12, w: 1, h: 8 }, // inner (right) vertical, top at the inner row
+    { t: "rect", x: 3, y: 8, w: 7, h: 1 }, // outer (top) horizontal
+    { t: "rect", x: 7, y: 12, w: 3, h: 1 }, // inner (bottom) horizontal
+  ]);
 
   // ╭ rounded corner: one elliptical arc, centred on the far corner with radii
   // reaching the arms' centrelines (midpoint + 0.5 for the odd light width).

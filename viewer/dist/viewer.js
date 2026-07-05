@@ -289,23 +289,28 @@ function doublesOps(x0, y0, x1, y1, cp, light) {
     const midX = Math.round((x0 + x1) / 2);
     const midY = Math.round((y0 + y1) / 2);
     const t = lw(1, light);
-    const off = t;
-    const maxDv = hd ? off : 0;
-    const maxDh = vd ? off : 0;
     const h = t >> 1;
+    const off = Math.max(1, Math.min(2 * t, Math.floor((x1 - x0) / 2) - h));
+    const dbl = vd && hd;
+    const oneH = !!l !== !!r;
+    const oneV = !!u !== !!d;
+    const hDir = r ? 1 : -1;
+    const vDir = d ? 1 : -1;
     const ops = [];
     if (u || d) {
-        for (const xc of vd ? [midX - off, midX + off] : [midX]) {
-            const a = u ? y0 : midY - maxDv - h;
-            const b = d ? y1 : midY + maxDv + h;
-            ops.push(rectOp(Math.round(xc) - h, a, t, b - a));
+        for (const sx of vd ? [-1, 1] : [0]) {
+            const xc = midX + sx * off;
+            const a = u ? y0 : dbl && oneH ? midY + (sx * hDir < 0 ? -off : off) - h : midY - (hd ? off : 0) - h;
+            const b = d ? y1 : dbl && oneH ? midY + (sx * hDir < 0 ? off : -off) + h : midY + (hd ? off : 0) + h;
+            ops.push(rectOp(xc - h, a, t, b - a));
         }
     }
     if (l || r) {
-        for (const yc of hd ? [midY - off, midY + off] : [midY]) {
-            const a = l ? x0 : midX - maxDh - h;
-            const b = r ? x1 : midX + maxDh + h;
-            ops.push(rectOp(a, Math.round(yc) - h, b - a, t));
+        for (const sy of hd ? [-1, 1] : [0]) {
+            const yc = midY + sy * off;
+            const a = l ? x0 : dbl && oneV ? midX + (sy * vDir < 0 ? -off : off) - h : midX - (vd ? off : 0) - h;
+            const b = r ? x1 : dbl && oneV ? midX + (sy * vDir < 0 ? off : -off) + h : midX + (vd ? off : 0) + h;
+            ops.push(rectOp(a, yc - h, b - a, t));
         }
     }
     return ops;
