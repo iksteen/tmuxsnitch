@@ -313,6 +313,7 @@ let obsScreen: HTMLElement | null = null;
 let gCols = 0;
 let gRows = 0;
 let ro: ResizeObserver | null = null;
+let dprMedia: MediaQueryList | null = null;
 
 // Derive cell size from .screen's ACTUAL rendered box (width/cols === 1ch, height/rows
 // === --lh), so the canvas grid is exact by construction — no probe, no font-load race,
@@ -328,6 +329,23 @@ function sizeCanvas(): void {
   dpr = window.devicePixelRatio || 1;
   canvasEl.width = Math.round(rect.width * dpr);
   canvasEl.height = Math.round(rect.height * dpr);
+}
+
+// devicePixelRatio can change with NO .screen resize when a window moves between a
+// HiDPI and a regular monitor (an external display on a laptop — common on MacBooks),
+// so the ResizeObserver won't fire and the canvas keeps its old backing-store scale and
+// blurs. A `(resolution)` media query flips on exactly that change; it pins one ratio,
+// so re-arm it for the new value each time it fires.
+function onDprChange(): void {
+  sizeCanvas();
+  redrawCanvasAll();
+  watchDpr();
+}
+function watchDpr(): void {
+  if (typeof matchMedia === "undefined") return;
+  dprMedia?.removeEventListener("change", onDprChange);
+  dprMedia = matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+  dprMedia.addEventListener("change", onDprChange);
 }
 
 function attachCanvas(cols: number, rows: number, screenDiv: HTMLElement): void {
@@ -346,6 +364,7 @@ function attachCanvas(cols: number, rows: number, screenDiv: HTMLElement): void 
     ro.disconnect();
     ro.observe(screenDiv);
   }
+  watchDpr();
 }
 
 // Device-pixel rect for cell (r,c). Boundaries are rounded, and cell (c+1).x0 ===

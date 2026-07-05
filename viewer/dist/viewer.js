@@ -168,6 +168,7 @@ let obsScreen = null;
 let gCols = 0;
 let gRows = 0;
 let ro = null;
+let dprMedia = null;
 function sizeCanvas() {
     if (!canvasEl || !obsScreen || !gCols || !gRows)
         return;
@@ -179,6 +180,18 @@ function sizeCanvas() {
     dpr = window.devicePixelRatio || 1;
     canvasEl.width = Math.round(rect.width * dpr);
     canvasEl.height = Math.round(rect.height * dpr);
+}
+function onDprChange() {
+    sizeCanvas();
+    redrawCanvasAll();
+    watchDpr();
+}
+function watchDpr() {
+    if (typeof matchMedia === "undefined")
+        return;
+    dprMedia?.removeEventListener("change", onDprChange);
+    dprMedia = matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+    dprMedia.addEventListener("change", onDprChange);
 }
 function attachCanvas(cols, rows, screenDiv) {
     const c = document.createElement("canvas");
@@ -196,6 +209,7 @@ function attachCanvas(cols, rows, screenDiv) {
         ro.disconnect();
         ro.observe(screenDiv);
     }
+    watchDpr();
 }
 function cellRect(r, c) {
     return [
