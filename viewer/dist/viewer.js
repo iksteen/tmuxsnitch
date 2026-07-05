@@ -194,10 +194,6 @@ function attachCanvas(cols, rows, screenDiv) {
         ro.observe(screenDiv);
     }
 }
-function lineWidth(weight) {
-    const light = Math.max(1, Math.round(dpr));
-    return weight === 2 ? 2 * light : light;
-}
 function cellRect(r, c) {
     return [
         Math.round(c * cellW * dpr),
@@ -206,30 +202,36 @@ function cellRect(r, c) {
         Math.round((r + 1) * cellH * dpr),
     ];
 }
-function drawArms(x0, y0, x1, y1, arms) {
+const rectOp = (x, y, w, h, alpha) => alpha === undefined ? { t: "rect", x, y, w, h } : { t: "rect", x, y, w, h, alpha };
+function lw(weight, light) {
+    return weight === 2 ? 2 * light : light;
+}
+function armsOps(x0, y0, x1, y1, arms, light) {
     const [u, r, d, l] = arms;
     const midX = Math.round((x0 + x1) / 2);
     const midY = Math.round((y0 + y1) / 2);
-    const vh = lineWidth(Math.max(u, d)) >> 1;
-    const hh = lineWidth(Math.max(l, r)) >> 1;
+    const vh = lw(Math.max(u, d), light) >> 1;
+    const hh = lw(Math.max(l, r), light) >> 1;
+    const ops = [];
     if (u) {
-        const t = lineWidth(u);
-        ctx.fillRect(midX - (t >> 1), y0, t, midY + hh - y0);
+        const t = lw(u, light);
+        ops.push(rectOp(midX - (t >> 1), y0, t, midY + hh - y0));
     }
     if (d) {
-        const t = lineWidth(d);
-        ctx.fillRect(midX - (t >> 1), midY - hh, t, y1 - (midY - hh));
+        const t = lw(d, light);
+        ops.push(rectOp(midX - (t >> 1), midY - hh, t, y1 - (midY - hh)));
     }
     if (l) {
-        const t = lineWidth(l);
-        ctx.fillRect(x0, midY - (t >> 1), midX + vh - x0, t);
+        const t = lw(l, light);
+        ops.push(rectOp(x0, midY - (t >> 1), midX + vh - x0, t));
     }
     if (r) {
-        const t = lineWidth(r);
-        ctx.fillRect(midX - vh, midY - (t >> 1), x1 - (midX - vh), t);
+        const t = lw(r, light);
+        ops.push(rectOp(midX - vh, midY - (t >> 1), x1 - (midX - vh), t));
     }
+    return ops;
 }
-function drawDashes(x0, y0, x1, y1, cp) {
+function dashesOps(x0, y0, x1, y1, cp, light) {
     let horiz, n, weight;
     if (cp <= 0x250b) {
         const k = cp - 0x2504;
@@ -243,23 +245,25 @@ function drawDashes(x0, y0, x1, y1, cp) {
         n = 2;
         weight = k & 1 ? 2 : 1;
     }
-    const t = lineWidth(weight);
+    const t = lw(weight, light);
     const midX = Math.round((x0 + x1) / 2);
     const midY = Math.round((y0 + y1) / 2);
+    const ops = [];
     for (let i = 0; i < n; i++) {
         const s0 = (i + 0.2) / n;
         const s1 = (i + 0.8) / n;
         if (horiz) {
             const a = Math.round(x0 + s0 * (x1 - x0));
             const b = Math.round(x0 + s1 * (x1 - x0));
-            ctx.fillRect(a, midY - (t >> 1), b - a, t);
+            ops.push(rectOp(a, midY - (t >> 1), b - a, t));
         }
         else {
             const a = Math.round(y0 + s0 * (y1 - y0));
             const b = Math.round(y0 + s1 * (y1 - y0));
-            ctx.fillRect(midX - (t >> 1), a, t, b - a);
+            ops.push(rectOp(midX - (t >> 1), a, t, b - a));
         }
     }
+    return ops;
 }
 const DOUBLES = [
     [0, 0, 1, 1, 0, 1], [1, 1, 0, 0, 1, 0], [0, 1, 0, 1, 0, 1], [0, 1, 0, 1, 1, 0],
@@ -271,31 +275,33 @@ const DOUBLES = [
     [1, 0, 1, 1, 1, 0], [1, 0, 1, 1, 1, 1], [1, 1, 1, 1, 0, 1], [1, 1, 1, 1, 1, 0],
     [1, 1, 1, 1, 1, 1],
 ];
-function drawDoubles(x0, y0, x1, y1, cp) {
+function doublesOps(x0, y0, x1, y1, cp, light) {
     const [u, d, l, r, vd, hd] = DOUBLES[cp - 0x2550];
     const midX = Math.round((x0 + x1) / 2);
     const midY = Math.round((y0 + y1) / 2);
-    const t = lineWidth(1);
+    const t = lw(1, light);
     const off = t;
     const maxDv = hd ? off : 0;
     const maxDh = vd ? off : 0;
     const h = t >> 1;
+    const ops = [];
     if (u || d) {
         for (const xc of vd ? [midX - off, midX + off] : [midX]) {
             const a = u ? y0 : midY - maxDv - h;
             const b = d ? y1 : midY + maxDv + h;
-            ctx.fillRect(Math.round(xc) - h, a, t, b - a);
+            ops.push(rectOp(Math.round(xc) - h, a, t, b - a));
         }
     }
     if (l || r) {
         for (const yc of hd ? [midY - off, midY + off] : [midY]) {
             const a = l ? x0 : midX - maxDh - h;
             const b = r ? x1 : midX + maxDh + h;
-            ctx.fillRect(a, Math.round(yc) - h, b - a, t);
+            ops.push(rectOp(a, Math.round(yc) - h, b - a, t));
         }
     }
+    return ops;
 }
-function drawArc(x0, y0, x1, y1, cp) {
+function arcOps(x0, y0, x1, y1, cp, light) {
     const corners = [[x1, y1], [x0, y1], [x0, y0], [x1, y0]];
     const angles = [
         [Math.PI, 1.5 * Math.PI], [1.5 * Math.PI, 2 * Math.PI],
@@ -303,82 +309,104 @@ function drawArc(x0, y0, x1, y1, cp) {
     ];
     const [cx, cy] = corners[cp - 0x256d];
     const [a0, a1] = angles[cp - 0x256d];
-    ctx.strokeStyle = ctx.fillStyle;
-    ctx.lineWidth = lineWidth(1);
-    ctx.beginPath();
-    ctx.ellipse(cx, cy, (x1 - x0) / 2, (y1 - y0) / 2, 0, a0, a1);
-    ctx.stroke();
+    return [{ t: "arc", cx, cy, rx: (x1 - x0) / 2, ry: (y1 - y0) / 2, a0, a1, lw: lw(1, light) }];
 }
-function drawDiag(x0, y0, x1, y1, cp) {
-    ctx.strokeStyle = ctx.fillStyle;
-    ctx.lineWidth = lineWidth(1);
-    ctx.beginPath();
-    if (cp !== 0x2572) {
-        ctx.moveTo(x0, y1);
-        ctx.lineTo(x1, y0);
-    }
-    if (cp !== 0x2571) {
-        ctx.moveTo(x0, y0);
-        ctx.lineTo(x1, y1);
-    }
-    ctx.stroke();
+function diagOps(x0, y0, x1, y1, cp, light) {
+    const t = lw(1, light);
+    const ops = [];
+    if (cp !== 0x2572)
+        ops.push({ t: "line", x0, y0: y1, x1, y1: y0, lw: t });
+    if (cp !== 0x2571)
+        ops.push({ t: "line", x0, y0, x1, y1, lw: t });
+    return ops;
 }
 const QUADRANTS = [4, 8, 1, 13, 9, 7, 11, 2, 6, 14];
-function drawBlock(x0, y0, x1, y1, cp) {
+function blockOps(x0, y0, x1, y1, cp) {
     const W = x1 - x0;
     const H = y1 - y0;
-    const R = (u0, v0, u1, v1) => {
+    const R = (u0, v0, u1, v1, alpha) => {
         const a = Math.round(x0 + u0 * W), b = Math.round(x0 + u1 * W);
         const c = Math.round(y0 + v0 * H), d = Math.round(y0 + v1 * H);
-        ctx.fillRect(a, c, b - a, d - c);
+        return rectOp(a, c, b - a, d - c, alpha);
     };
     if (cp === 0x2580)
-        return R(0, 0, 1, 0.5);
+        return [R(0, 0, 1, 0.5)];
     if (cp >= 0x2581 && cp <= 0x2588)
-        return R(0, 1 - (cp - 0x2580) / 8, 1, 1);
+        return [R(0, 1 - (cp - 0x2580) / 8, 1, 1)];
     if (cp >= 0x2589 && cp <= 0x258f)
-        return R(0, 0, (0x2590 - cp) / 8, 1);
+        return [R(0, 0, (0x2590 - cp) / 8, 1)];
     if (cp === 0x2590)
-        return R(0.5, 0, 1, 1);
-    if (cp <= 0x2593) {
-        const g = ctx.globalAlpha;
-        ctx.globalAlpha = (cp - 0x2590) / 4;
-        R(0, 0, 1, 1);
-        ctx.globalAlpha = g;
-        return;
-    }
+        return [R(0.5, 0, 1, 1)];
+    if (cp <= 0x2593)
+        return [R(0, 0, 1, 1, (cp - 0x2590) / 4)];
     if (cp === 0x2594)
-        return R(0, 0, 1, 0.125);
+        return [R(0, 0, 1, 0.125)];
     if (cp === 0x2595)
-        return R(0.875, 0, 1, 1);
+        return [R(0.875, 0, 1, 1)];
     const m = QUADRANTS[cp - 0x2596];
+    const ops = [];
     if (m & 1)
-        R(0, 0, 0.5, 0.5);
+        ops.push(R(0, 0, 0.5, 0.5));
     if (m & 2)
-        R(0.5, 0, 1, 0.5);
+        ops.push(R(0.5, 0, 1, 0.5));
     if (m & 4)
-        R(0, 0.5, 0.5, 1);
+        ops.push(R(0, 0.5, 0.5, 1));
     if (m & 8)
-        R(0.5, 0.5, 1, 1);
+        ops.push(R(0.5, 0.5, 1, 1));
+    return ops;
+}
+export function glyphOps(cp, x0, y0, x1, y1, light) {
+    const arms = boxArms(cp);
+    if (arms)
+        return armsOps(x0, y0, x1, y1, arms, light);
+    if ((cp >= 0x2504 && cp <= 0x250b) || (cp >= 0x254c && cp <= 0x254f))
+        return dashesOps(x0, y0, x1, y1, cp, light);
+    if (cp >= 0x2550 && cp <= 0x256c)
+        return doublesOps(x0, y0, x1, y1, cp, light);
+    if (cp >= 0x256d && cp <= 0x2570)
+        return arcOps(x0, y0, x1, y1, cp, light);
+    if (cp >= 0x2571 && cp <= 0x2573)
+        return diagOps(x0, y0, x1, y1, cp, light);
+    if (cp >= 0x2580 && cp <= 0x259f)
+        return blockOps(x0, y0, x1, y1, cp);
+    return [];
+}
+function paintOps(g, color, ops) {
+    g.fillStyle = color;
+    g.strokeStyle = color;
+    for (const op of ops) {
+        if (op.t === "rect") {
+            if (op.alpha !== undefined) {
+                const a = g.globalAlpha;
+                g.globalAlpha = op.alpha;
+                g.fillRect(op.x, op.y, op.w, op.h);
+                g.globalAlpha = a;
+            }
+            else {
+                g.fillRect(op.x, op.y, op.w, op.h);
+            }
+        }
+        else if (op.t === "arc") {
+            g.lineWidth = op.lw;
+            g.beginPath();
+            g.ellipse(op.cx, op.cy, op.rx, op.ry, 0, op.a0, op.a1);
+            g.stroke();
+        }
+        else {
+            g.lineWidth = op.lw;
+            g.beginPath();
+            g.moveTo(op.x0, op.y0);
+            g.lineTo(op.x1, op.y1);
+            g.stroke();
+        }
+    }
 }
 function drawGlyph(r, c, cp, cell, isCursor) {
     if (!ctx)
         return;
-    ctx.fillStyle = hex(cellFg(cell, isCursor));
     const [x0, y0, x1, y1] = cellRect(r, c);
-    const arms = boxArms(cp);
-    if (arms)
-        drawArms(x0, y0, x1, y1, arms);
-    else if ((cp >= 0x2504 && cp <= 0x250b) || (cp >= 0x254c && cp <= 0x254f))
-        drawDashes(x0, y0, x1, y1, cp);
-    else if (cp >= 0x2550 && cp <= 0x256c)
-        drawDoubles(x0, y0, x1, y1, cp);
-    else if (cp >= 0x256d && cp <= 0x2570)
-        drawArc(x0, y0, x1, y1, cp);
-    else if (cp >= 0x2571 && cp <= 0x2573)
-        drawDiag(x0, y0, x1, y1, cp);
-    else if (cp >= 0x2580 && cp <= 0x259f)
-        drawBlock(x0, y0, x1, y1, cp);
+    const light = Math.max(1, Math.round(dpr));
+    paintOps(ctx, hex(cellFg(cell, isCursor)), glyphOps(cp, x0, y0, x1, y1, light));
 }
 function redrawCanvasRow(r) {
     if (!ctx || !canvasEl)
