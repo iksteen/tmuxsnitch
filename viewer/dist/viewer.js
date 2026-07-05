@@ -510,16 +510,7 @@ function redrawCanvasAll() {
 }
 export function isFillGlyph(cp) {
     return ((cp >= 0xe0b0 && cp <= 0xe0d4) ||
-        (cp >= 0x2500 && cp <= 0x259f) ||
         (cp >= 0x1fb00 && cp <= 0x1fbaf));
-}
-export function isMergeableFill(cp) {
-    return (cp === 0x2500 ||
-        cp === 0x2501 ||
-        cp === 0x2550 ||
-        cp === 0x2588 ||
-        (cp >= 0x2581 && cp <= 0x2587) ||
-        cp === 0x2594);
 }
 function symbolFamily(cp) {
     for (const [lo, hi, fam] of cfg.sym) {
@@ -567,20 +558,12 @@ export function renderRow(cells, cursorCol) {
         out += `<span class="run" style="left:${runCol}ch;width:${cols}ch;${runStyle ?? ""}">${text}</span>`;
         text = "";
     };
-    let fill = null;
-    const flushFill = () => {
-        if (fill) {
-            out += symbolSpan(fill.col, fill.width, fill.style, fill.font, fill.glyph, fill.first);
-            fill = null;
-        }
-    };
     for (const cell of cells) {
         const isCursor = col === cursorCol;
         const w = cell.w ? 2 : 1;
         const cp0 = cell.t ? cell.t.codePointAt(0) : 0;
         if (cp0 && isCanvasGlyph(cp0)) {
             flushText();
-            flushFill();
             runStyle = null;
             cols = 0;
             out += `<span class="run" style="left:${col}ch;width:${w}ch;${cellStyle(cell, isCursor)}color:transparent">${esc(cell.t)}</span>`;
@@ -592,25 +575,9 @@ export function renderRow(cells, cursorCol) {
             flushText();
             runStyle = null;
             cols = 0;
-            const t = cell.t ?? " ";
-            const first = t.codePointAt(0) ?? 0x20;
-            if (isMergeableFill(first)) {
-                const style = cellStyle(cell, isCursor);
-                if (fill && fill.t === t && fill.style === style && fill.font === font) {
-                    fill.width += w;
-                }
-                else {
-                    flushFill();
-                    fill = { col, width: w, t, glyph: esc(t), style, font, first };
-                }
-            }
-            else {
-                flushFill();
-                out += symbolCell(cell, isCursor, col, w, font);
-            }
+            out += symbolCell(cell, isCursor, col, w, font);
         }
         else {
-            flushFill();
             const style = cellStyle(cell, isCursor);
             if (runStyle !== style) {
                 flushText();
@@ -625,7 +592,6 @@ export function renderRow(cells, cursorCol) {
         col += w;
     }
     flushText();
-    flushFill();
     return out;
 }
 function cursorCol(cur, row) {
