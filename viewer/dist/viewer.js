@@ -103,6 +103,234 @@ export function cellStyle(cell, isCursor) {
         s += "text-decoration:underline;";
     return s;
 }
+let metrics = { cellW: 8, cellH: 17, fontSize: 14 };
+export function setMetrics(m) {
+    metrics = m;
+}
+function wpx(weight) {
+    const light = Math.max(1, Math.round(metrics.fontSize / 14));
+    return weight >= 2 ? 2 * light : light;
+}
+function f(x) {
+    return String(Math.round(x * 1e4) / 1e4);
+}
+function rect(x0, y0, x1, y1) {
+    return `<rect x="${f(x0)}" y="${f(y0)}" width="${f(x1 - x0)}" height="${f(y1 - y0)}"/>`;
+}
+function hband(y, x0, x1, weight) {
+    const h = wpx(weight) / metrics.cellH / 2;
+    return rect(x0, y - h, x1, y + h);
+}
+function vband(x, y0, y1, weight) {
+    const w = wpx(weight) / metrics.cellW / 2;
+    return rect(x - w, y0, x + w, y1);
+}
+function arms(u, r, d, l) {
+    const eps = wpx(1) / 2;
+    const vw = Math.max(u ? wpx(u) / 2 : 0, d ? wpx(d) / 2 : 0, eps) / metrics.cellW;
+    const hh = Math.max(l ? wpx(l) / 2 : 0, r ? wpx(r) / 2 : 0, eps) / metrics.cellH;
+    const ov = OVERSHOOT / metrics.cellH;
+    let s = "";
+    if (u)
+        s += vband(0.5, -ov, 0.5 + hh, u);
+    if (d)
+        s += vband(0.5, 0.5 - hh, 1 + ov, d);
+    if (l)
+        s += hband(0.5, 0, 0.5 + vw, l);
+    if (r)
+        s += hband(0.5, 0.5 - vw, 1, r);
+    return s;
+}
+const OVERSHOOT = 0.5;
+const ARMS = "0101020210102020" +
+    "0000000000000000" +
+    "0000000000000000" +
+    "0110021001200220" +
+    "0011001200210022" +
+    "1100120021002200" +
+    "1001100220012002" +
+    "1110121021101120" +
+    "2120221012202220" +
+    "1011101220111021" +
+    "2021201210222022" +
+    "0111011202110212" +
+    "0121012202210222" +
+    "1101110212011202" +
+    "2101210222012202" +
+    "1111111212111212" +
+    "2111112121212112" +
+    "2211112212212212" +
+    "1222212222212222" +
+    "0000000000000000" +
+    "0000000000000000" +
+    "0000000000000000" +
+    "0000000000000000" +
+    "0000000000000000" +
+    "0000000000000000" +
+    "0000000000000000" +
+    "0000000000000000" +
+    "0000000000000000" +
+    "0000000000000000" +
+    "0001100001000010" +
+    "0002200002000020" +
+    "0201102001022010";
+function dashes(horiz, n, weight) {
+    let s = "";
+    const seg = 1 / n;
+    const dash = seg * 0.6;
+    for (let i = 0; i < n; i++) {
+        const a = i * seg + (seg - dash) / 2;
+        s += horiz ? hband(0.5, a, a + dash, weight) : vband(0.5, a, a + dash, weight);
+    }
+    return s;
+}
+function dashGlyph(cp) {
+    if (cp <= 0x250b) {
+        const k = cp - 0x2504;
+        return dashes((k & 3) < 2, k < 4 ? 3 : 4, k & 1 ? 2 : 1);
+    }
+    const k = cp - 0x254c;
+    return dashes(k < 2, 2, k & 1 ? 2 : 1);
+}
+const DOUBLES = [
+    [0, 0, 1, 1, 0, 1],
+    [1, 1, 0, 0, 1, 0],
+    [0, 1, 0, 1, 0, 1],
+    [0, 1, 0, 1, 1, 0],
+    [0, 1, 0, 1, 1, 1],
+    [0, 1, 1, 0, 0, 1],
+    [0, 1, 1, 0, 1, 0],
+    [0, 1, 1, 0, 1, 1],
+    [1, 0, 0, 1, 0, 1],
+    [1, 0, 0, 1, 1, 0],
+    [1, 0, 0, 1, 1, 1],
+    [1, 0, 1, 0, 0, 1],
+    [1, 0, 1, 0, 1, 0],
+    [1, 0, 1, 0, 1, 1],
+    [1, 1, 0, 1, 0, 1],
+    [1, 1, 0, 1, 1, 0],
+    [1, 1, 0, 1, 1, 1],
+    [1, 1, 1, 0, 0, 1],
+    [1, 1, 1, 0, 1, 0],
+    [1, 1, 1, 0, 1, 1],
+    [0, 1, 1, 1, 0, 1],
+    [0, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1],
+    [1, 0, 1, 1, 0, 1],
+    [1, 0, 1, 1, 1, 0],
+    [1, 0, 1, 1, 1, 1],
+    [1, 1, 1, 1, 0, 1],
+    [1, 1, 1, 1, 1, 0],
+    [1, 1, 1, 1, 1, 1],
+];
+function doubleGlyph(cp) {
+    const [u, d, l, r, vd, hd] = DOUBLES[cp - 0x2550];
+    const hw = wpx(1) / metrics.cellW / 2;
+    const hh = wpx(1) / metrics.cellH / 2;
+    const dh = wpx(1) / metrics.cellW;
+    const dv = wpx(1) / metrics.cellH;
+    const maxDv = hd ? dv : 0;
+    const maxDh = vd ? dh : 0;
+    const ov = OVERSHOOT / metrics.cellH;
+    let s = "";
+    if (u || d) {
+        for (const x of vd ? [0.5 - dh, 0.5 + dh] : [0.5]) {
+            s += vband(x, u ? -ov : 0.5 - maxDv - hh, d ? 1 + ov : 0.5 + maxDv + hh, 1);
+        }
+    }
+    if (l || r) {
+        for (const y of hd ? [0.5 - dv, 0.5 + dv] : [0.5]) {
+            s += hband(y, l ? 0 : 0.5 - maxDh - hw, r ? 1 : 0.5 + maxDh + hw, 1);
+        }
+    }
+    return s;
+}
+function arc(cx, cy) {
+    const tx = wpx(1) / metrics.cellW / 2;
+    const ty = wpx(1) / metrics.cellH / 2;
+    const sx = cx === 1 ? -1 : 1;
+    const sy = cy === 1 ? -1 : 1;
+    const aOut = 0.5 + sx * tx;
+    const aIn = 0.5 - sx * tx;
+    const bOut = 0.5 + sy * ty;
+    const bIn = 0.5 - sy * ty;
+    const sweep = sx * sy < 0 ? 0 : 1;
+    return (`<path d="M ${f(aOut)} ${f(cy)} A ${f(0.5 + tx)} ${f(0.5 + ty)} 0 0 ${sweep} ${f(cx)} ${f(bOut)} ` +
+        `L ${f(cx)} ${f(bIn)} A ${f(0.5 - tx)} ${f(0.5 - ty)} 0 0 ${1 - sweep} ${f(aIn)} ${f(cy)} Z"/>`);
+}
+function arcGlyph(cp) {
+    const c = [
+        [1, 1],
+        [0, 1],
+        [0, 0],
+        [1, 0],
+    ][cp - 0x256d];
+    return arc(c[0], c[1]);
+}
+function diag(x0, y0, x1, y1) {
+    const dxp = (x1 - x0) * metrics.cellW;
+    const dyp = (y1 - y0) * metrics.cellH;
+    const len = Math.hypot(dxp, dyp);
+    const t = wpx(1) / 2;
+    const ux = (-dyp / len) * t / metrics.cellW;
+    const uy = (dxp / len) * t / metrics.cellH;
+    return (`<path d="M ${f(x0 + ux)} ${f(y0 + uy)} L ${f(x1 + ux)} ${f(y1 + uy)} ` +
+        `L ${f(x1 - ux)} ${f(y1 - uy)} L ${f(x0 - ux)} ${f(y0 - uy)} Z"/>`);
+}
+function diagGlyph(cp) {
+    const up = cp !== 0x2572 ? diag(0, 1, 1, 0) : "";
+    const down = cp !== 0x2571 ? diag(0, 0, 1, 1) : "";
+    return up + down;
+}
+const QUADRANTS = [4, 8, 1, 13, 9, 7, 11, 2, 6, 14];
+function blockElement(cp) {
+    if (cp === 0x2580)
+        return rect(0, 0, 1, 0.5);
+    if (cp >= 0x2581 && cp <= 0x2588)
+        return rect(0, 1 - (cp - 0x2580) / 8, 1, 1);
+    if (cp >= 0x2589 && cp <= 0x258f)
+        return rect(0, 0, (0x2590 - cp) / 8, 1);
+    if (cp === 0x2590)
+        return rect(0.5, 0, 1, 1);
+    if (cp <= 0x2593) {
+        const op = (cp - 0x2590) / 4;
+        return `<rect x="0" y="0" width="1" height="1" fill-opacity="${op}"/>`;
+    }
+    if (cp === 0x2594)
+        return rect(0, 0, 1, 0.125);
+    if (cp === 0x2595)
+        return rect(0.875, 0, 1, 1);
+    const m = QUADRANTS[cp - 0x2596];
+    let s = "";
+    if (m & 1)
+        s += rect(0, 0, 0.5, 0.5);
+    if (m & 2)
+        s += rect(0.5, 0, 1, 0.5);
+    if (m & 4)
+        s += rect(0, 0.5, 0.5, 1);
+    if (m & 8)
+        s += rect(0.5, 0.5, 1, 1);
+    return s;
+}
+function boxDrawing(cp) {
+    if ((cp >= 0x2504 && cp <= 0x250b) || (cp >= 0x254c && cp <= 0x254f))
+        return dashGlyph(cp);
+    if (cp >= 0x2550 && cp <= 0x256c)
+        return doubleGlyph(cp);
+    if (cp >= 0x256d && cp <= 0x2570)
+        return arcGlyph(cp);
+    if (cp >= 0x2571 && cp <= 0x2573)
+        return diagGlyph(cp);
+    const o = (cp - 0x2500) * 4;
+    return arms(+ARMS[o], +ARMS[o + 1], +ARMS[o + 2], +ARMS[o + 3]);
+}
+export function glyphGeometry(cp) {
+    if (cp >= 0x2500 && cp <= 0x257f)
+        return boxDrawing(cp);
+    if (cp >= 0x2580 && cp <= 0x259f)
+        return blockElement(cp);
+    return null;
+}
 export function isFillGlyph(cp) {
     return ((cp >= 0xe0b0 && cp <= 0xe0d4) ||
         (cp >= 0x2500 && cp <= 0x259f) ||
@@ -112,8 +340,10 @@ export function isMergeableFill(cp) {
     return (cp === 0x2500 ||
         cp === 0x2501 ||
         cp === 0x2550 ||
+        cp === 0x2580 ||
         cp === 0x2588 ||
         (cp >= 0x2581 && cp <= 0x2587) ||
+        (cp >= 0x2591 && cp <= 0x2593) ||
         cp === 0x2594);
 }
 function symbolFamily(cp) {
@@ -149,6 +379,11 @@ function symbolCell(cell, isCursor, col, w, font) {
     const t = cell.t ?? " ";
     return symbolSpan(col, w, boxStyle, font, esc(t), t.codePointAt(0) ?? 0x20);
 }
+function geomSpan(col, w, boxStyle, geom) {
+    const crisp = geom.includes("<path") ? "" : ' shape-rendering="crispEdges"';
+    return (`<span class="run" style="left:${col}ch;width:${w}ch;overflow:visible;${boxStyle}">` +
+        `<svg viewBox="0 0 1 1" preserveAspectRatio="none" fill="currentColor" overflow="visible"${crisp} style="display:block;width:100%;height:100%">${geom}</svg></span>`);
+}
 export function renderRow(cells, cursorCol) {
     let out = "";
     let col = 0;
@@ -165,33 +400,44 @@ export function renderRow(cells, cursorCol) {
     let fill = null;
     const flushFill = () => {
         if (fill) {
-            out += symbolSpan(fill.col, fill.width, fill.style, fill.font, fill.glyph, fill.first);
+            out += fill.geom
+                ? geomSpan(fill.col, fill.width, fill.style, fill.geom)
+                : symbolSpan(fill.col, fill.width, fill.style, fill.font, fill.glyph, fill.first);
             fill = null;
         }
     };
     for (const cell of cells) {
         const isCursor = col === cursorCol;
         const w = cell.w ? 2 : 1;
-        const font = svgFont(cell);
-        if (font) {
+        const t = cell.t ?? "";
+        const first = t ? t.codePointAt(0) : 0x20;
+        const geom = t && !(first >= 0xe000 && first <= 0xf8ff && symbolFamily(first))
+            ? glyphGeometry(first)
+            : null;
+        const font = geom ? null : svgFont(cell);
+        if (geom || font) {
             flushText();
             runStyle = null;
             cols = 0;
-            const t = cell.t ?? " ";
-            const first = t.codePointAt(0) ?? 0x20;
             if (isMergeableFill(first)) {
                 const style = cellStyle(cell, isCursor);
-                if (fill && fill.t === t && fill.style === style && fill.font === font) {
+                if (fill &&
+                    fill.t === t &&
+                    fill.style === style &&
+                    fill.font === (font ?? "") &&
+                    fill.geom === geom) {
                     fill.width += w;
                 }
                 else {
                     flushFill();
-                    fill = { col, width: w, t, glyph: esc(t), style, font, first };
+                    fill = { col, width: w, t, glyph: esc(t || " "), style, font: font ?? "", first, geom };
                 }
             }
             else {
                 flushFill();
-                out += symbolCell(cell, isCursor, col, w, font);
+                out += geom
+                    ? geomSpan(col, w, cellStyle(cell, isCursor), geom)
+                    : symbolCell(cell, isCursor, col, w, font);
             }
         }
         else {
@@ -324,11 +570,33 @@ function connect(events) {
         }
     };
 }
+function measureMetrics() {
+    const cs = getComputedStyle(screenEl);
+    const cellH = parseFloat(cs.getPropertyValue("--lh")) || 17;
+    const fontSize = parseFloat(cs.fontSize) || 14;
+    const probe = document.createElement("span");
+    probe.textContent = "0".repeat(100);
+    probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre";
+    screenEl.appendChild(probe);
+    const cellW = probe.getBoundingClientRect().width / 100 || 8;
+    probe.remove();
+    setMetrics({ cellW, cellH, fontSize });
+}
 function main() {
     const boot = window.SHELLGLASS;
     setConfig(boot.cfg);
     setProto(boot.proto, boot.js);
     screenEl = document.getElementById("screen");
+    measureMetrics();
+    document.fonts?.ready.then(() => {
+        const before = metrics.cellW;
+        measureMetrics();
+        if (Math.abs(metrics.cellW - before) / before > 0.03) {
+            for (let r = 0; r < screen.rowEls.length; r++) {
+                screen.rowEls[r].innerHTML = renderRow(screen.cells[r] ?? [], cursorCol(screen.cur, r));
+            }
+        }
+    });
     connect(boot.events);
 }
 if (typeof document !== "undefined" && window.SHELLGLASS) {

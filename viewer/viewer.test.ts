@@ -7,6 +7,8 @@ import {
   resolveRgb,
   cellStyle,
   isFillGlyph,
+  glyphGeometry,
+  setMetrics,
   renderRow,
   patchCells,
   decodeBlock,
@@ -24,6 +26,10 @@ const CFG: Cfg = {
   sym: [],
 };
 setConfig(CFG);
+
+// Pin cell metrics so procedural-geometry coordinates are deterministic. cellW≠cellH
+// exercises the per-axis thickness (1px is 0.125 in x, 0.0625 in y).
+setMetrics({ cellW: 8, cellH: 16, fontSize: 14 });
 
 test("version hello reloads on wire or js mismatch, not on match", () => {
   let reloads = 0;
@@ -111,27 +117,125 @@ test("wide cells advance two columns", () => {
   assert.match(split, /left:2ch;width:1ch;font-weight:bold;">a</);
 });
 
-test("fill glyphs render as stretched SVG, plain text does not", () => {
-  assert.ok(isFillGlyph("│".codePointAt(0)!));
+test("box-drawing glyphs render as procedural geometry, not font text", () => {
   const box = renderRow([{ t: "│" }], -1);
   assert.match(box, /<svg /);
+  assert.match(box, /viewBox="0 0 1 1"/);
   assert.match(box, /preserveAspectRatio="none"/);
-  // Forced to the full viewBox width so lines fill the cell (no dashed dividers).
-  assert.match(box, /textLength="14" lengthAdjust="spacingAndGlyphs"/);
+  assert.match(box, /<rect /); // filled geometry
+  assert.doesNotMatch(box, /<text/); // not a stretched font glyph
   const plain = renderRow([{ t: "a" }], -1);
   assert.doesNotMatch(plain, /<svg/);
 });
 
-test("a run of the same solid line merges into one span; shades do not", () => {
+test("uncovered fill glyphs keep the font-stretch fallback", () => {
+  // A powerline separator (PUA) has no synthesized geometry yet — still a stretched
+  // font glyph with the textLength fill.
+  const cp = 0xe0b0;
+  assert.ok(isFillGlyph(cp));
+  assert.equal(glyphGeometry(cp), null);
+  const pl = renderRow([{ t: String.fromCodePoint(cp) }], -1);
+  assert.match(pl, /textLength="14" lengthAdjust="spacingAndGlyphs"/);
+});
+
+test("runs of x-uniform glyphs merge (lines AND shades); distinct don't", () => {
   const div = renderRow([{ t: "─" }, { t: "─" }, { t: "─" }, { t: "─" }, { t: "─" }], -1);
   assert.equal((div.match(/<svg /g) ?? []).length, 1, "divider run not merged");
   assert.match(div, /left:0ch;width:5ch;/);
-  // Shades stay per-cell (stretching one across the run would smear the pattern).
+  // Shades now merge too — as alpha rects they're x-uniform.
   const shade = renderRow([{ t: "░" }, { t: "░" }, { t: "░" }], -1);
-  assert.equal((shade.match(/<svg /g) ?? []).length, 3, "shade wrongly merged");
+  assert.equal((shade.match(/<svg /g) ?? []).length, 1, "shade run not merged");
+  assert.match(shade, /left:0ch;width:3ch;/);
   // Distinct adjacent glyphs don't merge.
   const mixed = renderRow([{ t: "─" }, { t: "┼" }, { t: "─" }], -1);
   assert.equal((mixed.match(/<svg /g) ?? []).length, 3, "distinct glyphs merged");
+  // The cursor cell's style key differs, so it splits a merged run.
+  const cur = renderRow([{ t: "─" }, { t: "─" }, { t: "─" }], 1);
+  assert.equal((cur.match(/<svg /g) ?? []).length, 3, "cursor did not split run");
+});
+
+test("glyphGeometry covers all of U+2500–259F", () => {
+  for (let cp = 0x2500; cp <= 0x259f; cp++) {
+    assert.ok(glyphGeometry(cp), `no geometry for U+${cp.toString(16)}`);
+  }
+  // Just outside the range: nothing synthesized.
+  assert.equal(glyphGeometry(0x24ff), null);
+  assert.equal(glyphGeometry(0x25a0), null);
+});
+
+test("line thickness is per-axis (1px both ways under 8×16 cells)", () => {
+  // ─ is a horizontal band: 1px tall = 0.0625 in y. │ is 1px wide = 0.125 in x.
+  assert.match(glyphGeometry(0x2500)!, /height="0.0625"/); // ─
+  assert.match(glyphGeometry(0x2502)!, /width="0.125"/); // │
+  // ━ heavy horizontal is 2px = 0.125 tall.
+  assert.match(glyphGeometry(0x2501)!, /height="0.125"/); // ━
+});
+
+test("box junctions, doubles, dashes, arcs, diagonals", () => {
+  // ┼ light cross: four arms → four rects.
+  assert.equal((glyphGeometry(0x253c)!.match(/<rect /g) ?? []).length, 4);
+  // ═ / ║ doubles: two parallel full-length rails.
+  assert.equal((glyphGeometry(0x2550)!.match(/<rect /g) ?? []).length, 2); // ═
+  assert.equal((glyphGeometry(0x2551)!.match(/<rect /g) ?? []).length, 2); // ║
+  // ╬ full double cross: four rails (centre hole emerges from spacing).
+  assert.equal((glyphGeometry(0x256c)!.match(/<rect /g) ?? []).length, 4);
+  // ┄ triple-dash vs ┈ quad-dash: different dash counts.
+  assert.equal((glyphGeometry(0x2504)!.match(/<rect /g) ?? []).length, 3);
+  assert.equal((glyphGeometry(0x2508)!.match(/<rect /g) ?? []).length, 4);
+  // ╭ rounded corner: an elliptical arc command, no rect.
+  assert.match(glyphGeometry(0x256d)!, /<path d="M[^"]* A /);
+  // ╱ diagonal: a filled polygon, no rect.
+  const diag = glyphGeometry(0x2571)!;
+  assert.match(diag, /<path d="M/);
+  assert.doesNotMatch(diag, /<rect/);
+});
+
+test("axis-aligned geometry disables anti-aliasing; curves keep it", () => {
+  // Box lines/blocks snap to whole pixels (crispEdges) so a stacked vertical divider is
+  // identical every row — no fractional-pixel seams or beading.
+  assert.match(renderRow([{ t: "│" }], -1), /<svg[^>]*shape-rendering="crispEdges"/);
+  assert.match(renderRow([{ t: "█" }], -1), /<svg[^>]*shape-rendering="crispEdges"/);
+  // Arcs and diagonals (<path>) must NOT be crisped, or they'd stairstep.
+  assert.doesNotMatch(renderRow([{ t: "╭" }], -1), /crispEdges/);
+  assert.doesNotMatch(renderRow([{ t: "╱" }], -1), /crispEdges/);
+});
+
+test("vertical bars overshoot + geometry span is unclipped (bridge row seams)", () => {
+  // │ up arm overshoots above y=0 (negative), so with crispEdges adjacent rows' bars
+  // overlap into a continuous opaque divider instead of leaving per-SVG snapping gaps.
+  const v = glyphGeometry(0x2502)!; // │
+  assert.match(v, /y="-/, "up arm does not overshoot");
+  const down = [...v.matchAll(/y="([-0-9.]+)" width="[-0-9.]+" height="([-0-9.]+)"/g)];
+  assert.ok(down.some(([, y, h]) => Number(y) + Number(h) > 1), "down arm does not overshoot");
+  // The span and svg must not clip the overshoot.
+  const span = renderRow([{ t: "│" }], -1);
+  assert.match(span, /class="run" style="[^"]*overflow:visible/);
+  assert.match(span, /<svg[^>]*overflow="visible"/);
+  // A pure horizontal (─) doesn't overshoot — its extent scales with merged runs.
+  assert.doesNotMatch(glyphGeometry(0x2500)!, /y="-/);
+});
+
+test("block elements: eighths, shades, quadrants", () => {
+  // ▁ lower eighth: bottom 1/8 strip.
+  assert.match(glyphGeometry(0x2581)!, /y="0.875"[^/]*height="0.125"/);
+  // ░ light shade: 25% alpha fill.
+  assert.match(glyphGeometry(0x2591)!, /fill-opacity="0.25"/);
+  // ▚ (upper-left + lower-right quadrants): two rects.
+  assert.equal((glyphGeometry(0x259a)!.match(/<rect /g) ?? []).length, 2);
+});
+
+test("geometry beats symbol_map on standard ranges; cell fg via currentColor", () => {
+  setConfig({ ...CFG, sym: [[0x2500, 0x2500, "'Some Nerd Font',monospace"]] });
+  const box = renderRow([{ t: "─" }], -1);
+  assert.match(box, /<rect /); // geometry wins
+  assert.doesNotMatch(box, /Some Nerd Font/); // symbol_map ignored here
+  setConfig(CFG);
+});
+
+test("thickness scales with font size", () => {
+  setMetrics({ cellW: 8, cellH: 16, fontSize: 28 }); // light = round(28/14) = 2px
+  assert.match(glyphGeometry(0x2500)!, /height="0.125"/); // ─ now 2px = 0.125 tall
+  setMetrics({ cellW: 8, cellH: 16, fontSize: 14 }); // restore
 });
 
 test("patchCells writes line patches and reports dirty rows", () => {

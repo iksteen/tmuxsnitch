@@ -224,6 +224,277 @@ export function cellStyle(cell: Cell, isCursor: boolean): string {
   return s;
 }
 
+// ── procedural glyph geometry ─────────────────────────────────────────────────
+//
+// Box-drawing, block, and (phase 2) powerline/legacy-computing glyphs are drawn as
+// filled SVG geometry in a normalized viewBox="0 0 1 1" that `preserveAspectRatio
+// ="none"` stretches onto the cell — font-independent, exact tiling, uniform line
+// thickness. This is what kitty/iTerm2/Windows Terminal do (kitty: decorations.c).
+// Everything is FILLED (rects/polys/quarter-annuli); `stroke` is unusable here
+// because the anisotropic stretch would make stroke width direction-dependent.
+
+// Cell pixel metrics, measured once at boot (measureMetrics). Deterministic
+// defaults keep node tests stable; setMetrics overrides them.
+interface Metrics {
+  cellW: number;
+  cellH: number;
+  fontSize: number;
+}
+let metrics: Metrics = { cellW: 8, cellH: 17, fontSize: 14 };
+export function setMetrics(m: Metrics): void {
+  metrics = m;
+}
+
+// Line weight in CSS px: light scales with font size (never sub-1px), heavy = 2×.
+function wpx(weight: number): number {
+  const light = Math.max(1, Math.round(metrics.fontSize / 14));
+  return weight >= 2 ? 2 * light : light;
+}
+
+// Compact number (≤4 decimals, no trailing zeros) — keeps the emitted markup small.
+function f(x: number): string {
+  return String(Math.round(x * 1e4) / 1e4);
+}
+
+// Axis-aligned filled rectangle in unit space.
+function rect(x0: number, y0: number, x1: number, y1: number): string {
+  return `<rect x="${f(x0)}" y="${f(y0)}" width="${f(x1 - x0)}" height="${f(y1 - y0)}"/>`;
+}
+
+// Horizontal band centered on y (pixel-thickness of `weight`), spanning x0..x1.
+function hband(y: number, x0: number, x1: number, weight: number): string {
+  const h = wpx(weight) / metrics.cellH / 2;
+  return rect(x0, y - h, x1, y + h);
+}
+// Vertical band centered on x, spanning y0..y1.
+function vband(x: number, y0: number, y1: number, weight: number): string {
+  const w = wpx(weight) / metrics.cellW / 2;
+  return rect(x - w, y0, x + w, y1);
+}
+
+// Box-drawing "arms" model: up/right/down/left each present with a weight
+// (0 none, 1 light, 2 heavy). Each arm is a band from its edge to just past centre;
+// arms over-extend to cover the perpendicular bar so junctions/corners close solid.
+function arms(u: number, r: number, d: number, l: number): string {
+  const eps = wpx(1) / 2; // minimum overlap so collinear arms leave no AA seam
+  // half-width of the vertical bar (max of up/down arms), in unit x
+  const vw = Math.max(u ? wpx(u) / 2 : 0, d ? wpx(d) / 2 : 0, eps) / metrics.cellW;
+  // half-height of the horizontal bar (max of left/right arms), in unit y
+  const hh = Math.max(l ? wpx(l) / 2 : 0, r ? wpx(r) / 2 : 0, eps) / metrics.cellH;
+  const ov = OVERSHOOT / metrics.cellH;
+  let s = "";
+  if (u) s += vband(0.5, -ov, 0.5 + hh, u);
+  if (d) s += vband(0.5, 0.5 - hh, 1 + ov, d);
+  if (l) s += hband(0.5, 0, 0.5 + vw, l);
+  if (r) s += hband(0.5, 0.5 - vw, 1, r);
+  return s;
+}
+// CSS-px overshoot past the cell top/bottom for vertical bars, bridging the per-SVG
+// crispEdges snapping discrepancy. Tuning knob: bigger = fewer seams, more stub on loose
+// glyphs.
+const OVERSHOOT = 0.5;
+
+// Packed arm table for U+2500–257F, 4 chars "urdl" per codepoint (0/1/2 weights);
+// "0000" = handled elsewhere (dashes/doubles/arcs/diagonals) or no arms.
+const ARMS =
+  "0101020210102020" + // 2500 ─ ━ │ ┃
+  "0000000000000000" + // 2504-2507 dashes
+  "0000000000000000" + // 2508-250B dashes
+  "0110021001200220" + // 250C ┌┍┎┏
+  "0011001200210022" + // 2510 ┐┑┒┓
+  "1100120021002200" + // 2514 └┕┖┗
+  "1001100220012002" + // 2518 ┘┙┚┛
+  "1110121021101120" + // 251C ├┝┞┟
+  "2120221012202220" + // 2520 ┠┡┢┣
+  "1011101220111021" + // 2524 ┤┥┦┧
+  "2021201210222022" + // 2528 ┨┩┪┫
+  "0111011202110212" + // 252C ┬┭┮┯
+  "0121012202210222" + // 2530 ┰┱┲┳
+  "1101110212011202" + // 2534 ┴┵┶┷
+  "2101210222012202" + // 2538 ┸┹┺┻
+  "1111111212111212" + // 253C ┼┽┾┿
+  "2111112121212112" + // 2540 ╀╁╂╃
+  "2211112212212212" + // 2544 ╄╅╆╇
+  "1222212222212222" + // 2548 ╈╉╊╋
+  "0000000000000000" + // 254C-254F dashes
+  "0000000000000000" + // 2550-2553 doubles
+  "0000000000000000" + // 2554-2557 doubles
+  "0000000000000000" + // 2558-255B doubles
+  "0000000000000000" + // 255C-255F doubles
+  "0000000000000000" + // 2560-2563 doubles
+  "0000000000000000" + // 2564-2567 doubles
+  "0000000000000000" + // 2568-256B doubles
+  "0000000000000000" + // 256C double, 256D-256F arcs
+  "0000000000000000" + // 2570 arc, 2571-2573 diagonals
+  "0001100001000010" + // 2574 ╴╵╶╷
+  "0002200002000020" + // 2578 ╸╹╺╻
+  "0201102001022010"; //  257C ╼╽╾╿
+
+// Dashed lines: 2504-250B (triple/quad) and 254C-254F (double).
+function dashes(horiz: boolean, n: number, weight: number): string {
+  let s = "";
+  const seg = 1 / n;
+  const dash = seg * 0.6;
+  for (let i = 0; i < n; i++) {
+    const a = i * seg + (seg - dash) / 2;
+    s += horiz ? hband(0.5, a, a + dash, weight) : vband(0.5, a, a + dash, weight);
+  }
+  return s;
+}
+function dashGlyph(cp: number): string {
+  if (cp <= 0x250b) {
+    const k = cp - 0x2504;
+    return dashes((k & 3) < 2, k < 4 ? 3 : 4, k & 1 ? 2 : 1);
+  }
+  const k = cp - 0x254c;
+  return dashes(k < 2, 2, k & 1 ? 2 : 1);
+}
+
+// Double lines U+2550–256C. Each is a set of light "rails": vertical rails at
+// x=0.5±dh (double) or x=0.5 (single), horizontal at y=0.5±dv or 0.5. Present arms
+// run full length; the centre hole of ╬ and the notches of corners emerge from the
+// rail spacing alone (no per-junction subtraction needed). Per cp: [u,d,l,r,vDbl,hDbl].
+const DOUBLES: number[][] = [
+  [0, 0, 1, 1, 0, 1], // 2550 ═
+  [1, 1, 0, 0, 1, 0], // 2551 ║
+  [0, 1, 0, 1, 0, 1], // 2552 ╒
+  [0, 1, 0, 1, 1, 0], // 2553 ╓
+  [0, 1, 0, 1, 1, 1], // 2554 ╔
+  [0, 1, 1, 0, 0, 1], // 2555 ╕
+  [0, 1, 1, 0, 1, 0], // 2556 ╖
+  [0, 1, 1, 0, 1, 1], // 2557 ╗
+  [1, 0, 0, 1, 0, 1], // 2558 ╘
+  [1, 0, 0, 1, 1, 0], // 2559 ╙
+  [1, 0, 0, 1, 1, 1], // 255A ╚
+  [1, 0, 1, 0, 0, 1], // 255B ╛
+  [1, 0, 1, 0, 1, 0], // 255C ╜
+  [1, 0, 1, 0, 1, 1], // 255D ╝
+  [1, 1, 0, 1, 0, 1], // 255E ╞
+  [1, 1, 0, 1, 1, 0], // 255F ╟
+  [1, 1, 0, 1, 1, 1], // 2560 ╠
+  [1, 1, 1, 0, 0, 1], // 2561 ╡
+  [1, 1, 1, 0, 1, 0], // 2562 ╢
+  [1, 1, 1, 0, 1, 1], // 2563 ╣
+  [0, 1, 1, 1, 0, 1], // 2564 ╤
+  [0, 1, 1, 1, 1, 0], // 2565 ╥
+  [0, 1, 1, 1, 1, 1], // 2566 ╦
+  [1, 0, 1, 1, 0, 1], // 2567 ╧
+  [1, 0, 1, 1, 1, 0], // 2568 ╨
+  [1, 0, 1, 1, 1, 1], // 2569 ╩
+  [1, 1, 1, 1, 0, 1], // 256A ╪
+  [1, 1, 1, 1, 1, 0], // 256B ╫
+  [1, 1, 1, 1, 1, 1], // 256C ╬
+];
+function doubleGlyph(cp: number): string {
+  const [u, d, l, r, vd, hd] = DOUBLES[cp - 0x2550];
+  const hw = wpx(1) / metrics.cellW / 2;
+  const hh = wpx(1) / metrics.cellH / 2;
+  const dh = wpx(1) / metrics.cellW; // vertical-rail offset
+  const dv = wpx(1) / metrics.cellH; // horizontal-rail offset
+  const maxDv = hd ? dv : 0;
+  const maxDh = vd ? dh : 0;
+  const ov = OVERSHOOT / metrics.cellH; // bridge stacked-row seams (see arms())
+  let s = "";
+  if (u || d) {
+    for (const x of vd ? [0.5 - dh, 0.5 + dh] : [0.5]) {
+      s += vband(x, u ? -ov : 0.5 - maxDv - hh, d ? 1 + ov : 0.5 + maxDv + hh, 1);
+    }
+  }
+  if (l || r) {
+    for (const y of hd ? [0.5 - dv, 0.5 + dv] : [0.5]) {
+      s += hband(y, l ? 0 : 0.5 - maxDh - hw, r ? 1 : 0.5 + maxDh + hw, 1);
+    }
+  }
+  return s;
+}
+
+// Rounded corners ╭╮╯╰: a filled quarter-annulus (radius 0.5) centred on a cell
+// corner, joining the two adjacent edge midpoints.
+function arc(cx: number, cy: number): string {
+  const tx = wpx(1) / metrics.cellW / 2;
+  const ty = wpx(1) / metrics.cellH / 2;
+  const sx = cx === 1 ? -1 : 1; // outward-x at endpoint A=(0.5,cy)
+  const sy = cy === 1 ? -1 : 1; // outward-y at endpoint B=(cx,0.5)
+  const aOut = 0.5 + sx * tx;
+  const aIn = 0.5 - sx * tx;
+  const bOut = 0.5 + sy * ty;
+  const bIn = 0.5 - sy * ty;
+  const sweep = sx * sy < 0 ? 0 : 1;
+  return (
+    `<path d="M ${f(aOut)} ${f(cy)} A ${f(0.5 + tx)} ${f(0.5 + ty)} 0 0 ${sweep} ${f(cx)} ${f(bOut)} ` +
+    `L ${f(cx)} ${f(bIn)} A ${f(0.5 - tx)} ${f(0.5 - ty)} 0 0 ${1 - sweep} ${f(aIn)} ${f(cy)} Z"/>`
+  );
+}
+function arcGlyph(cp: number): string {
+  const c = [
+    [1, 1],
+    [0, 1],
+    [0, 0],
+    [1, 0],
+  ][cp - 0x256d];
+  return arc(c[0], c[1]);
+}
+
+// Diagonals ╱╲╳: a filled parallelogram along the diagonal, perpendicular width
+// computed in pixel space so it looks like a line of the right thickness.
+function diag(x0: number, y0: number, x1: number, y1: number): string {
+  const dxp = (x1 - x0) * metrics.cellW;
+  const dyp = (y1 - y0) * metrics.cellH;
+  const len = Math.hypot(dxp, dyp);
+  const t = wpx(1) / 2;
+  const ux = (-dyp / len) * t / metrics.cellW; // perpendicular offset in unit space
+  const uy = (dxp / len) * t / metrics.cellH;
+  return (
+    `<path d="M ${f(x0 + ux)} ${f(y0 + uy)} L ${f(x1 + ux)} ${f(y1 + uy)} ` +
+    `L ${f(x1 - ux)} ${f(y1 - uy)} L ${f(x0 - ux)} ${f(y0 - uy)} Z"/>`
+  );
+}
+function diagGlyph(cp: number): string {
+  const up = cp !== 0x2572 ? diag(0, 1, 1, 0) : ""; // ╱ (also in ╳)
+  const down = cp !== 0x2571 ? diag(0, 0, 1, 1) : ""; // ╲ (also in ╳)
+  return up + down;
+}
+
+// Block elements U+2580–259F: solid rectangles (fractions from cp arithmetic),
+// shades as alpha fill, quadrants from a 4-bit mask.
+const QUADRANTS = [4, 8, 1, 13, 9, 7, 11, 2, 6, 14]; // 2596-259F: bit0 TL,1 TR,2 BL,3 BR
+function blockElement(cp: number): string {
+  if (cp === 0x2580) return rect(0, 0, 1, 0.5); // ▀ upper half
+  if (cp >= 0x2581 && cp <= 0x2588) return rect(0, 1 - (cp - 0x2580) / 8, 1, 1); // ▁-█ lower
+  if (cp >= 0x2589 && cp <= 0x258f) return rect(0, 0, (0x2590 - cp) / 8, 1); // ▉-▏ left
+  if (cp === 0x2590) return rect(0.5, 0, 1, 1); // ▐ right half
+  if (cp <= 0x2593) {
+    const op = (cp - 0x2590) / 4; // ░▒▓ → .25/.5/.75
+    return `<rect x="0" y="0" width="1" height="1" fill-opacity="${op}"/>`;
+  }
+  if (cp === 0x2594) return rect(0, 0, 1, 0.125); // ▔ upper eighth
+  if (cp === 0x2595) return rect(0.875, 0, 1, 1); // ▕ right eighth
+  const m = QUADRANTS[cp - 0x2596]; // 2596-259F
+  let s = "";
+  if (m & 1) s += rect(0, 0, 0.5, 0.5);
+  if (m & 2) s += rect(0.5, 0, 1, 0.5);
+  if (m & 4) s += rect(0, 0.5, 0.5, 1);
+  if (m & 8) s += rect(0.5, 0.5, 1, 1);
+  return s;
+}
+
+function boxDrawing(cp: number): string {
+  if ((cp >= 0x2504 && cp <= 0x250b) || (cp >= 0x254c && cp <= 0x254f)) return dashGlyph(cp);
+  if (cp >= 0x2550 && cp <= 0x256c) return doubleGlyph(cp);
+  if (cp >= 0x256d && cp <= 0x2570) return arcGlyph(cp);
+  if (cp >= 0x2571 && cp <= 0x2573) return diagGlyph(cp);
+  const o = (cp - 0x2500) * 4;
+  return arms(+ARMS[o], +ARMS[o + 1], +ARMS[o + 2], +ARMS[o + 3]);
+}
+
+// Inner SVG geometry for a codepoint, or null if we don't synthesize it (falls back
+// to the font-stretch path). Phase 1: box drawing + block elements.
+export function glyphGeometry(cp: number): string | null {
+  if (cp >= 0x2500 && cp <= 0x257f) return boxDrawing(cp);
+  if (cp >= 0x2580 && cp <= 0x259f) return blockElement(cp);
+  return null;
+}
+
 // ── symbol / fill glyphs (port of render.rs:is_fill_glyph + svg_font) ──────────
 
 export function isFillGlyph(cp: number): boolean {
@@ -234,17 +505,20 @@ export function isFillGlyph(cp: number): boolean {
   );
 }
 
-// A fill glyph uniform along x, so a run of it renders as ONE stretched span instead
-// of N per-cell boxes — killing the sub-pixel seams that dash a horizontal divider at
-// fractional zoom. Solid horizontal strips only; shades/dashed/side-blocks would smear
-// if stretched across a run, so they stay per-cell. Mirrors render.rs::is_mergeable_fill.
+// A glyph uniform along x, so a run of it renders as ONE stretched span instead of N
+// per-cell boxes — killing the sub-pixel seams that dash a horizontal divider at
+// fractional zoom. Solid horizontal strips only, plus shades (now x-uniform alpha rects
+// via geometry — safe to stretch). Dashed/side-blocks would smear across a run, so they
+// stay per-cell.
 export function isMergeableFill(cp: number): boolean {
   return (
     cp === 0x2500 || // ─
     cp === 0x2501 || // ━
     cp === 0x2550 || // ═
+    cp === 0x2580 || // ▀ upper half
     cp === 0x2588 || // █ full block
     (cp >= 0x2581 && cp <= 0x2587) || // ▁▂▃▄▅▆▇ lower strips
+    (cp >= 0x2591 && cp <= 0x2593) || // ░▒▓ shades (alpha rects)
     cp === 0x2594 // ▔ upper strip
   );
 }
@@ -301,6 +575,25 @@ function symbolCell(cell: Cell, isCursor: boolean, col: number, w: number, font:
   return symbolSpan(col, w, boxStyle, font, esc(t), t.codePointAt(0) ?? 0x20);
 }
 
+// Emit one procedural-geometry span covering w columns. The unit viewBox is stretched
+// onto the cell(s) with preserveAspectRatio="none"; a merged run stretches the single
+// glyph across the whole width, so tiling lines have no per-cell seams. `fill=
+// "currentColor"` lets the shapes inherit the cell's fg (cursor/inverse/dim included).
+function geomSpan(col: number, w: number, boxStyle: string, geom: string): string {
+  // Axis-aligned geometry (box lines, blocks, doubles, dashes — all <rect>) renders with
+  // anti-aliasing OFF so lines snap to whole opaque pixels: crisp and, crucially, identical
+  // every row, so a stacked vertical divider has no fractional-pixel seams OR beading (the
+  // terminal-correct look). Curved/diagonal glyphs (<path>: arcs, ╱╲) keep anti-aliasing.
+  const crisp = geom.includes("<path") ? "" : ' shape-rendering="crispEdges"';
+  // overflow:visible (span overrides .run's clip; svg overrides its viewport) lets the
+  // vertical overshoot paint into the neighbouring rows where it overlaps their bars.
+  // .screen still clips the whole grid.
+  return (
+    `<span class="run" style="left:${col}ch;width:${w}ch;overflow:visible;${boxStyle}">` +
+    `<svg viewBox="0 0 1 1" preserveAspectRatio="none" fill="currentColor" overflow="visible"${crisp} style="display:block;width:100%;height:100%">${geom}</svg></span>`
+  );
+}
+
 // ── row rendering (port of render.rs:render_row) ──────────────────────────────
 
 // Render one row's cells to inner HTML. `cursorCol` is the cursor column, or -1.
@@ -310,8 +603,9 @@ interface FillRun {
   t: string; // raw glyph, for run-continuation comparison
   glyph: string; // escaped, for emission
   style: string;
-  font: string;
+  font: string; // font stack for the stretch path ("" when geom is set)
   first: number;
+  geom: string | null; // procedural geometry, or null for the font-stretch path
 }
 
 export function renderRow(cells: Cell[], cursorCol: number): string {
@@ -330,31 +624,48 @@ export function renderRow(cells: Cell[], cursorCol: number): string {
   let fill: FillRun | null = null;
   const flushFill = () => {
     if (fill) {
-      out += symbolSpan(fill.col, fill.width, fill.style, fill.font, fill.glyph, fill.first);
+      out += fill.geom
+        ? geomSpan(fill.col, fill.width, fill.style, fill.geom)
+        : symbolSpan(fill.col, fill.width, fill.style, fill.font, fill.glyph, fill.first);
       fill = null;
     }
   };
   for (const cell of cells) {
     const isCursor = col === cursorCol;
     const w = cell.w ? 2 : 1;
-    const font = svgFont(cell);
-    if (font) {
+    const t = cell.t ?? "";
+    const first = t ? t.codePointAt(0)! : 0x20;
+    // Geometry beats symbol_map for standard Unicode ranges (kitty parity); symbol_map
+    // beats geometry only in the PUA, where a user mapping powerline glyphs to a Nerd
+    // Font was deliberate. Uncovered codepoints fall through to the font-stretch path.
+    const geom =
+      t && !(first >= 0xe000 && first <= 0xf8ff && symbolFamily(first))
+        ? glyphGeometry(first)
+        : null;
+    const font = geom ? null : svgFont(cell);
+    if (geom || font) {
       flushText();
       runStyle = null;
       cols = 0;
-      const t = cell.t ?? " ";
-      const first = t.codePointAt(0) ?? 0x20;
       if (isMergeableFill(first)) {
         const style = cellStyle(cell, isCursor);
-        if (fill && fill.t === t && fill.style === style && fill.font === font) {
+        if (
+          fill &&
+          fill.t === t &&
+          fill.style === style &&
+          fill.font === (font ?? "") &&
+          fill.geom === geom
+        ) {
           fill.width += w;
         } else {
           flushFill();
-          fill = { col, width: w, t, glyph: esc(t), style, font, first };
+          fill = { col, width: w, t, glyph: esc(t || " "), style, font: font ?? "", first, geom };
         }
       } else {
         flushFill();
-        out += symbolCell(cell, isCursor, col, w, font);
+        out += geom
+          ? geomSpan(col, w, cellStyle(cell, isCursor), geom)
+          : symbolCell(cell, isCursor, col, w, font!);
       }
     } else {
       flushFill();
@@ -515,6 +826,22 @@ function connect(events: string): void {
   };
 }
 
+// Measure cell pixel geometry off the live #screen so procedural glyphs get exact
+// per-axis thickness: cellH from --lh, fontSize from computed style, cellW from a
+// 100-char probe (font-dependent; the probe amortizes rounding).
+function measureMetrics(): void {
+  const cs = getComputedStyle(screenEl);
+  const cellH = parseFloat(cs.getPropertyValue("--lh")) || 17;
+  const fontSize = parseFloat(cs.fontSize) || 14;
+  const probe = document.createElement("span");
+  probe.textContent = "0".repeat(100);
+  probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre";
+  screenEl.appendChild(probe);
+  const cellW = probe.getBoundingClientRect().width / 100 || 8;
+  probe.remove();
+  setMetrics({ cellW, cellH, fontSize });
+}
+
 function main(): void {
   const boot = (
     window as unknown as { SHELLGLASS: { events: string; cfg: Cfg; proto?: number; js?: string } }
@@ -522,6 +849,18 @@ function main(): void {
   setConfig(boot.cfg);
   setProto(boot.proto, boot.js);
   screenEl = document.getElementById("screen")!;
+  measureMetrics();
+  // A served webfont loads async and can shift cellW after boot; re-measure and, if it
+  // moved enough to matter, repaint the current screen with corrected geometry.
+  document.fonts?.ready.then(() => {
+    const before = metrics.cellW;
+    measureMetrics();
+    if (Math.abs(metrics.cellW - before) / before > 0.03) {
+      for (let r = 0; r < screen.rowEls.length; r++) {
+        screen.rowEls[r].innerHTML = renderRow(screen.cells[r] ?? [], cursorCol(screen.cur, r));
+      }
+    }
+  });
   connect(boot.events);
 }
 
