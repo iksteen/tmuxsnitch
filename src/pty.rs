@@ -75,6 +75,13 @@ pub fn start(command: &[String]) -> Result<(watch::Receiver<Arc<Frame>>, Notifie
 
     let mut builder = CommandBuilder::new(&command[0]);
     builder.args(&command[1..]);
+    // Inherit our own working directory (the script(1) model). Without this,
+    // portable-pty defaults the child's cwd to $HOME and resolves a cwd-relative
+    // program path (`./foo`) against $HOME too — so you'd spawn in ~, not where
+    // you launched shellglass.
+    if let Ok(cwd) = std::env::current_dir() {
+        builder.cwd(cwd);
+    }
     if std::env::var_os("TERM").is_none() {
         builder.env("TERM", "xterm-256color");
     }
