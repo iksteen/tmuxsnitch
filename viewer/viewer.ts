@@ -474,8 +474,15 @@ function doublesOps(x0: number, y0: number, x1: number, y1: number, cp: number, 
   return ops;
 }
 
-// Rounded corners ╭╮╯╰: a quarter ellipse joining the two edge midpoints.
+// Rounded corners ╭╮╯╰: a quarter ellipse from the far corner. Its tangent points
+// must land on the straight arms' centrelines so it meets ─/│ flush. An arm is a
+// t-wide rect at midX-(t>>1), so its centre is midX + off — half a pixel past the
+// rounded midpoint only when t is odd. Radii are the distance from the corner to
+// that centreline (not the raw half-cell), which also snaps to the rounded grid.
 function arcOps(x0: number, y0: number, x1: number, y1: number, cp: number, light: number): Op[] {
+  const off = (light % 2) / 2;
+  const mx = Math.round((x0 + x1) / 2) + off;
+  const my = Math.round((y0 + y1) / 2) + off;
   const corners = [[x1, y1], [x0, y1], [x0, y0], [x1, y0]]; // 256D ╭, 256E ╮, 256F ╯, 2570 ╰
   const angles = [
     [Math.PI, 1.5 * Math.PI], [1.5 * Math.PI, 2 * Math.PI],
@@ -483,7 +490,7 @@ function arcOps(x0: number, y0: number, x1: number, y1: number, cp: number, ligh
   ];
   const [cx, cy] = corners[cp - 0x256d];
   const [a0, a1] = angles[cp - 0x256d];
-  return [{ t: "arc", cx, cy, rx: (x1 - x0) / 2, ry: (y1 - y0) / 2, a0, a1, lw: lw(1, light) }];
+  return [{ t: "arc", cx, cy, rx: Math.abs(cx - mx), ry: Math.abs(cy - my), a0, a1, lw: lw(1, light) }];
 }
 
 function diagOps(x0: number, y0: number, x1: number, y1: number, cp: number, light: number): Op[] {

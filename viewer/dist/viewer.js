@@ -311,6 +311,9 @@ function doublesOps(x0, y0, x1, y1, cp, light) {
     return ops;
 }
 function arcOps(x0, y0, x1, y1, cp, light) {
+    const off = (light % 2) / 2;
+    const mx = Math.round((x0 + x1) / 2) + off;
+    const my = Math.round((y0 + y1) / 2) + off;
     const corners = [[x1, y1], [x0, y1], [x0, y0], [x1, y0]];
     const angles = [
         [Math.PI, 1.5 * Math.PI], [1.5 * Math.PI, 2 * Math.PI],
@@ -318,7 +321,7 @@ function arcOps(x0, y0, x1, y1, cp, light) {
     ];
     const [cx, cy] = corners[cp - 0x256d];
     const [a0, a1] = angles[cp - 0x256d];
-    return [{ t: "arc", cx, cy, rx: (x1 - x0) / 2, ry: (y1 - y0) / 2, a0, a1, lw: lw(1, light) }];
+    return [{ t: "arc", cx, cy, rx: Math.abs(cx - mx), ry: Math.abs(cy - my), a0, a1, lw: lw(1, light) }];
 }
 function diagOps(x0, y0, x1, y1, cp, light) {
     const t = lw(1, light);

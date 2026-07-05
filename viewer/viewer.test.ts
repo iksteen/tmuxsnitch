@@ -184,9 +184,10 @@ test("glyphOps emits pure device-pixel ops for the box/block range", () => {
   // ╬ full double cross: 4 rails, centre hole preserved.
   assert.equal(ops(0x256c).length, 4);
 
-  // ╭ rounded corner: one elliptical arc.
+  // ╭ rounded corner: one elliptical arc, centred on the far corner with radii
+  // reaching the arms' centrelines (midpoint + 0.5 for the odd light width).
   assert.deepEqual(ops(0x256d), [
-    { t: "arc", cx: 10, cy: 20, rx: 5, ry: 10, a0: Math.PI, a1: 1.5 * Math.PI, lw: 1 },
+    { t: "arc", cx: 10, cy: 20, rx: 4.5, ry: 9.5, a0: Math.PI, a1: 1.5 * Math.PI, lw: 1 },
   ]);
   // ╱ one diagonal, ╳ two.
   assert.equal(ops(0x2571).length, 1);
