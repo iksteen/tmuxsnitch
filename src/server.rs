@@ -40,6 +40,7 @@ pub fn app(state: AppState) -> Router {
         .route("/", get(index).layer(compress.clone()))
         .route("/events", get(events))
         .route("/viewer.js", get(viewer_js).layer(compress.clone()))
+        .route("/favicon.svg", get(favicon).layer(compress.clone()))
         .route("/fonts/{key}", get(font).layer(compress))
         .with_state(state)
 }
@@ -66,6 +67,17 @@ async fn viewer_js() -> Response {
             (CACHE_CONTROL, "public, max-age=31536000, immutable"),
         ],
         render::VIEWER_JS,
+    )
+        .into_response()
+}
+
+async fn favicon() -> Response {
+    (
+        [
+            (CONTENT_TYPE, "image/svg+xml"),
+            (CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        render::FAVICON_SVG,
     )
         .into_response()
 }

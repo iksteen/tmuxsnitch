@@ -91,6 +91,7 @@ pub fn app(state: HubState) -> Router {
         // cut it off, so disable it here.
         .route("/stream", post(stream).layer(DefaultBodyLimit::disable()))
         .route("/viewer.js", get(viewer_js).layer(compress.clone()))
+        .route("/favicon.svg", get(favicon).layer(compress.clone()))
         .route("/s/{id}", get(view).layer(compress.clone()))
         .route("/s/{id}/events", get(events))
         .route("/s/{id}/fonts/{key}", get(font).layer(compress))
@@ -280,6 +281,17 @@ async fn viewer_js() -> Response {
             (CACHE_CONTROL, "public, max-age=31536000, immutable"),
         ],
         render::VIEWER_JS,
+    )
+        .into_response()
+}
+
+async fn favicon() -> Response {
+    (
+        [
+            (CONTENT_TYPE, "image/svg+xml"),
+            (CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        render::FAVICON_SVG,
     )
         .into_response()
 }

@@ -14,6 +14,8 @@ use std::fmt::Write as _;
 /// `viewer/dist/viewer.js`).
 pub const VIEWER_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/viewer.js"));
 
+pub const FAVICON_SVG: &str = include_str!("favicon.svg");
+
 /// Short content tag of the baked renderer, the second half of the page-reload
 /// version pair: the wire proto can be unchanged while viewer.js itself was
 /// (a render fix) — a mismatch on either reloads the page. Hashing the bytes
@@ -655,6 +657,15 @@ mod tests {
         assert!(
             DEFAULT_TEMPLATE.contains("id=\"crt\">"),
             "CRT checkbox must not default to checked"
+        );
+        // The favicon link points at the served route, and the asset is baked in.
+        assert!(
+            DEFAULT_TEMPLATE.contains(r#"href="/favicon.svg""#),
+            "template must link the favicon route"
+        );
+        assert!(
+            FAVICON_SVG.starts_with("<svg") && FAVICON_SVG.contains("aria-label=\"shellglass\""),
+            "baked favicon must be the shellglass SVG"
         );
     }
 
