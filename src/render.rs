@@ -119,7 +119,7 @@ pub fn sse_script(events_path: &str, cfg_json: &str) -> String {
     let js = viewer_tag();
     format!(
         "<script>window.SHELLGLASS={{events:{events},cfg:{cfg},proto:{proto},js:\"{js}\"}};</script>\n\
-         <script type=\"module\" src=\"/viewer.js\"></script>"
+         <script type=\"module\" src=\"/viewer.js?v={js}\"></script>"
     )
 }
 

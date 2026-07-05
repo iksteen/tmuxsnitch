@@ -250,9 +250,14 @@ async fn view(State(st): State<HubState>, Path(id): Path<String>) -> Response {
     } else {
         &s.template
     };
-    // Empty #screen: the renderer fills it from the first SSE frame (the hub renders
-    // nothing itself).
-    Html(render::page(template, &s.css, "", &script)).into_response()
+    // Empty #screen: the renderer fills it from the first SSE frame (the hub
+    // renders nothing itself). no-cache: the auto-reload path depends on a reload
+    // fetching fresh HTML (fingerprinted /viewer.js?v=… URL + the version pair).
+    (
+        [(CACHE_CONTROL, "no-cache")],
+        Html(render::page(template, &s.css, "", &script)),
+    )
+        .into_response()
 }
 
 async fn events(State(st): State<HubState>, Path(id): Path<String>) -> Response {
@@ -266,12 +271,13 @@ async fn events(State(st): State<HubState>, Path(id): Path<String>) -> Response 
     live.connect()
 }
 
-/// Serve the baked renderer (see [`crate::server`] for the caching rationale).
+/// Serve the baked renderer (see [`crate::server`] for the caching rationale:
+/// fingerprinted URL, immutable).
 async fn viewer_js() -> Response {
     (
         [
             (CONTENT_TYPE, "application/javascript"),
-            (CACHE_CONTROL, "no-cache"),
+            (CACHE_CONTROL, "public, max-age=31536000, immutable"),
         ],
         render::VIEWER_JS,
     )

@@ -55,20 +55,22 @@ async fn font(State(state): State<AppState>, Path(key): Path<String>) -> Respons
     }
 }
 
-/// Serve the baked renderer. `no-cache` (revalidate every load) since its bytes move
-/// with the wire protocol on each upgrade — a stale copy would misparse new frames.
+/// Serve the baked renderer. The page references it by its content tag
+/// (`/viewer.js?v=<tag>`), so the URL changes whenever the bytes do — safe to
+/// cache forever, and a page reload after a server upgrade is guaranteed a
+/// cache miss even behind a caching proxy.
 async fn viewer_js() -> Response {
     (
         [
             (CONTENT_TYPE, "application/javascript"),
-            (CACHE_CONTROL, "no-cache"),
+            (CACHE_CONTROL, "public, max-age=31536000, immutable"),
         ],
         render::VIEWER_JS,
     )
         .into_response()
 }
 
-async fn index(State(state): State<AppState>) -> Html<String> {
+async fn index(State(state): State<AppState>) -> Response {
     // Initial paint from the current frame, so the page isn't blank before the first
     // SSE message; the renderer takes over (and rebuilds) as soon as it connects.
     let fragment = match &*state.live.current() {
@@ -76,13 +78,19 @@ async fn index(State(state): State<AppState>) -> Html<String> {
         Frame::Banner(html) => html.clone(),
     };
     let cfg = render::render_config_json(&state.config, &state.resolver);
-    Html(render::render_page(
-        &state.template,
-        &fragment,
-        &state.font_css,
-        &state.config,
-        &cfg,
-    ))
+    // no-cache: the auto-reload path depends on a reload fetching fresh HTML
+    // (it carries the fingerprinted /viewer.js?v=… URL and the version pair).
+    (
+        [(CACHE_CONTROL, "no-cache")],
+        Html(render::render_page(
+            &state.template,
+            &fragment,
+            &state.font_css,
+            &state.config,
+            &cfg,
+        )),
+    )
+        .into_response()
 }
 
 async fn events(State(state): State<AppState>) -> Response {
