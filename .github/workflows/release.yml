@@ -50,13 +50,13 @@ jobs:
       - if: matrix.cross
         uses: taiki-e/install-action@cross
 
-      # Stamp the tag version (vX.Y.Z -> X.Y.Z) into Cargo.toml + Cargo.lock. Anchored
-      # to the `version =` line so it can't touch anything else; both files stay
-      # consistent so --locked still holds.
+      - uses: taiki-e/install-action@cargo-edit
+
+      # Stamp the tag version (vX.Y.Z -> X.Y.Z) from the placeholder in Cargo.toml.
+      # cargo set-version updates the manifest and Cargo.lock together, so --locked
+      # still holds — and no manual version-bump commit is ever needed.
       - name: Stamp version
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          sed -i "s/^version = \"0\\.0\\.0-dev\"/version = \"${VERSION}\"/" Cargo.toml Cargo.lock
+        run: cargo set-version "${GITHUB_REF_NAME#v}"
 
       - name: Build
         run: |
