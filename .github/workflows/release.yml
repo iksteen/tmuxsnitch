@@ -15,16 +15,25 @@ permissions:
   contents: write
 
 jobs:
-  # Create the release ONCE before the matrix fans out — concurrent matrix jobs
-  # racing to create the same release hit "already_exists" and exhaust their
-  # retries (bit v0.8.1). Pre-created, uploads always take the exists→attach
-  # path. `|| true`: the release already existing (a rerun) is fine.
+  # Create the release ONCE before the matrix fans out — a single job, so the
+  # concurrent-create race that bit v0.8.1 (matrix jobs each creating the release,
+  # exhausting retries on "already_exists") can't happen; the build jobs only upload.
+  #
+  # Fail HARD if a release for this tag already exists. A fresh tag push should never
+  # find one — if it does, someone is re-releasing an existing version, which must be
+  # a deliberate human action (delete the release, then re-tag), never a silent
+  # overwrite. Keeping a human in the loop here is the point.
   create-release:
     runs-on: ubuntu-latest
     steps:
-      - run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag || true
-        env:
+      - env:
           GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release $GITHUB_REF_NAME already exists — refusing to overwrite. Delete it and re-tag to re-release."
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag
 
   build:
     name: ${{ matrix.target }}
