@@ -83,11 +83,18 @@ pub fn setup(addr: SocketAddr, key_path: Option<&Path>, hint_user: &str) -> Resu
 pub async fn serve(listener: TcpListener, key: PrivateKey, target: Target) -> Result<()> {
     let config = Config {
         keys: vec![key],
-        // Long-lived viewer connections; the source pushes when it changes.
-        inactivity_timeout: None,
+        // Bound every connection's idle time. Its most important job is the pre-auth
+        // handshake: russh wraps the initial SSH-banner read in this timeout, so with
+        // `None` a peer that opens TCP and never sends its banner holds a task + its
+        // buffers forever — an unauthenticated connection-hold flood. A live viewer
+        // that only watches never trips it: the 30s keepalive round-trip below counts
+        // as received data and resets the timer, so long-lived idle views stay up as
+        // long as this stays comfortably above keepalive_interval.
+        inactivity_timeout: Some(std::time::Duration::from_secs(90)),
         // Probe idle viewers so a peer that vanished without a FIN (laptop sleep, NAT
         // reboot) is reaped — otherwise `view_loop` blocks in ticks.recv() with
-        // nothing to write and never notices the dead socket.
+        // nothing to write and never notices the dead socket. Doubles as the liveness
+        // signal that keeps a silently-watching viewer under inactivity_timeout.
         keepalive_interval: Some(std::time::Duration::from_secs(30)),
         nodelay: true,
         ..Default::default()
