@@ -26,6 +26,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use tokio::sync::Semaphore;
 use tokio_stream::StreamExt;
 use tower_http::compression::CompressionLayer;
 
@@ -42,6 +43,14 @@ struct Session {
     fonts: HashMap<String, (String, Vec<u8>)>,
 }
 
+/// Cap on concurrent `session_id` (argon2id) hashes. The hash is memory-hard
+/// (~19 MiB, deliberately expensive) — unbounded concurrent grinding on bad keys
+/// would exhaust memory and pin CPU, so authorize takes a permit before hashing.
+/// Legitimate operators are a handful of allowlisted pushers reconnecting rarely,
+/// so a small cap never contends; a flood just waits (and gets fail2ban'd). ponytail:
+/// flat cap — raise it if legit operators ever queue behind each other.
+const HASH_SLOTS: usize = 4;
+
 #[derive(Clone)]
 pub struct HubState {
     sessions: Arc<Mutex<HashMap<String, Session>>>,
@@ -51,6 +60,8 @@ pub struct HubState {
     /// Public base URL (`scheme://host:port`, no trailing slash) for logging the
     /// view URL when a new session connects.
     base: Arc<str>,
+    /// Permits gating concurrent argon2 hashes (see [`HASH_SLOTS`]).
+    hash_slots: Arc<Semaphore>,
 }
 
 impl HubState {
@@ -59,6 +70,7 @@ impl HubState {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             allowed: Arc::new(allowed),
             base: base.into(),
+            hash_slots: Arc::new(Semaphore::new(HASH_SLOTS)),
         }
     }
 
@@ -72,23 +84,32 @@ impl HubState {
 
 /// Resolve a request's key to its (allowed) session id, or the status to reject
 /// with: `401` if no key, `403` if the key isn't pre-registered on the hub.
-/// Hashes the key once (Argon2 is deliberately expensive).
 ///
-/// Every rejection logs a parseable line to stderr for fail2ban: the argon2 grind
-/// on an unregistered key is a DoS vector, so an operator can ban a source IP that
-/// keeps failing. `peer` is the real TCP source (unspoofable); `client` prefers
-/// `X-Forwarded-For` for the proxied case — see [`reject_ip`].
-fn authorize(
+/// The key is hashed once with argon2id (deliberately expensive, memory-hard). Two
+/// DoS guards wrap that: a [`HASH_SLOTS`] permit caps how many hashes run at once
+/// (bounds peak memory + CPU under a bad-key flood), and the hash runs on the
+/// blocking pool so it never starves the async workers serving viewers. Every
+/// rejection also logs a parseable line for fail2ban (see [`log_reject`]) so an
+/// operator can ban a persistent grinder.
+async fn authorize(
     st: &HubState,
     headers: &HeaderMap,
     peer: SocketAddr,
     route: &str,
 ) -> Result<String, StatusCode> {
+    // No key ⇒ no hash: reject cheaply without spending a permit or a hash.
     let Some(key) = key_of(headers) else {
         log_reject(headers, peer, route, StatusCode::UNAUTHORIZED);
         return Err(StatusCode::UNAUTHORIZED);
     };
-    let id = session_id(&key);
+    // Hold a permit across the hash only; released before the handler streams. The
+    // semaphore is never closed, so acquire can't error.
+    let id = {
+        let _permit = st.hash_slots.acquire().await.expect("hash_slots open");
+        tokio::task::spawn_blocking(move || session_id(&key))
+            .await
+            .expect("hash task")
+    };
     if st.allowed.contains(&id) {
         Ok(id)
     } else {
@@ -176,7 +197,7 @@ async fn register(
     headers: HeaderMap,
     Json(reg): Json<proto::RegisterBody>,
 ) -> Response {
-    let id = match authorize(&st, &headers, peer, "/register") {
+    let id = match authorize(&st, &headers, peer, "/register").await {
         Ok(id) => id,
         Err(code) => return code.into_response(),
     };
@@ -252,7 +273,7 @@ async fn stream(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let id = match authorize(&st, &headers, peer, "/stream") {
+    let id = match authorize(&st, &headers, peer, "/stream").await {
         Ok(id) => id,
         Err(code) => return code.into_response(),
     };
