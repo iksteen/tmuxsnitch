@@ -50,7 +50,9 @@ jobs:
       - if: matrix.cross
         uses: taiki-e/install-action@cross
 
-      - uses: taiki-e/install-action@cargo-edit
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-edit
 
       # Stamp the tag version (vX.Y.Z -> X.Y.Z) from the placeholder in Cargo.toml.
       # cargo set-version updates the manifest and Cargo.lock together, so --locked
