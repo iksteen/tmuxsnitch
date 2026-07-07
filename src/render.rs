@@ -17,7 +17,7 @@ pub const VIEWER_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/viewer.js"))
 pub const FAVICON_SVG: &str = include_str!("favicon.svg");
 
 /// Short content tag of the baked renderer, the second half of the page-reload
-/// version pair: the wire proto can be unchanged while viewer.js itself was
+/// version pair: the wire proto can be unchanged while viewer.js itself changes
 /// (a render fix) — a mismatch on either reloads the page. Hashing the bytes
 /// means there is no hand-maintained JS version to forget to bump.
 pub fn viewer_tag() -> &'static str {

@@ -80,7 +80,7 @@ pub fn session_id(key: &str) -> String {
 /// Upper bound on a single WebSocket message the hub will accept from a pusher.
 /// Sized for the **register** message — the first one, which carries every exported
 /// font base64-encoded in one JSON blob (a heavy/CJK bundle is tens of MB, +33% for
-/// base64); the old `/register` route capped its body at 64 MB for the same reason.
+/// base64).
 /// Every later message is a [`crate::diff`] wire message (a rendered screen, far
 /// smaller). Guards against a client making the hub buffer an unbounded message; the
 /// client checks its register against this before connecting so an over-limit bundle

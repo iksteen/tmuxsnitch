@@ -176,8 +176,8 @@ impl Live {
     }
 
     /// Store the new state, THEN broadcast — that order is what makes lock-free
-    /// connects sound: a delta sent before a viewer subscribes implies its state was
-    /// stored before the viewer's snapshot load, so the snapshot's seq covers it and
+    /// connects sound: a delta sent before a viewer subscribes stores its state
+    /// before the viewer's snapshot load, so the snapshot's seq covers it and
     /// the viewer's skip is correct; a delta sent after the subscribe is received,
     /// and is skipped iff the snapshot already includes it.
     fn commit(
@@ -398,7 +398,7 @@ impl Serialize for WireMsg<'_> {
 ///
 /// Line-only and tuple-framed on purpose — measured (see `zz_measure_wire_cost`),
 /// merging lines into rectangles never paid (padding scales with width), and the
-/// object envelope was pure overhead once the shape was fixed.
+/// object envelope is pure overhead once the shape is fixed.
 #[derive(Debug)]
 enum WireRow<'a> {
     Line {
@@ -1458,7 +1458,7 @@ mod tests {
     #[test]
     fn single_cluster_cell_uses_the_entry_form() {
         // A bare wire string is one cell per codepoint everywhere, so a single
-        // multi-codepoint grapheme cell must take the ["…"] entry form (t:"l").
+        // multi-codepoint grapheme cell must take the ["…"] entry form.
         let a = grid(&["ab"]);
         let mut b = grid(&["xb"]);
         b.rows[0][0].text = "e\u{0301}".to_string();

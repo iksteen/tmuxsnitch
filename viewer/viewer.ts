@@ -112,7 +112,7 @@ interface BannerMsg {
 }
 // Version hello, first event of every SSE stream: the wire proto and the baked
 // viewer.js content tag. If either differs from what this page booted with, the
-// server was upgraded under us — reload to fetch the matching page + viewer.js
+// the server upgraded under us — reload to fetch the matching page + viewer.js
 // (guarded against reload storms).
 interface VersionMsg {
   v: number;
@@ -905,7 +905,7 @@ function decodeRow([r, l, text, style]: WireRow): { r: number; l: number; cells:
   return { r, l, cells: decodeCells(text, style as StyleRun[] | undefined) };
 }
 
-// `m.c` passes through as-is: undefined = cursor unchanged, null = hidden.
+// The cursor (`m.p`) passes through as-is: undefined = unchanged, null = hidden.
 function applyPatches(cur: Cur | undefined, rows: { r: number; l: number; cells: Cell[] }[]): void {
   const dirty = patchCells(screen, { cur, rows });
   for (const r of dirty) {

@@ -14,9 +14,9 @@
 //! capability (never a view route on its own), and the secret behind it — never sent
 //! to viewers — is the write capability.
 //!
-//! One WebSocket (vs the old `/register` + `/stream` POST pair) means one auth, no
-//! `409` ordering race, no length-framing layer, and — with a client ping/pong
-//! heartbeat and a SIGTERM Close — prompt detection of a dead or restarting hub.
+//! One WebSocket carries the whole push: one auth, no length-framing layer, and —
+//! with a client ping/pong heartbeat and a SIGTERM Close — prompt detection of a
+//! dead or restarting hub.
 
 use crate::diff;
 use crate::fonts::CACHE_CONTROL_FONT;
@@ -270,7 +270,7 @@ pub fn app(state: HubState) -> Router {
     Router::new()
         .route("/", get(index))
         // The push client's single WebSocket: register-then-stream state machine,
-        // authorized once at the upgrade. Replaces the old /register + /stream POSTs.
+        // authorized once at the upgrade.
         .route("/push", get(ws_push))
         .route("/viewer.js", get(viewer_js).layer(compress.clone()))
         .route("/favicon.svg", get(favicon).layer(compress.clone()))
@@ -366,7 +366,7 @@ async fn push_session(st: HubState, id: String, base: String, mut socket: WebSoc
                         // 1009 "Message Too Big" Close + reason, so a client sees an
                         // actionable error instead of a bare drop it treats as a
                         // transient blip and retries forever. The frame-size limit
-                        // rejected it at the header, so the body was never buffered.
+                        // rejected it at the header, so the hub never buffered the body.
                         // Best-effort: a client mid-send of a huge message isn't
                         // reading and may only observe the drop.
                         let inner = e.into_inner();
@@ -438,7 +438,7 @@ fn register_session(
         .into_iter()
         .filter_map(|f| Some((f.key, (f.mime, B64.decode(f.b64).ok()?))))
         .collect();
-    // The id's public slug (always present: it was just authorized). Views live under
+    // The id's public slug (always present: we just authorized it). Views live under
     // the slug only, but the client baked its `@font-face` URLs as `/s/<id>/fonts/…`
     // (it can't know the hub's slug), so rewrite them to the slug — otherwise fonts
     // would 404 on an aliased session. A no-op when slug == id (no alias). ponytail:

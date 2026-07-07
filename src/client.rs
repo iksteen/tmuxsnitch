@@ -3,7 +3,7 @@
 //!
 //! It opens a single `/push` WebSocket and runs a register-then-stream state
 //! machine over it: the first message is a [`RegisterBody`] (page CSS + render
-//! config + fonts), then a full picture, then only the deltas against what was
+//! config + fonts), then a full picture, then only the deltas against what it
 //! already sent — the exact wire messages the hub forwards to its viewers verbatim.
 //! The WebSocket is authorized once at the upgrade (a bad key → 403, fatal), so the
 //! upgrade succeeding is what gates taking over the terminal: a down or rejecting
