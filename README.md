@@ -82,6 +82,14 @@ Open that `/s/<id>` URL in a browser. Viewing needs only the id (in the URL); pu
 needs the secret. A client whose key isn't on the hub's `--allow` list is rejected with
 `403` at startup.
 
+**Friendlier view URLs.** Alias a session id to a slug with `--allow <id>:<slug>` (e.g.
+`--allow "$ID:demo"`) and the session is viewed at `/s/demo` instead of `/s/<64-hex-id>`.
+The slug becomes the *only* view route — `/s/<id>` no longer resolves for an aliased
+session — so share the slug URL with viewers. Pushing is unchanged (it still uses the
+key, which hashes to the id). Every id and every slug must be unique across `--allow`;
+a collision or a non-URL-safe slug is a startup error. With no `:slug`, the slug defaults
+to the id, so `/s/<id>` keeps working as above.
+
 > `gen-key` mints a secure 256-bit secret and prints its session id in one step;
 > use the printed key as `SHELLGLASS_KEY` on the client and the printed id in the
 > hub's `--allow`.
@@ -108,7 +116,7 @@ Flags by command:
 | `--ssh-bind <addr>` | serve, hub | also serve a read-only ANSI view over SSH here; connect with `ssh -p <port> …` |
 | `--ssh-host-key <path>` | serve, hub | OpenSSH host key for the SSH view (generated + persisted 0600 if absent) |
 | `--key <secret>` | push, print-id | secret key (or `SHELLGLASS_KEY` env var) |
-| `--allow <id>` | hub | a session id permitted to push; repeat per client. Others get `403` |
+| `--allow <id>[:<slug>]` | hub | a session id permitted to push, optionally aliased to a view-URL slug; repeat per client. Others get `403` |
 | `--tls-cert <path>` / `--tls-key <path>` | hub | serve HTTPS with your own PEM cert chain + key |
 | `--acme-domain <d>` | hub | auto-obtain a cert via ACME/Let's Encrypt (repeat per domain) |
 | `--acme-email <e>` | hub | contact email for the ACME account |
@@ -152,13 +160,14 @@ ANSI terminal view** over SSH — a live mirror in a plain terminal, no browser 
 ./target/release/shellglass serve --ssh-bind 127.0.0.1:2222 -- htop
 ssh -p 2222 x@127.0.0.1
 
-# hub: the session id is the SSH username
+# hub: the view handle (session id, or the slug if aliased) is the SSH username
 ./target/release/shellglass hub --bind 127.0.0.1:8080 --ssh-bind 0.0.0.0:2222 --allow "$ID"
 ssh -p 2222 "$ID"@hub.example.com
 ```
 
-The **session id is the SSH username** — it's already the public read capability (the
-same id that goes in the `/s/<id>` URL), so there's nothing to enter. The view is strictly
+The **view handle is the SSH username** — the same one that goes in the `/s/<…>` URL (the
+session id, or its slug if you aliased one with `--allow <id>:<slug>`), so there's nothing
+to enter. The view is strictly
 read-only: input is dropped except `q` / Ctrl-C / Ctrl-D, which disconnect. A viewer
 terminal smaller than the session shows a top-left crop with a one-line status notice, and
 reflows on resize.
@@ -187,7 +196,7 @@ referenced by `default_font`/`symbol_map` is located on the host running shellgl
 via [`fontdb`] (a pure-Rust, cross-platform system font database; Linux, macOS and
 Windows, no subprocess), or an explicit `[fonts."Name"].path` — its file read once at
 startup, and served: standalone at `/fonts/<i>`, the hub **per
-session** at `/s/<id>/fonts/<i>` (so two clients' fonts can't clash). The page's
+session** at `/s/<slug>/fonts/<i>` (so two clients' fonts can't clash). The page's
 `@font-face` points at those URLs; responses are Brotli/gzip-compressed and sent with a
 day-long `Cache-Control` so a browser fetches each font once. A single face is extracted
 from a `.ttc` collection (e.g. macOS's `Menlo.ttc`) and served as a standalone web font.

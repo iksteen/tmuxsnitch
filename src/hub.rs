@@ -7,8 +7,12 @@
 //! message (a full picture, then deltas). The hub applies each wire message to the
 //! session's full matrix ([`diff::Live::publish_wire`], so late-joining viewers get
 //! a correct snapshot) and forwards the bytes to viewers verbatim. Viewers open
-//! `/s/<id>` and stream from `/s/<id>/events`. The id is the read capability; the
-//! secret (never sent to viewers) is the write capability.
+//! `/s/<slug>` and stream from `/s/<slug>/events`, where `<slug>` is the public view
+//! handle an operator aliased the session to (`--allow <id>:<slug>`), defaulting to
+//! the session id itself when no alias is given (see [`AllowConfig`]). The slug is the
+//! read capability and the *only* way to view a session; the session id is the push
+//! capability (never a view route on its own), and the secret behind it — never sent
+//! to viewers — is the write capability.
 //!
 //! One WebSocket (vs the old `/register` + `/stream` POST pair) means one auth, no
 //! `409` ordering race, no length-framing layer, and — with a client ping/pong
@@ -19,6 +23,7 @@ use crate::fonts::CACHE_CONTROL_FONT;
 use crate::model::Frame;
 use crate::proto::{self, KEY_HEADER, session_id};
 use crate::render;
+use anyhow::{Context, Result, bail};
 use axum::Router;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
 use axum::extract::{ConnectInfo, Path, State};
@@ -28,7 +33,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Semaphore, broadcast};
@@ -61,12 +66,98 @@ struct Session {
 /// flat cap — raise it if legit operators ever queue behind each other.
 const HASH_SLOTS: usize = 4;
 
+/// Parsed `--allow` config: which session ids may push, and the public slug each
+/// maps to in the view URL.
+///
+/// The **session id** (`session_id(secret)`) is the push capability, screened at the
+/// `/push` upgrade. The **slug** is the *only* public view handle: viewers reach a
+/// session at `/s/<slug>`, never at `/s/<session_id>`. An operator sets it with
+/// `--allow <id>:<slug>`; with no `:slug` the slug defaults to the id itself, so an
+/// un-aliased session is still viewed at `/s/<id>` exactly as before. Parsing rejects
+/// a duplicate id, a duplicate slug, a malformed id, or a non-URL-safe slug up front
+/// (see [`parse_allow`]).
+#[derive(Default)]
+pub struct AllowConfig {
+    /// session_id → slug. Push auth checks membership by id; registration logs the slug.
+    by_id: HashMap<String, String>,
+    /// slug → session_id: the view namespace, holding only slugs (a plain lookup on the
+    /// viewer hot path, no hashing). An un-aliased session's slug is its own id.
+    by_view: HashMap<String, String>,
+}
+
+impl AllowConfig {
+    /// True when no id is allowed — the hub would reject every push (`403`).
+    pub fn is_empty(&self) -> bool {
+        self.by_id.is_empty()
+    }
+}
+
+/// Parse `--allow` entries (`<session_id>` or `<session_id>:<slug>`) into an
+/// [`AllowConfig`], validating that every session id is well-formed hex, every slug is
+/// URL-safe, and no two entries collide on either the push key (session id) or the view
+/// key (slug). A collision or a malformed value is a hard startup error naming the
+/// offending value — not a silently dropped duplicate.
+pub fn parse_allow(entries: &[String]) -> Result<AllowConfig> {
+    let mut cfg = AllowConfig::default();
+    for entry in entries {
+        // Split on the first ':' — id before, slug after; no ':' means "slug = id".
+        let (id, slug) = match entry.split_once(':') {
+            Some((id, slug)) => (id, slug),
+            None => (entry.as_str(), entry.as_str()),
+        };
+        validate_id(id).with_context(|| format!("--allow entry {entry:?}"))?;
+        validate_slug(slug).with_context(|| format!("--allow entry {entry:?}"))?;
+        if cfg.by_id.contains_key(id) {
+            bail!("--allow lists session id {id} more than once");
+        }
+        if let Some(other) = cfg.by_view.get(slug) {
+            bail!("--allow slug {slug:?} is claimed by two sessions ({other} and {id})");
+        }
+        cfg.by_view.insert(slug.to_string(), id.to_string());
+        cfg.by_id.insert(id.to_string(), slug.to_string());
+    }
+    Ok(cfg)
+}
+
+/// A session id must be exactly what [`session_id`] emits — 64 lowercase hex chars.
+/// Checking it here turns a fat-fingered id, or a `slug:id` written the wrong way
+/// round, into a clear startup error instead of a session that can never be pushed to.
+fn validate_id(id: &str) -> Result<()> {
+    if id.len() != 64
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        bail!("session id must be 64 lowercase hex chars (from `print-id`), got {id:?}");
+    }
+    Ok(())
+}
+
+/// A slug is a URL path segment, so restrict it to unreserved URL characters
+/// (`[A-Za-z0-9._~-]`) and forbid empty — keeping view URLs unambiguous and copy-safe.
+fn validate_slug(slug: &str) -> Result<()> {
+    if slug.is_empty() {
+        bail!("slug must not be empty (use `--allow <id>` for no alias)");
+    }
+    if !slug
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~'))
+    {
+        bail!("slug {slug:?} must be URL-safe: only letters, digits, and -._~");
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct HubState {
     sessions: Arc<Mutex<HashMap<String, Session>>>,
-    /// Pre-registered session ids (`session_id(secret)`) permitted to push. The
-    /// operator adds ids, never secrets — the hub screens by hash.
-    allowed: Arc<HashSet<String>>,
+    /// Pre-registered session ids (`session_id(secret)`) permitted to push, each mapped
+    /// to its public view slug. The operator adds ids, never secrets — the hub screens
+    /// by hash. Registration logs (and rewrites font URLs to) the id's slug.
+    allowed: Arc<HashMap<String, String>>,
+    /// The view namespace: slug → session_id. Viewers resolve `/s/<slug>` through here;
+    /// a session id that isn't a slug is not viewable (see [`AllowConfig`]).
+    by_view: Arc<HashMap<String, String>>,
     /// Public base URL (`scheme://host:port`, no trailing slash) for logging the
     /// view URL when a new session connects.
     base: Arc<str>,
@@ -78,20 +169,24 @@ pub struct HubState {
 }
 
 impl HubState {
-    pub fn new(allowed: HashSet<String>, base: String) -> Self {
+    pub fn new(allow: AllowConfig, base: String) -> Self {
         let (shutdown, _) = broadcast::channel(1);
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
-            allowed: Arc::new(allowed),
+            allowed: Arc::new(allow.by_id),
+            by_view: Arc::new(allow.by_view),
             base: base.into(),
             hash_slots: Arc::new(Semaphore::new(HASH_SLOTS)),
             shutdown,
         }
     }
 
-    /// The `Live` publisher for a session id, if one exists (a client has registered).
-    /// Used by the SSH viewer to resolve `ssh <id>@hub` to the session's frames.
-    pub(crate) fn live(&self, id: &str) -> Option<Arc<diff::Live>> {
+    /// The `Live` publisher for a public view slug, if a client has registered the
+    /// session it names. Used by the SSH viewer to resolve `ssh <slug>@hub` to the
+    /// session's frames (an un-aliased session's slug is its own id, so
+    /// `ssh <id>@hub` still works).
+    pub(crate) fn live(&self, slug: &str) -> Option<Arc<diff::Live>> {
+        let id = self.by_view.get(slug)?;
         let map = self.sessions.lock().unwrap();
         map.get(id).map(|s| Arc::clone(&s.live))
     }
@@ -131,7 +226,7 @@ async fn authorize(
             .await
             .expect("hash task")
     };
-    if st.allowed.contains(&id) {
+    if st.allowed.contains_key(&id) {
         Ok(id)
     } else {
         log_reject(headers, peer, route, StatusCode::FORBIDDEN);
@@ -179,9 +274,9 @@ pub fn app(state: HubState) -> Router {
         .route("/push", get(ws_push))
         .route("/viewer.js", get(viewer_js).layer(compress.clone()))
         .route("/favicon.svg", get(favicon).layer(compress.clone()))
-        .route("/s/{id}", get(view).layer(compress.clone()))
-        .route("/s/{id}/events", get(events))
-        .route("/s/{id}/fonts/{key}", get(font).layer(compress))
+        .route("/s/{slug}", get(view).layer(compress.clone()))
+        .route("/s/{slug}/events", get(events))
+        .route("/s/{slug}/fonts/{key}", get(font).layer(compress))
         .with_state(state)
 }
 
@@ -343,9 +438,18 @@ fn register_session(
         .into_iter()
         .filter_map(|f| Some((f.key, (f.mime, B64.decode(f.b64).ok()?))))
         .collect();
+    // The id's public slug (always present: it was just authorized). Views live under
+    // the slug only, but the client baked its `@font-face` URLs as `/s/<id>/fonts/…`
+    // (it can't know the hub's slug), so rewrite them to the slug — otherwise fonts
+    // would 404 on an aliased session. A no-op when slug == id (no alias). ponytail:
+    // coupled to client.rs building exactly that prefix; the font route matches it too.
+    let slug = st.allowed.get(id).map_or(id, String::as_str);
+    let css = reg
+        .css
+        .replace(&format!("/s/{id}/fonts/"), &format!("/s/{slug}/fonts/"));
     let mut map = st.sessions.lock().unwrap();
     if let Some(s) = map.get_mut(id) {
-        s.css = reg.css;
+        s.css = css;
         s.template = reg.template;
         s.render_cfg = reg.render_cfg;
         s.fonts = fonts;
@@ -360,23 +464,23 @@ fn register_session(
         map.insert(
             id.to_string(),
             Session {
-                css: reg.css,
+                css,
                 template: reg.template,
                 render_cfg: reg.render_cfg,
                 live: Arc::clone(&live),
                 fonts,
             },
         );
-        println!("shellglass: session connected — view at {base}/s/{id}");
+        println!("shellglass: session connected — view at {base}/s/{slug}");
         live
     }
 }
 
 /// Serve a session's uploaded font bytes (the page's `@font-face` points here).
-/// Public like `view`/`events` — the id in the path is the read capability.
-async fn font(State(st): State<HubState>, Path((id, key)): Path<(String, String)>) -> Response {
+/// Public like `view`/`events` — the slug in the path is the read capability.
+async fn font(State(st): State<HubState>, Path((slug, key)): Path<(String, String)>) -> Response {
     let map = st.sessions.lock().unwrap();
-    let Some(s) = map.get(&id) else {
+    let Some(s) = st.by_view.get(&slug).and_then(|id| map.get(id)) else {
         return (StatusCode::NOT_FOUND, "unknown session").into_response();
     };
     match s.fonts.get(&key) {
@@ -395,12 +499,12 @@ async fn font(State(st): State<HubState>, Path((id, key)): Path<(String, String)
     }
 }
 
-async fn view(State(st): State<HubState>, Path(id): Path<String>) -> Response {
+async fn view(State(st): State<HubState>, Path(slug): Path<String>) -> Response {
     let map = st.sessions.lock().unwrap();
-    let Some(s) = map.get(&id) else {
+    let Some(s) = st.by_view.get(&slug).and_then(|id| map.get(id)) else {
         return (StatusCode::NOT_FOUND, "unknown session").into_response();
     };
-    let script = render::sse_script(&format!("/s/{id}/events"), &s.render_cfg);
+    let script = render::sse_script(&format!("/s/{slug}/events"), &s.render_cfg);
     // Empty template = an older client that didn't push one; use the built-in.
     let template = if s.template.is_empty() {
         render::DEFAULT_TEMPLATE
@@ -417,10 +521,10 @@ async fn view(State(st): State<HubState>, Path(id): Path<String>) -> Response {
         .into_response()
 }
 
-async fn events(State(st): State<HubState>, Path(id): Path<String>) -> Response {
+async fn events(State(st): State<HubState>, Path(slug): Path<String>) -> Response {
     let live = {
         let map = st.sessions.lock().unwrap();
-        match map.get(&id) {
+        match st.by_view.get(&slug).and_then(|id| map.get(id)) {
             Some(s) => Arc::clone(&s.live),
             None => return (StatusCode::NOT_FOUND, "unknown session").into_response(),
         }
@@ -453,7 +557,7 @@ async fn favicon() -> Response {
 }
 
 async fn index() -> Html<&'static str> {
-    Html("<p style=\"font-family:monospace\">shellglass hub — open /s/&lt;session-id&gt;</p>")
+    Html("<p style=\"font-family:monospace\">shellglass hub — open /s/&lt;slug&gt;</p>")
 }
 
 #[cfg(test)]
@@ -463,18 +567,74 @@ mod tests {
 
     #[test]
     fn only_preregistered_keys_are_allowed() {
-        let st = HubState::new(HashSet::from([session_id("good-secret")]), String::new());
+        let st = HubState::new(
+            parse_allow(&[session_id("good-secret")]).unwrap(),
+            String::new(),
+        );
         assert!(
-            st.allowed.contains(&session_id("good-secret")),
+            st.allowed.contains_key(&session_id("good-secret")),
             "registered key allowed"
         );
         assert!(
-            !st.allowed.contains(&session_id("other-secret")),
+            !st.allowed.contains_key(&session_id("other-secret")),
             "unregistered key rejected"
         );
         // An empty allowlist rejects everything (no implicit open hub).
-        let empty = HubState::new(HashSet::new(), String::new());
-        assert!(!empty.allowed.contains(&session_id("good-secret")));
+        let empty = HubState::new(AllowConfig::default(), String::new());
+        assert!(empty.allowed.is_empty());
+        assert!(!empty.allowed.contains_key(&session_id("good-secret")));
+    }
+
+    #[test]
+    fn parse_allow_defaults_slug_to_id_and_aliases() {
+        let a = session_id("a");
+        let b = session_id("b");
+        let cfg = parse_allow(&[format!("{a}:alpha"), b.clone()]).unwrap();
+        // Aliased: the slug is the view handle; the raw id is NOT viewable.
+        assert_eq!(cfg.by_view.get("alpha"), Some(&a));
+        assert_eq!(
+            cfg.by_view.get(&a),
+            None,
+            "an aliased id is not a view route"
+        );
+        assert_eq!(cfg.by_id.get(&a).map(String::as_str), Some("alpha"));
+        // Un-aliased: the slug defaults to the id, so `/s/<id>` still resolves.
+        assert_eq!(cfg.by_view.get(&b), Some(&b));
+        assert_eq!(cfg.by_id.get(&b), Some(&b));
+    }
+
+    #[test]
+    fn parse_allow_rejects_collisions() {
+        let a = session_id("a");
+        let b = session_id("b");
+        // Duplicate session id.
+        assert!(parse_allow(&[a.clone(), a.clone()]).is_err());
+        assert!(parse_allow(&[format!("{a}:x"), format!("{a}:y")]).is_err());
+        // Duplicate slug across two ids.
+        assert!(parse_allow(&[format!("{a}:same"), format!("{b}:same")]).is_err());
+        // One session's slug equal to another un-aliased session's id (= its slug).
+        assert!(parse_allow(&[a.clone(), format!("{b}:{a}")]).is_err());
+        // An id aliased to itself is idempotent, not a collision.
+        assert!(parse_allow(&[format!("{a}:{a}")]).is_ok());
+    }
+
+    #[test]
+    fn parse_allow_validates_id_and_slug_shape() {
+        let a = session_id("a");
+        assert!(parse_allow(&["not-hex".into()]).is_err(), "id not 64 hex");
+        assert!(
+            parse_allow(&[format!("{}:s", &a[..63])]).is_err(),
+            "id too short"
+        );
+        assert!(parse_allow(&[format!("{a}:")]).is_err(), "empty slug");
+        assert!(
+            parse_allow(&[format!("{a}:bad/slug")]).is_err(),
+            "slug has a '/'"
+        );
+        assert!(
+            parse_allow(&[format!("{a}:ok.slug-1_2~3")]).is_ok(),
+            "url-safe slug accepted"
+        );
     }
 
     fn reg(css: &str) -> proto::RegisterBody {
@@ -510,7 +670,10 @@ mod tests {
     #[test]
     fn register_creates_then_reconnect_reuses_the_live() {
         let id = session_id("secret");
-        let st = HubState::new(HashSet::from([id.clone()]), "http://h".into());
+        let st = HubState::new(
+            parse_allow(std::slice::from_ref(&id)).unwrap(),
+            "http://h".into(),
+        );
         assert!(
             st.live(&id).is_none(),
             "no session before the first register"
@@ -531,6 +694,24 @@ mod tests {
             st.sessions.lock().unwrap().get(&id).unwrap().css,
             "b{}",
             "re-register refreshes the pushed CSS"
+        );
+    }
+
+    #[test]
+    fn register_rewrites_font_urls_to_the_slug() {
+        let id = session_id("secret");
+        let st = HubState::new(
+            parse_allow(&[format!("{id}:pretty")]).unwrap(),
+            "http://h".into(),
+        );
+        // The client bakes `/s/<id>/fonts/…`; the hub must rewrite it to the slug so
+        // the sub-resource stays reachable under the slug-only view namespace.
+        let css = format!("@font-face{{src:url(/s/{id}/fonts/0)}}");
+        register_session(&st, &id, "http://h", reg(&css));
+        assert_eq!(
+            st.sessions.lock().unwrap().get(&id).unwrap().css,
+            "@font-face{src:url(/s/pretty/fonts/0)}",
+            "font URLs rewritten from id to slug"
         );
     }
 

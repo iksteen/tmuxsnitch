@@ -125,9 +125,11 @@ struct HubArgs {
     #[arg(short, long, default_value = "127.0.0.1:8080")]
     bind: String,
 
-    /// A session id permitted to push; repeat for several. Pushes whose key doesn't
-    /// hash to a listed id get 403. Compute an id with `print-id --key K`.
-    #[arg(long = "allow", value_name = "SESSION_ID")]
+    /// A session id permitted to push, optionally with a public view-URL slug:
+    /// `<id>` or `<id>:<slug>`; repeat for several. The slug is the only way to view
+    /// the session (`/s/<slug>`); with no `:slug` it defaults to the id. Pushes whose
+    /// key doesn't hash to a listed id get 403. Compute an id with `print-id --key K`.
+    #[arg(long = "allow", value_name = "SESSION_ID[:SLUG]")]
     allow: Vec<String>,
 
     /// Serve HTTPS with this certificate chain (PEM). Requires --tls-key.
@@ -225,13 +227,13 @@ async fn main() -> Result<()> {
         Action::Push { url, key, source } => run_push(url, key.key, source).await,
         Action::Hub(hub) => {
             let tls = Tls::from_args(&hub)?;
-            let allowed: std::collections::HashSet<String> = hub.allow.into_iter().collect();
-            if allowed.is_empty() {
+            let allow = hub::parse_allow(&hub.allow).context("parsing --allow")?;
+            if allow.is_empty() {
                 eprintln!(
                     "shellglass: warning — no --allow session ids; the hub will reject all pushes (403)"
                 );
             }
-            serve_hub(allowed, &hub.bind, tls, hub.ssh_bind, hub.ssh_host_key).await
+            serve_hub(allow, &hub.bind, tls, hub.ssh_bind, hub.ssh_host_key).await
         }
     }
 }
@@ -366,7 +368,7 @@ fn describe_source(source: &SourceArgs) -> String {
 /// listener via `axum::serve`; the TLS paths hand the same reuseaddr listener to
 /// `axum-server`. ACME drives certificate issuance/renewal on a background task.
 async fn serve_hub(
-    allowed: std::collections::HashSet<String>,
+    allow: hub::AllowConfig,
     addr: &str,
     tls: Tls,
     ssh_bind: Option<String>,
@@ -386,7 +388,7 @@ async fn serve_hub(
             )
         }
     };
-    let hub_state = hub::HubState::new(allowed, base);
+    let hub_state = hub::HubState::new(allow, base);
     // Optional read-only SSH view: the session id is the SSH username. A setup failure
     // must not abort the hub's HTTP service — log and continue without the SSH view.
     if let Some(ssh_addr) = &ssh_bind {
