@@ -73,7 +73,7 @@ pub fn head_css(font_css: &str, config: &Config) -> String {
          #screen {{ font-family:{stack}; font-size:{fs}px; --lh:{lh}px; \
          line-height:var(--lh); color:{fg}; background:#000; }}\n\
          .screen {{ position:relative; white-space:pre; overflow:hidden; }}\n\
-         .row {{ position:relative; height:var(--lh); }}\n\
+         .row {{ position:relative; height:var(--lh); contain:layout style; }}\n\
          .run {{ position:absolute; top:0; height:var(--lh); overflow:hidden; }}\n",
         stack = font_stack(config),
         fs = config.font_size_px,

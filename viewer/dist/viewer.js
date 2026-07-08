@@ -164,6 +164,8 @@ function cellFg(cell, isCursor) {
 }
 let canvasEl = null;
 let ctx = null;
+let fontPx = 16;
+let fontFam = "monospace";
 let obsScreen = null;
 let gCols = 0;
 let gRows = 0;
@@ -180,6 +182,9 @@ function sizeCanvas() {
     dpr = window.devicePixelRatio || 1;
     canvasEl.width = Math.round(rect.width * dpr);
     canvasEl.height = Math.round(rect.height * dpr);
+    const cs = getComputedStyle(obsScreen);
+    fontPx = parseFloat(cs.fontSize) * dpr;
+    fontFam = cs.fontFamily;
 }
 function onDprChange() {
     sizeCanvas();
@@ -498,6 +503,8 @@ function drawGlyph(r, c, cp, cell, isCursor) {
 function redrawCanvasRow(r) {
     if (!ctx || !canvasEl)
         return;
+    if (storm)
+        return drawRowStorm(r);
     const row = screen.cells[r];
     const y0 = Math.round(r * cellH * dpr);
     const y1 = Math.round((r + 1) * cellH * dpr);
@@ -521,6 +528,95 @@ function redrawCanvasAll() {
     ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
     for (let r = 0; r < screen.cells.length; r++)
         redrawCanvasRow(r);
+}
+let storm = false;
+let stormHot = 0;
+let lastStormy = 0;
+let stormTimer = null;
+const STORM_RATIO = 0.5;
+const STORM_ENTER = 3;
+const STORM_EXIT_MS = 1200;
+function cellBgRgb(cell, isCursor) {
+    if (!!cell.n !== isCursor)
+        return resolveRgb(cell.f) ?? parseHex(cfg.defFg);
+    return resolveRgb(cell.g);
+}
+function drawRowStorm(r) {
+    if (!ctx || !canvasEl)
+        return;
+    const y0 = Math.round(r * cellH * dpr);
+    const y1 = Math.round((r + 1) * cellH * dpr);
+    ctx.fillStyle = cfg.defBg;
+    ctx.fillRect(0, y0, canvasEl.width, y1 - y0);
+    const row = screen.cells[r];
+    if (!row)
+        return;
+    ctx.textBaseline = "middle";
+    const midY = Math.round((r + 0.5) * cellH * dpr);
+    const ul = Math.max(1, Math.round(dpr));
+    let curFont = "";
+    let c = 0;
+    for (const cell of row) {
+        const w = cell.w ? 2 : 1;
+        const isCursor = !!screen.cur && screen.cur[0] === r && screen.cur[1] === c;
+        const x0 = Math.round(c * cellW * dpr);
+        const x1 = Math.round((c + w) * cellW * dpr);
+        const bg = cellBgRgb(cell, isCursor);
+        if (bg) {
+            ctx.fillStyle = hex(bg);
+            ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+        }
+        const cp = cell.t ? cell.t.codePointAt(0) : 0;
+        if (cp && isCanvasGlyph(cp) && !(cp >= 0xe000 && symbolFamily(cp))) {
+            drawGlyph(r, c, cp, cell, isCursor);
+        }
+        else if (cell.t && cell.t !== " ") {
+            const font = `${cell.i ? "italic " : ""}${cell.b ? "bold " : ""}${fontPx}px ${fontFam}`;
+            if (font !== curFont) {
+                ctx.font = font;
+                curFont = font;
+            }
+            ctx.fillStyle = hex(cellFg(cell, isCursor));
+            ctx.fillText(cell.t, x0, midY, x1 - x0);
+            if (cell.u)
+                ctx.fillRect(x0, y1 - ul, x1 - x0, ul);
+        }
+        c += w;
+    }
+}
+function setStorm(on) {
+    if (storm === on)
+        return;
+    storm = on;
+    for (const el of screen.rowEls)
+        el.style.visibility = on ? "hidden" : "";
+    if (on) {
+        redrawCanvasAll();
+        lastStormy = clock();
+        stormTimer = setInterval(() => {
+            if (clock() - lastStormy > STORM_EXIT_MS)
+                setStorm(false);
+        }, 300);
+    }
+    else {
+        if (stormTimer !== null)
+            clearInterval(stormTimer);
+        stormTimer = null;
+        stormHot = 0;
+        for (let r = 0; r < screen.cells.length; r++) {
+            const el = screen.rowEls[r];
+            if (el)
+                el.innerHTML = renderRow(screen.cells[r], cursorCol(screen.cur, r));
+        }
+        redrawCanvasAll();
+    }
+}
+function stormReset() {
+    if (stormTimer !== null)
+        clearInterval(stormTimer);
+    stormTimer = null;
+    storm = false;
+    stormHot = 0;
 }
 export function isFillGlyph(cp) {
     return ((cp >= 0xe0b0 && cp <= 0xe0d4) ||
@@ -559,6 +655,9 @@ function symbolCell(cell, isCursor, col, w, font) {
     const t = cell.t ?? " ";
     return symbolSpan(col, w, boxStyle, font, esc(t), t.codePointAt(0) ?? 0x20);
 }
+function inkFree(s) {
+    return !s.includes("background") && !s.includes("text-decoration");
+}
 export function renderRow(cells, cursorCol) {
     let out = "";
     let col = 0;
@@ -592,7 +691,14 @@ export function renderRow(cells, cursorCol) {
             out += symbolCell(cell, isCursor, col, w, font);
         }
         else {
-            const style = cellStyle(cell, isCursor);
+            let style = cellStyle(cell, isCursor);
+            if ((!cell.t || cell.t === " ") &&
+                runStyle !== null &&
+                runStyle !== style &&
+                inkFree(style) &&
+                inkFree(runStyle)) {
+                style = runStyle;
+            }
             if (runStyle !== style) {
                 flushText();
                 runStyle = style;
@@ -667,6 +773,7 @@ function flushPaint() {
     paintScheduled = false;
     paints++;
     if (rebuildBanner !== null) {
+        stormReset();
         screenEl.innerHTML = rebuildBanner;
         rebuildBanner = null;
         rebuildDims = null;
@@ -675,17 +782,32 @@ function flushPaint() {
     }
     const t0 = clock();
     if (rebuildDims) {
+        stormReset();
         paintFull(rebuildDims);
         rebuildDims = null;
         dirtyRows.clear();
     }
     else {
+        const stormy = dirtyRows.size >= STORM_RATIO * (screen.cells.length || 1);
+        if (stormy) {
+            lastStormy = now;
+            if (!storm && ++stormHot >= STORM_ENTER)
+                setStorm(true);
+        }
+        else if (!storm) {
+            stormHot = 0;
+        }
         for (const r of dirtyRows) {
-            const el = screen.rowEls[r];
-            if (!el)
-                continue;
-            el.innerHTML = renderRow(screen.cells[r] ?? [], cursorCol(screen.cur, r));
-            redrawCanvasRow(r);
+            if (storm) {
+                drawRowStorm(r);
+            }
+            else {
+                const el = screen.rowEls[r];
+                if (!el)
+                    continue;
+                el.innerHTML = renderRow(screen.cells[r] ?? [], cursorCol(screen.cur, r));
+                redrawCanvasRow(r);
+            }
         }
         dirtyRows.clear();
     }
@@ -833,7 +955,7 @@ function startStats() {
         lastBytes = bytesIn;
         lastPaints = paints;
         lastT = t;
-        el.textContent = `${fmtRate(bps)} · ${fps.toFixed(0)} fps (cap ${cap.toFixed(0)})`;
+        el.textContent = `${fmtRate(bps)} · ${fps.toFixed(0)} fps (cap ${cap.toFixed(0)})${storm ? " · canvas" : ""}`;
     }, 1000);
 }
 function main() {

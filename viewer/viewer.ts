@@ -319,6 +319,8 @@ function cellFg(cell: Cell, isCursor: boolean): RGB {
 
 let canvasEl: HTMLCanvasElement | null = null;
 let ctx: CanvasRenderingContext2D | null = null;
+let fontPx = 16; // device-pixel font size for storm-mode fillText (set in sizeCanvas)
+let fontFam = "monospace";
 
 let obsScreen: HTMLElement | null = null;
 let gCols = 0;
@@ -340,6 +342,11 @@ function sizeCanvas(): void {
   dpr = window.devicePixelRatio || 1;
   canvasEl.width = Math.round(rect.width * dpr);
   canvasEl.height = Math.round(rect.height * dpr);
+  // Storm mode draws text on the canvas with the same face the DOM uses; capture it
+  // here so the backing-store size and the font stay in lockstep (both dpr-scaled).
+  const cs = getComputedStyle(obsScreen);
+  fontPx = parseFloat(cs.fontSize) * dpr;
+  fontFam = cs.fontFamily;
 }
 
 // devicePixelRatio can change with NO .screen resize when a window moves between a
@@ -689,6 +696,7 @@ function drawGlyph(r: number, c: number, cp: number, cell: Cell, isCursor: boole
 // redraw never disturbs neighbours — matching the DOM's per-row update.
 function redrawCanvasRow(r: number): void {
   if (!ctx || !canvasEl) return;
+  if (storm) return drawRowStorm(r);
   const row = screen.cells[r];
   const y0 = Math.round(r * cellH * dpr);
   const y1 = Math.round((r + 1) * cellH * dpr);
@@ -710,6 +718,120 @@ function redrawCanvasAll(): void {
   if (!ctx || !canvasEl) return;
   ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
   for (let r = 0; r < screen.cells.length; r++) redrawCanvasRow(r);
+}
+
+// ── storm mode: full-canvas rendering under animation load ───────────────────
+//
+// When most of the screen changes every frame (cmatrix, `yes`, fast scroll), the DOM
+// is the wrong medium: thousands of positioned spans rebuilt per frame cost tens of
+// ms of style+layout+paint, and no amount of pacing makes that fast. So under
+// sustained near-full-screen change we stop touching row DOM entirely and paint the
+// cells — backgrounds, text, canvas glyphs — straight onto the (already cell-exact,
+// dpr-aware) canvas overlay: no style recalc, no layout, single composited surface,
+// a few ms per full frame. The adaptive shaper then sees cheap frames and raises the
+// rate on its own — the two mechanisms compose. DOM rows are hidden (not removed)
+// while the storm lasts; when the input calms or goes quiet we repaint the rows from
+// state and return to DOM, so text selection and CRT text-shadow are only suspended
+// during animation, when nobody is selecting text anyway.
+//
+// Fidelity: same cells, same color math (cellFg / storm bg mirror cellStyle), same
+// canvas geometry for box glyphs. Deliberate storm-only approximations, ponytail:
+// symbol_map/SVG fill glyphs render with the base font, and text baseline is the
+// em-box middle — pixel-nudge differences during full-screen animation only.
+let storm = false;
+let stormHot = 0; // consecutive high-change flushes (enter counter)
+let lastStormy = 0; // last time a flush looked stormy (exit-on-calm/idle timestamp)
+let stormTimer: ReturnType<typeof setInterval> | null = null;
+const STORM_RATIO = 0.5; // a flush touching ≥ half the rows is "stormy"
+const STORM_ENTER = 3; // stormy flushes in a row before switching media
+const STORM_EXIT_MS = 1200; // this long without a stormy flush ⇒ back to DOM
+
+// The storm bg for a cell — bg after reverse/cursor (mirrors cellStyle's bg path).
+function cellBgRgb(cell: Cell, isCursor: boolean): RGB | null {
+  if (!!cell.n !== isCursor) return resolveRgb(cell.f) ?? parseHex(cfg.defFg);
+  return resolveRgb(cell.g);
+}
+
+// Paint one row band entirely on the canvas: opaque default-bg fill (covers the
+// hidden DOM), per-cell backgrounds, then ink — crisp geometry for canvas glyphs,
+// fillText for everything else. maxWidth pins a glyph into its cell box like the
+// DOM's .run overflow:hidden does.
+function drawRowStorm(r: number): void {
+  if (!ctx || !canvasEl) return;
+  const y0 = Math.round(r * cellH * dpr);
+  const y1 = Math.round((r + 1) * cellH * dpr);
+  ctx.fillStyle = cfg.defBg;
+  ctx.fillRect(0, y0, canvasEl.width, y1 - y0);
+  const row = screen.cells[r];
+  if (!row) return;
+  ctx.textBaseline = "middle";
+  const midY = Math.round((r + 0.5) * cellH * dpr);
+  const ul = Math.max(1, Math.round(dpr));
+  let curFont = "";
+  let c = 0;
+  for (const cell of row) {
+    const w = cell.w ? 2 : 1;
+    const isCursor = !!screen.cur && screen.cur[0] === r && screen.cur[1] === c;
+    const x0 = Math.round(c * cellW * dpr);
+    const x1 = Math.round((c + w) * cellW * dpr);
+    const bg = cellBgRgb(cell, isCursor);
+    if (bg) {
+      ctx.fillStyle = hex(bg);
+      ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+    }
+    const cp = cell.t ? cell.t.codePointAt(0)! : 0;
+    if (cp && isCanvasGlyph(cp) && !(cp >= 0xe000 && symbolFamily(cp))) {
+      drawGlyph(r, c, cp, cell, isCursor);
+    } else if (cell.t && cell.t !== " ") {
+      const font = `${cell.i ? "italic " : ""}${cell.b ? "bold " : ""}${fontPx}px ${fontFam}`;
+      if (font !== curFont) {
+        ctx.font = font;
+        curFont = font;
+      }
+      ctx.fillStyle = hex(cellFg(cell, isCursor));
+      ctx.fillText(cell.t, x0, midY, x1 - x0);
+      if (cell.u) ctx.fillRect(x0, y1 - ul, x1 - x0, ul);
+    }
+    c += w;
+  }
+}
+
+// Switch media. Entering: hide the rows and paint the whole grid on canvas (must be
+// complete — the canvas is now the only truth on screen). Leaving: repaint every row's
+// DOM from state (it went stale while hidden) and give the canvas back to the
+// glyph-only pass.
+function setStorm(on: boolean): void {
+  if (storm === on) return;
+  storm = on;
+  for (const el of screen.rowEls) el.style.visibility = on ? "hidden" : "";
+  if (on) {
+    redrawCanvasAll();
+    // Exit is time-based, not flush-based: when the animation stops, messages stop,
+    // flushes stop — a counter would strand us on canvas forever. A watchdog sees
+    // "nothing stormy lately" even in total silence.
+    lastStormy = clock();
+    stormTimer = setInterval(() => {
+      if (clock() - lastStormy > STORM_EXIT_MS) setStorm(false);
+    }, 300);
+  } else {
+    if (stormTimer !== null) clearInterval(stormTimer);
+    stormTimer = null;
+    stormHot = 0;
+    for (let r = 0; r < screen.cells.length; r++) {
+      const el = screen.rowEls[r];
+      if (el) el.innerHTML = renderRow(screen.cells[r], cursorCol(screen.cur, r));
+    }
+    redrawCanvasAll();
+  }
+}
+
+// Structural resets (full frame, banner) rebuild the DOM fresh — drop storm state
+// without the exit repaint (the rebuild does it).
+function stormReset(): void {
+  if (stormTimer !== null) clearInterval(stormTimer);
+  stormTimer = null;
+  storm = false;
+  stormHot = 0;
 }
 
 // ── symbol / fill glyphs ──────────────────────────────────────────────────────
@@ -781,6 +903,11 @@ function symbolCell(cell: Cell, isCursor: boolean, col: number, w: number, font:
 // ── row rendering (port of render.rs:render_row) ──────────────────────────────
 
 // Render one row's cells to inner HTML. `cursorCol` is the cursor column, or -1.
+// True when a style string paints nothing for a space: no background, no underline.
+function inkFree(s: string): boolean {
+  return !s.includes("background") && !s.includes("text-decoration");
+}
+
 export function renderRow(cells: Cell[], cursorCol: number): string {
   let out = "";
   let col = 0;
@@ -820,7 +947,20 @@ export function renderRow(cells: Cell[], cursorCol: number): string {
       cols = 0;
       out += symbolCell(cell, isCursor, col, w, font);
     } else {
-      const style = cellStyle(cell, isCursor);
+      let style = cellStyle(cell, isCursor);
+      // A blank cell with no visible ink (no bg, no underline) renders identically
+      // under any fg/weight — let it ride the open run instead of splitting it, as
+      // long as that run is equally ink-free (adopting a bg/underline run would
+      // paint the gap). Halves the span count on sparse animated screens (cmatrix).
+      if (
+        (!cell.t || cell.t === " ") &&
+        runStyle !== null &&
+        runStyle !== style &&
+        inkFree(style) &&
+        inkFree(runStyle)
+      ) {
+        style = runStyle;
+      }
       if (runStyle !== style) {
         flushText();
         runStyle = style;
@@ -949,6 +1089,7 @@ function flushPaint(): void {
   paints++;
 
   if (rebuildBanner !== null) {
+    stormReset(); // banner replaces the grid wholesale
     screenEl.innerHTML = rebuildBanner;
     rebuildBanner = null;
     rebuildDims = null;
@@ -957,15 +1098,29 @@ function flushPaint(): void {
   }
   const t0 = clock();
   if (rebuildDims) {
+    stormReset(); // paintFull rebuilds the DOM fresh — start over in DOM mode
     paintFull(rebuildDims);
     rebuildDims = null;
     dirtyRows.clear();
   } else {
+    // Storm detection: a flush touching most rows, several times in a row, means
+    // full-screen animation — flip to canvas rendering (see storm mode above).
+    const stormy = dirtyRows.size >= STORM_RATIO * (screen.cells.length || 1);
+    if (stormy) {
+      lastStormy = now;
+      if (!storm && ++stormHot >= STORM_ENTER) setStorm(true); // paints all rows
+    } else if (!storm) {
+      stormHot = 0;
+    }
     for (const r of dirtyRows) {
-      const el = screen.rowEls[r];
-      if (!el) continue;
-      el.innerHTML = renderRow(screen.cells[r] ?? [], cursorCol(screen.cur, r));
-      redrawCanvasRow(r);
+      if (storm) {
+        drawRowStorm(r);
+      } else {
+        const el = screen.rowEls[r];
+        if (!el) continue;
+        el.innerHTML = renderRow(screen.cells[r] ?? [], cursorCol(screen.cur, r));
+        redrawCanvasRow(r);
+      }
     }
     dirtyRows.clear();
   }
@@ -1152,7 +1307,7 @@ function startStats(): void {
     lastBytes = bytesIn;
     lastPaints = paints;
     lastT = t;
-    el.textContent = `${fmtRate(bps)} · ${fps.toFixed(0)} fps (cap ${cap.toFixed(0)})`;
+    el.textContent = `${fmtRate(bps)} · ${fps.toFixed(0)} fps (cap ${cap.toFixed(0)})${storm ? " · canvas" : ""}`;
   }, 1000);
 }
 
