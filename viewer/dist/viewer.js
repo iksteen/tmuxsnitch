@@ -655,6 +655,16 @@ function applyFull(m) {
     };
     attachCanvas(m.w, m.h, screenDiv);
     redrawCanvasAll();
+    if (m.i?.length)
+        screenDiv.insertAdjacentHTML("beforeend", renderImages(m.i));
+}
+function renderImages(imgs) {
+    return imgs
+        .map((im) => {
+        const size = im.w && im.h ? `width:${im.w}ch;height:calc(${im.h} * var(--lh));object-fit:fill;` : "";
+        return `<img class="inline-img" alt="" src="data:${im.m};base64,${im.d}" style="position:absolute;left:${im.c}ch;top:calc(${im.r} * var(--lh));${size}z-index:3;pointer-events:none;">`;
+    })
+        .join("");
 }
 function decodeRow([r, l, text, style]) {
     if (typeof text === "string") {

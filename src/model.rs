@@ -100,6 +100,29 @@ pub(crate) fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// An inline image (iTerm2/kitty) placed at a terminal cell, forwarded to the
+/// browser as a `data:` URL overlay. Serializes compactly for the full-frame wire
+/// message under the `i` key (see [`crate::diff`]); the browser decodes the base64.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ImagePlacement {
+    /// Top-left cell of the image.
+    #[serde(rename = "r")]
+    pub row: u16,
+    #[serde(rename = "c")]
+    pub col: u16,
+    /// Display size in cells, if the app specified one (else the browser uses the
+    /// image's natural pixel size).
+    #[serde(rename = "w", skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u16>,
+    #[serde(rename = "h", skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u16>,
+    #[serde(rename = "m")]
+    pub mime: String,
+    /// The image file, base64.
+    #[serde(rename = "d")]
+    pub data: String,
+}
+
 /// The terminal screen as cells. `rows[r]` holds the visible cells of row `r`, with
 /// wide continuation columns already removed (so a row may be shorter than `cols`).
 #[derive(Debug, Clone, PartialEq)]
@@ -109,6 +132,8 @@ pub struct Grid {
     pub rows: Vec<Vec<StyledCell>>,
     /// Cursor (row, col) if visible.
     pub cursor: Option<(u16, u16)>,
+    /// Inline images currently placed on the screen (empty for the common case).
+    pub images: Vec<ImagePlacement>,
 }
 
 /// What a backend publishes on the frame channel: a live screen snapshot, or an

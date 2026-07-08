@@ -11,7 +11,8 @@
 //! parser (`contents_formatted`), rather than the client's `eprintln!`s corrupting
 //! the live session.
 
-use crate::model::Frame;
+use crate::images::{Interceptor, Segment};
+use crate::model::{Frame, ImagePlacement};
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
@@ -105,7 +106,7 @@ pub fn start(command: &[String]) -> Result<(watch::Receiver<Arc<Frame>>, Notifie
         let _ = out.flush();
     }
     let (msg_tx, msg_rx) = mpsc::channel::<Msg>();
-    let (frame_tx, frame_rx) = watch::channel(frame_from(&new_parser(rows, cols)));
+    let (frame_tx, frame_rx) = watch::channel(frame_from(&new_parser(rows, cols), &[]));
 
     // PTY reader → screen thread.
     {
@@ -205,6 +206,11 @@ fn screen_thread(
     let mut connected = true; // teeing shell output to the terminal
     let mut last_frame = Instant::now();
     let mut dirty = false;
+    // Inline images live outside vt100 (it drops the sequences). The interceptor
+    // pulls them from the byte stream; we place each at the cursor and hold the set
+    // until a clear/alt-screen switch evicts them.
+    let mut interceptor = Interceptor::new();
+    let mut images: Vec<ImagePlacement> = Vec::new();
     loop {
         let msg = if dirty {
             match msg_rx.recv_timeout(MIN_FRAME) {
@@ -220,10 +226,33 @@ fn screen_thread(
         };
         match msg {
             Some(Msg::Data(b)) => {
-                parser.process(&b);
+                // Tee the *raw* stream to the local terminal first — it renders
+                // sixel/kitty/iTerm2 natively, so the operator keeps seeing images.
                 if connected {
                     let _ = out.write_all(&b); // immediate, not rate-limited
                     let _ = out.flush();
+                }
+                // vt100 only sees non-image bytes; images become placements at the
+                // cursor position reached after the preceding text in this chunk.
+                for seg in interceptor.feed(&b) {
+                    match seg {
+                        Segment::Pass(bytes) => parser.process(&bytes),
+                        Segment::Image(img) => {
+                            let (row, col) = parser.screen().cursor_position();
+                            let (cols, rows) = img
+                                .cells
+                                .map_or((None, None), |(c, r)| (Some(c), Some(r)));
+                            images.push(ImagePlacement {
+                                row,
+                                col,
+                                cols,
+                                rows,
+                                mime: img.mime,
+                                data: img.base64,
+                            });
+                        }
+                        Segment::ClearImages => images.clear(),
+                    }
                 }
                 dirty = true;
             }
@@ -269,7 +298,7 @@ fn screen_thread(
             None => {}    // frame due
         }
         if dirty && last_frame.elapsed() >= MIN_FRAME {
-            let _ = frame_tx.send(frame_from(&parser));
+            let _ = frame_tx.send(frame_from(&parser, &images));
             dirty = false;
             last_frame = Instant::now();
         }
@@ -280,11 +309,12 @@ fn new_parser(rows: u16, cols: u16) -> vt100::Parser {
     vt100::Parser::new(rows, cols, 0)
 }
 
-/// Snapshot the PTY screen as a [`Frame`] for the diff/stream pipeline.
-fn frame_from(parser: &vt100::Parser) -> Arc<Frame> {
-    Arc::new(Frame::Screen(crate::parse::grid_from_screen(
-        parser.screen(),
-    )))
+/// Snapshot the PTY screen as a [`Frame`] for the diff/stream pipeline, carrying the
+/// currently-placed inline images (tracked outside vt100).
+fn frame_from(parser: &vt100::Parser, images: &[ImagePlacement]) -> Arc<Frame> {
+    let mut grid = crate::parse::grid_from_screen(parser.screen());
+    grid.images = images.to_vec();
+    Arc::new(Frame::Screen(grid))
 }
 
 /// Our controlling terminal's size as (cols, rows), if stdin is a tty.

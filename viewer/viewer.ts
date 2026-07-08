@@ -66,6 +66,17 @@ interface FullMsg {
   w: number;
   h: number;
   p?: Cur; // cursor [row, col]; absent = hidden
+  i?: ImageRef[]; // inline images placed on the screen; absent = none
+}
+// One inline image (iTerm2/kitty) placed at a cell. `m`/`d` build a data: URL;
+// `w`/`h` (cols/rows) size it, else it renders at natural pixel size.
+export interface ImageRef {
+  r: number; // top row
+  c: number; // left col
+  w?: number; // width in cells
+  h?: number; // height in cells (rows)
+  m: string; // mime type
+  d: string; // base64 image file
 }
 // On diff-family messages the cursor is TRI-STATE: absent = unchanged,
 // null = became hidden, [row, col] = moved. A cursor-only move drops `r`,
@@ -892,6 +903,22 @@ function applyFull(m: FullMsg): void {
   // repainted from the fresh cells.
   attachCanvas(m.w, m.h, screenDiv);
   redrawCanvasAll();
+
+  // Inline images overlay the grid. They ride only in full frames (an image
+  // add/remove/move forces one server-side), so rebuilding them here is authoritative;
+  // diffs never touch them. Appended after the canvas ⇒ they stack on top.
+  if (m.i?.length) screenDiv.insertAdjacentHTML("beforeend", renderImages(m.i));
+}
+
+// `<img>` overlays positioned at their cell. Given cols/rows, the image is stretched
+// to that cell box; otherwise it renders at natural pixel size.
+function renderImages(imgs: ImageRef[]): string {
+  return imgs
+    .map((im) => {
+      const size = im.w && im.h ? `width:${im.w}ch;height:calc(${im.h} * var(--lh));object-fit:fill;` : "";
+      return `<img class="inline-img" alt="" src="data:${im.m};base64,${im.d}" style="position:absolute;left:${im.c}ch;top:calc(${im.r} * var(--lh));${size}z-index:3;pointer-events:none;">`;
+    })
+    .join("");
 }
 
 function decodeRow([r, l, text, style]: WireRow): { r: number; l: number; cells: Cell[] } {

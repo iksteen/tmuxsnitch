@@ -6,6 +6,7 @@ mod config;
 mod diff;
 mod fonts;
 mod hub;
+mod images;
 mod model;
 mod parse;
 mod proto;

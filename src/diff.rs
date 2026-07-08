@@ -57,7 +57,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
-use crate::model::{Color, Frame, Grid, StyledCell};
+use crate::model::{Color, Frame, Grid, ImagePlacement, StyledCell};
 
 /// Viewer wire-protocol version. Injected into the page at serve time
 /// (`window.SHELLGLASS.proto`) and announced as the first SSE event on every
@@ -284,7 +284,12 @@ pub fn encode_delta(cur: &Frame, next: &Frame) -> Option<Arc<str>> {
     let msg = match (cur, next) {
         (Frame::Banner(old), Frame::Banner(new)) if old == new => return None,
         (_, Frame::Banner(html)) => banner_message(html),
-        (Frame::Screen(a), Frame::Screen(b)) if same_layout(a, b) => diff_message(a, b)?,
+        // An image add/remove/move rides only in the full frame, so any change to
+        // the image set forces a full (cheap: images are rare and the set is
+        // usually empty ⇒ this compares two empty vecs).
+        (Frame::Screen(a), Frame::Screen(b)) if same_layout(a, b) && a.images == b.images => {
+            diff_message(a, b)?
+        }
         (_, Frame::Screen(b)) => full_message_grid(b),
     };
     Some(Arc::from(msg))
@@ -318,6 +323,8 @@ enum WireMsg<'a> {
         h: usize,
         cur: Option<(u16, u16)>,
         rows: Vec<CellBlock<'a>>,
+        /// Inline images (empty for the common text-only case ⇒ `i` key omitted).
+        images: &'a [ImagePlacement],
     },
     /// Changed lines. Cursor is TRI-STATE: absent = unchanged, `null` = became
     /// hidden, `[row, col]` = moved. An empty `rows` drops the `r` key (a
@@ -350,12 +357,21 @@ impl Serialize for WireMsg<'_> {
         use serde::ser::SerializeMap;
         let mut m = s.serialize_map(None)?;
         match self {
-            WireMsg::Full { w, h, cur, rows } => {
+            WireMsg::Full {
+                w,
+                h,
+                cur,
+                rows,
+                images,
+            } => {
                 m.serialize_entry("d", rows)?;
                 m.serialize_entry("w", w)?;
                 m.serialize_entry("h", h)?;
                 if let Some(c) = cur {
                     m.serialize_entry("p", c)?;
+                }
+                if !images.is_empty() {
+                    m.serialize_entry("i", images)?;
                 }
             }
             WireMsg::Diff { cur, rows } => {
@@ -687,6 +703,7 @@ fn full_message_grid(g: &Grid) -> String {
         h: g.rows.len(),
         cur: g.cursor,
         rows: g.rows.iter().map(|r| cell_block(r.iter())).collect(),
+        images: &g.images,
     };
     serde_json::to_string(&msg).expect("full wire message serializes")
 }
@@ -1163,6 +1180,11 @@ fn apply_wire(prev: &Frame, msg: WireMsgIn) -> Option<Frame> {
                 cols: w,
                 rows: rows.into_iter().map(decode_block).collect(),
                 cursor: cur,
+                // ponytail: the hub doesn't yet decode the full frame's `i` images,
+                // so a re-served session shows text only. Standalone `serve` renders
+                // images (viewer decodes `i` directly). Parse `i` here to add hub
+                // support — see exp/inline-images.
+                images: Vec::new(),
             }));
         }
         WireMsgIn::Banner { html } => return Some(Frame::Banner(html)),
@@ -1243,6 +1265,7 @@ mod tests {
             cols: rows.iter().map(|r| r.chars().count()).max().unwrap_or(0) as u16,
             rows: rows.iter().map(|r| r.chars().map(cell).collect()).collect(),
             cursor: None,
+            images: Vec::new(),
         }
     }
 
