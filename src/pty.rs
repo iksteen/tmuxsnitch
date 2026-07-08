@@ -234,10 +234,10 @@ fn screen_thread(
     let mut last_frame = Instant::now();
     let mut dirty = false;
     // Inline images live outside vt100 (it drops the sequences). The interceptor
-    // pulls them from the byte stream; we place each at the cursor and write a
-    // private-use sentinel glyph into the parser grid at its top-left. That cell
-    // then rides vt100's own scrolling/eviction/reflow, so each frame we just read
-    // the sentinel's position back (see `resolve_images`) — no scroll heuristics.
+    // pulls them from the byte stream; we place each at the cursor and write
+    // sentinel glyphs into the parser grid at the image's corners. Those cells
+    // then ride vt100's own scrolling/eviction/reflow, so each frame we just read
+    // the sentinels' positions back (see `resolve_images`) — no scroll heuristics.
     let mut interceptor = Interceptor::with(intercept.0, intercept.1, intercept.2);
     let mut images: Vec<Placed> = Vec::new();
     let mut mark_seq: u32 = 0;
@@ -281,56 +281,77 @@ fn screen_thread(
                             });
                             let (cols, rows) =
                                 cells.map_or((None, None), |(c, r)| (Some(c), Some(r)));
-                            // Track the image with two sentinel glyphs — one at its
-                            // *top*-left, one at its *bottom*-left — written into the
-                            // parser grid so vt100 handles scroll/reflow/eviction for us
-                            // (`resolve_images` reads them back). Two, because each covers
-                            // a case the other can't:
-                            //   • bottom sentinel → lets the image keep *clipping* as it
-                            //     scrolls off the top (evicted only once the last row is
-                            //     gone), but it sits on the row the cursor lands on, so
-                            //     the next output can overwrite it in place;
-                            //   • top sentinel → sits in the static region above the
-                            //     cursor, surviving that in-place overwrite. A raw
-                            //     `cat image.sixel` adds no trailing newline, so the shell
-                            //     repaints its prompt straight over the bottom sentinel's
-                            //     row; the top sentinel is what keeps the image alive then.
-                            // ponytail: a 1-row-tall image (≤ one cell high) collapses the
-                            // two sentinels onto the same cursor row, so a following prompt
-                            // can still evict it — a <16px sliver the terminal half-clobbers
-                            // too, not worth contorting the cursor rule for. Give each image
-                            // a distinct pair of codepoints from Plane-16 PUA (U+100000+),
-                            // which terminal content never carries — unlike U+E000 BMP PUA,
-                            // where Nerd Font / Powerline glyphs would false-match a
-                            // sentinel. `\x1b[{col+1}G` (CHA, 1-based) re-homes to the left.
-                            let mut next_mark = || {
-                                let m = char::from_u32(0x10_0000 + mark_seq % 0xFFFE).unwrap();
-                                mark_seq = mark_seq.wrapping_add(1);
-                                m
-                            };
-                            let top = next_mark();
-                            let cha = format!("\x1b[{}G", col + 1);
-                            parser.process(cha.as_bytes());
-                            parser.process(top.encode_utf8(&mut [0u8; 4]).as_bytes());
+                            // Track the image by sampling its four corners with sentinel
+                            // glyphs written into the parser grid, so vt100 handles
+                            // scroll/reflow/eviction for us (`resolve_images` reads them
+                            // back). Corner sampling approximates a cell-based sixel
+                            // terminal's own erase semantics: text written over an image
+                            // cell erases that portion of the image, so a sentinel dying
+                            // means the terminal erased that corner too. Any surviving
+                            // corner reconstructs the top-left via its stored offset;
+                            // the image is evicted only once *every* corner is gone —
+                            // i.e. once the terminal has erased it wholesale (full
+                            // repaint, clear, scrolled fully off). Concretely:
+                            //   • a prompt repainted after a raw `cat image.sixel` (no
+                            //     trailing newline) kills the bottom-left corner — the
+                            //     other three keep the image alive, even at 1 row tall
+                            //     (the top-right/bottom-right corner outlives any prompt
+                            //     shorter than the image is wide);
+                            //   • scrolling off the top removes the top corners — the
+                            //     bottom ones reconstruct a negative row, so the viewer
+                            //     keeps clipping until even the last row is gone.
+                            // ponytail: corners only — an interior overwrite doesn't
+                            // punch a hole in the overlay; per-cell erase mirroring would
+                            // need viewer-side clip regions.
+                            // Sentinels come from Plane-16 PUA (U+100000+), which real
+                            // terminal content never carries — unlike U+E000 BMP PUA,
+                            // where Nerd Font / Powerline glyphs would false-match.
+                            let (_, screen_cols) = parser.screen().size();
+                            // Rightmost on-screen column of the image (clamped to the
+                            // grid edge, like the terminal clips a too-wide sixel); no
+                            // right corners for 1-cell-wide or unknown-size images.
+                            let right = cols
+                                .map(|w| {
+                                    let rc = (u32::from(col) + u32::from(w) - 1)
+                                        .min(u32::from(screen_cols.max(1)) - 1);
+                                    u16::try_from(rc).unwrap_or(col)
+                                })
+                                .filter(|&rc| rc > col);
+                            let mut marks = Vec::with_capacity(4);
+                            marks.push((drop_mark(&mut parser, &mut mark_seq, col), 0, 0));
+                            if let Some(rc) = right {
+                                marks.push((
+                                    drop_mark(&mut parser, &mut mark_seq, rc),
+                                    0,
+                                    rc - col,
+                                ));
+                            }
                             // Advance onto the image's last row and drop the bottom
-                            // sentinel; leave the cursor there (col 0), which is where a
+                            // corners; leave the cursor there (col 0), which is where a
                             // sixel-scrolling terminal leaves it — an emitter's own
-                            // trailing newline (chafa) then lands one line below, matching
-                            // the terminal exactly.
-                            let bottom = if let Some(h) = rows {
+                            // trailing newline (chafa) then lands one line below,
+                            // matching the terminal exactly.
+                            if let Some(h) = rows {
                                 parser.process(b"\r");
-                                parser.process(&vec![b'\n'; h.saturating_sub(1) as usize]);
-                                let b = next_mark();
-                                parser.process(cha.as_bytes());
-                                parser.process(b.encode_utf8(&mut [0u8; 4]).as_bytes());
-                                b
-                            } else {
-                                top // no height: the two coincide
-                            };
+                                parser.process(&vec![b'\n'; usize::from(h.saturating_sub(1))]);
+                                if h > 1 {
+                                    marks.push((
+                                        drop_mark(&mut parser, &mut mark_seq, col),
+                                        h - 1,
+                                        0,
+                                    ));
+                                    if let Some(rc) = right {
+                                        marks.push((
+                                            drop_mark(&mut parser, &mut mark_seq, rc),
+                                            h - 1,
+                                            rc - col,
+                                        ));
+                                    }
+                                }
+                            }
                             parser.process(b"\r");
                             images.push(Placed {
-                                top,
-                                bottom,
+                                marks,
                                 img: ImagePlacement {
                                     row: i16::try_from(row).unwrap_or(0),
                                     col,
@@ -398,15 +419,26 @@ fn new_parser(rows: u16, cols: u16) -> vt100::Parser {
     vt100::Parser::new(rows, cols, 0)
 }
 
-/// An inline image plus its two grid sentinels — Plane-16 private-use glyphs
-/// written into the parser at the image's top-left and bottom-left. They ride the
-/// vt100 grid, so scrolling, eviction, and reflow are tracked by the parser, not
-/// guessed. The bottom sentinel drives clipping as the image scrolls off the top;
-/// the top sentinel survives an in-place overwrite of the bottom row (see placement).
+/// An inline image plus its corner sentinels — Plane-16 private-use glyphs written
+/// into the parser at up to four corners of the image, each remembering its offset
+/// from the top-left as `(glyph, rows_below_top, cols_right_of_left)`. They ride
+/// the vt100 grid, so scrolling, eviction, and reflow are tracked by the parser,
+/// not guessed; any surviving corner reconstructs the image position, and the
+/// image is evicted only once all of them are gone (see placement for why that
+/// mirrors a sixel terminal's erase semantics).
 struct Placed {
-    top: char,
-    bottom: char,
+    marks: Vec<(char, u16, u16)>,
     img: ImagePlacement,
+}
+
+/// Write one sentinel glyph at `at_col` on the parser's current row (CHA is
+/// 1-based) and return it. Sentinels rotate through Plane-16 PUA.
+fn drop_mark(parser: &mut vt100::Parser, mark_seq: &mut u32, at_col: u16) -> char {
+    let m = char::from_u32(0x10_0000 + *mark_seq % 0xFFFE).unwrap();
+    *mark_seq = mark_seq.wrapping_add(1);
+    parser.process(format!("\x1b[{}G", at_col + 1).as_bytes());
+    parser.process(m.encode_utf8(&mut [0u8; 4]).as_bytes());
+    m
 }
 
 /// Snapshot the PTY screen as a [`Frame`], resolving each image's sentinel to its
@@ -418,39 +450,41 @@ fn frame_from(parser: &vt100::Parser, images: &mut Vec<Placed>) -> Arc<Frame> {
     Arc::new(Frame::Screen(grid))
 }
 
-/// For each tracked image, locate its sentinels in the grid and set its top-left.
-/// Prefer the top sentinel (its row *is* the image top); fall back to the bottom
-/// one (top row = its row minus the image height, going negative once the image is
-/// partially scrolled off the top, so the viewer clips it). Blank both sentinel
-/// cells so they never render (the overlay covers them, but a transparent image
-/// would otherwise show them). Drop images with neither sentinel left — fully
-/// scrolled off, or cleared.
+/// For each tracked image, locate its surviving corner sentinels in the grid and
+/// reconstruct the top-left from the best one (placement order: top-left,
+/// top-right, bottom-left, bottom-right — a bottom corner reconstructs a negative
+/// row once the image has partially scrolled off the top, so the viewer clips it).
+/// Blank every sentinel cell found so it never renders (the overlay covers it, but
+/// a transparent image would otherwise show it). Drop images with no corner left —
+/// fully scrolled off, cleared, or wholly overwritten.
 fn resolve_images(grid: &mut crate::model::Grid, images: &mut Vec<Placed>) {
     images.retain_mut(|p| {
-        let mut top = None;
-        let mut bottom = None;
+        let mut found: Option<(i16, u16)> = None; // reconstructed top-left
+        let mut best = usize::MAX;
         for (r, row) in grid.rows.iter_mut().enumerate() {
             for (c, cell) in row.iter_mut().enumerate() {
-                if cell.text.starts_with(p.top) {
-                    top = Some((r, c));
-                    *cell = crate::model::StyledCell::default(); // scrub
-                } else if cell.text.starts_with(p.bottom) {
-                    bottom = Some((r, c));
+                let Some(ch) = cell.text.chars().next() else {
+                    continue;
+                };
+                if let Some(i) = p.marks.iter().position(|&(m, _, _)| m == ch) {
+                    if i < best {
+                        let (_, dr, dc) = p.marks[i];
+                        best = i;
+                        found = Some((
+                            r as i16 - i16::try_from(dr).unwrap_or(i16::MAX),
+                            (c as u16).saturating_sub(dc),
+                        ));
+                    }
                     *cell = crate::model::StyledCell::default(); // scrub
                 }
             }
         }
-        if let Some((r, c)) = top {
-            p.img.row = r as i16;
-            p.img.col = c as u16;
-            true
-        } else if let Some((r, c)) = bottom {
-            let h = p.img.rows.unwrap_or(1).max(1);
-            p.img.row = r as i16 - i16::try_from(h - 1).unwrap_or(0);
-            p.img.col = c as u16;
+        if let Some((row, col)) = found {
+            p.img.row = row;
+            p.img.col = col;
             true
         } else {
-            false // both sentinels gone → evict
+            false // every corner gone → evict
         }
     });
     grid.images = images.iter().map(|p| p.img.clone()).collect();
@@ -674,21 +708,24 @@ mod tests {
         assert!(!da_seen(b"\x1b_Gi=1;OK\x1b\\"));
     }
 
-    // A 2-row-tall image whose bottom sentinel is `mark`. The top sentinel is a
-    // distinct glyph the caller doesn't place, so resolution falls back to the
-    // bottom one — exercising the clip-as-it-scrolls path.
+    fn img_2x2() -> ImagePlacement {
+        ImagePlacement {
+            row: 0,
+            col: 0,
+            cols: Some(2),
+            rows: Some(2),
+            mime: "image/png".into(),
+            data: String::new(),
+        }
+    }
+
+    // A 2-row-tall image tracked only by its bottom-left corner (the top corner's
+    // glyph is never written to the grid), exercising the clip-as-it-scrolls
+    // fallback path.
     fn placed(mark: char) -> Placed {
         Placed {
-            top: '\u{E7FF}', // never written to the grid in these tests
-            bottom: mark,
-            img: ImagePlacement {
-                row: 0,
-                col: 0,
-                cols: Some(2),
-                rows: Some(2),
-                mime: "image/png".into(),
-                data: String::new(),
-            },
+            marks: vec![('\u{10FFF0}', 0, 0), (mark, 1, 0)],
+            img: img_2x2(),
         }
     }
 
@@ -732,39 +769,96 @@ mod tests {
         assert!(g.images.is_empty());
     }
 
-    // The top sentinel keeps the image alive when the bottom one is overwritten in
-    // place — e.g. a shell prompt repainted right after a raw `cat image.sixel`,
-    // which adds no trailing newline. The image reports its top row (from the top
-    // sentinel) and is not evicted.
+    // A surviving top corner keeps the image alive when the bottom-left corner is
+    // overwritten in place — e.g. a shell prompt repainted right after a raw
+    // `cat image.sixel`, which adds no trailing newline. The image reports its top
+    // row (reconstructed from the top corner) and is not evicted.
     #[test]
-    fn top_sentinel_survives_bottom_overwrite() {
-        let (top, bottom) = ('\u{E000}', '\u{E001}');
+    fn top_corner_survives_bottom_overwrite() {
+        let (top, bottom) = ('\u{100000}', '\u{100001}');
         let mut parser = new_parser(4, 10);
-        // top sentinel on row 0, bottom sentinel on row 1 (a 2-row image).
+        // top corner on row 0, bottom corner on row 1 (a 2-row image).
         parser.process(top.encode_utf8(&mut [0u8; 4]).as_bytes());
         parser.process(b"\r\n");
         parser.process(bottom.encode_utf8(&mut [0u8; 4]).as_bytes());
         parser.process(b"\r"); // cursor at col 0 of the bottom row (as after placement)
         let mut imgs = vec![Placed {
-            top,
-            bottom,
+            marks: vec![(top, 0, 0), (bottom, 1, 0)],
+            img: img_2x2(),
+        }];
+
+        // A prompt repaints the bottom corner's row, clobbering that sentinel.
+        parser.process(b"user@host$ ");
+        let Frame::Screen(g) = &*frame_from(&parser, &mut imgs) else {
+            panic!("screen")
+        };
+        // Still tracked, via the top corner, at its true top row.
+        assert_eq!(g.images.len(), 1);
+        assert_eq!((g.images[0].row, g.images[0].col), (0, 0));
+    }
+
+    // A 1-row image wider than the prompt survives via its top-right corner: the
+    // prompt erases the left corner (and, in the terminal, that part of the
+    // image), the right corner reconstructs the original top-left.
+    #[test]
+    fn one_row_image_survives_prompt_via_right_corner() {
+        let (left, right) = ('\u{100000}', '\u{100001}');
+        let mut parser = new_parser(4, 30);
+        // a 20-cell-wide, 1-row image at col 0: corners at cols 0 and 19.
+        parser.process(left.encode_utf8(&mut [0u8; 4]).as_bytes());
+        parser.process(b"\x1b[20G");
+        parser.process(right.encode_utf8(&mut [0u8; 4]).as_bytes());
+        parser.process(b"\r");
+        let mut imgs = vec![Placed {
+            marks: vec![(left, 0, 0), (right, 0, 19)],
             img: ImagePlacement {
                 row: 0,
                 col: 0,
-                cols: Some(2),
-                rows: Some(2),
+                cols: Some(20),
+                rows: Some(1),
                 mime: "image/png".into(),
                 data: String::new(),
             },
         }];
 
-        // A prompt repaints the bottom sentinel's row, clobbering that sentinel.
+        // The prompt covers cols 0..11 — the left corner dies, the right survives.
         parser.process(b"user@host$ ");
         let Frame::Screen(g) = &*frame_from(&parser, &mut imgs) else {
             panic!("screen")
         };
-        // Still tracked, via the top sentinel, at its true top row.
         assert_eq!(g.images.len(), 1);
         assert_eq!((g.images[0].row, g.images[0].col), (0, 0));
+    }
+
+    // A 1-row image narrower than what overwrites it is evicted — every corner is
+    // erased, which is exactly when the terminal has erased the whole image too.
+    #[test]
+    fn fully_overwritten_image_evicts() {
+        let (left, right) = ('\u{100000}', '\u{100001}');
+        let mut parser = new_parser(4, 30);
+        // a 5-cell-wide, 1-row image: corners at cols 0 and 4.
+        parser.process(left.encode_utf8(&mut [0u8; 4]).as_bytes());
+        parser.process(b"\x1b[5G");
+        parser.process(right.encode_utf8(&mut [0u8; 4]).as_bytes());
+        parser.process(b"\r");
+        let mut imgs = vec![Placed {
+            marks: vec![(left, 0, 0), (right, 0, 4)],
+            img: ImagePlacement {
+                row: 0,
+                col: 0,
+                cols: Some(5),
+                rows: Some(1),
+                mime: "image/png".into(),
+                data: String::new(),
+            },
+        }];
+
+        // An 11-char prompt paints across the entire image row.
+        parser.process(b"user@host$ ");
+        let Frame::Screen(g) = &*frame_from(&parser, &mut imgs) else {
+            panic!("screen")
+        };
+        assert!(g.images.is_empty());
+        assert!(imgs.is_empty());
     }
 }
