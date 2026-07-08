@@ -46,8 +46,6 @@ pub enum Segment {
     Pass(Vec<u8>),
     /// A fully-received inline image, to place at the current cursor cell.
     Image(Image),
-    /// A screen clear / alt-screen toggle — drop all currently-placed images.
-    ClearImages,
 }
 
 const ITERM: &[u8] = b"\x1b]1337;";
@@ -125,13 +123,6 @@ impl Interceptor {
                 push_pass(&mut out, &data[pass_start..i]);
                 self.seq = rest.to_vec();
                 return out;
-            } else if let Some(len) = clear_len(rest) {
-                // Screen clear / alt-screen toggle: pass it through *and* drop images.
-                push_pass(&mut out, &data[pass_start..i + len]);
-                out.push(Segment::ClearImages);
-                i += len;
-                pass_start = i;
-                continue;
             } else {
                 i += 1;
                 continue;
@@ -342,23 +333,6 @@ fn cells_from(c: Option<&String>, r: Option<&String>) -> Option<(u16, u16)> {
     Some((c, r))
 }
 
-/// Screen-clear sequences whose presence should evict all placed images: `ESC[2J`,
-/// `ESC[3J`, and the alt-screen toggles. Returns the byte length if `rest` starts
-/// with one.
-fn clear_len(rest: &[u8]) -> Option<usize> {
-    const CLEARS: &[&[u8]] = &[
-        b"\x1b[2J",
-        b"\x1b[3J",
-        b"\x1b[?1049h",
-        b"\x1b[?1049l",
-        b"\x1b[?1047h",
-        b"\x1b[?1047l",
-        b"\x1b[?47h",
-        b"\x1b[?47l",
-    ];
-    CLEARS.iter().find(|c| rest.starts_with(c)).map(|c| c.len())
-}
-
 /// Find the end (one past the terminator) of an image sequence starting at `s[0]`.
 /// iTerm2 ends at BEL or ST; kitty ends at ST (`ESC \`).
 fn find_terminator(s: &[u8], marker: Marker) -> Option<usize> {
@@ -520,10 +494,20 @@ mod tests {
     }
 
     #[test]
-    fn clear_sequences_emit_clearimages() {
+    fn non_image_escapes_pass_through_untouched() {
+        // The interceptor only extracts images; a clear/alt-screen sequence is not
+        // its concern (image eviction rides the grid sentinel now), so it must pass
+        // straight through to vt100.
         let mut it = Interceptor::new();
-        let segs = it.feed(b"abc\x1b[2Jdef");
-        assert!(segs.contains(&Segment::ClearImages));
-        assert!(segs.contains(&Segment::Pass(b"def".to_vec())));
+        let passed: Vec<u8> = it
+            .feed(b"abc\x1b[2Jdef")
+            .into_iter()
+            .filter_map(|s| match s {
+                Segment::Pass(b) => Some(b),
+                Segment::Image(_) => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(passed, b"abc\x1b[2Jdef");
     }
 }

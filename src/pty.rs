@@ -112,7 +112,7 @@ pub fn start(command: &[String]) -> Result<(watch::Receiver<Arc<Frame>>, Notifie
         let _ = out.flush();
     }
     let (msg_tx, msg_rx) = mpsc::channel::<Msg>();
-    let (frame_tx, frame_rx) = watch::channel(frame_from(&new_parser(rows, cols), &[]));
+    let (frame_tx, frame_rx) = watch::channel(frame_from(&new_parser(rows, cols), &mut Vec::new()));
 
     // PTY reader → screen thread.
     {
@@ -219,10 +219,13 @@ fn screen_thread(
     let mut last_frame = Instant::now();
     let mut dirty = false;
     // Inline images live outside vt100 (it drops the sequences). The interceptor
-    // pulls them from the byte stream; we place each at the cursor and hold the set
-    // until a clear/alt-screen switch evicts them.
+    // pulls them from the byte stream; we place each at the cursor and write a
+    // private-use sentinel glyph into the parser grid at its top-left. That cell
+    // then rides vt100's own scrolling/eviction/reflow, so each frame we just read
+    // the sentinel's position back (see `resolve_images`) — no scroll heuristics.
     let mut interceptor = Interceptor::new();
-    let mut images: Vec<ImagePlacement> = Vec::new();
+    let mut images: Vec<Placed> = Vec::new();
+    let mut mark_seq: u32 = 0;
     loop {
         let msg = if dirty {
             match msg_rx.recv_timeout(MIN_FRAME) {
@@ -263,26 +266,35 @@ fn screen_thread(
                             });
                             let (cols, rows) =
                                 cells.map_or((None, None), |(c, r)| (Some(c), Some(r)));
-                            images.push(ImagePlacement {
-                                row,
-                                col,
-                                cols,
-                                rows,
-                                mime: img.mime,
-                                data: img.base64,
+                            // Sentinel glyph at the top-left, so vt100 tracks the
+                            // image's cell as it scrolls/reflows. Unique per live
+                            // image (private-use area is 6400 codepoints; rotate).
+                            let mark = char::from_u32(0xE000 + mark_seq % 6400).unwrap();
+                            mark_seq = mark_seq.wrapping_add(1);
+                            parser.process(mark.encode_utf8(&mut [0u8; 4]).as_bytes());
+                            images.push(Placed {
+                                mark,
+                                img: ImagePlacement {
+                                    row,
+                                    col,
+                                    cols,
+                                    rows,
+                                    mime: img.mime,
+                                    data: img.base64,
+                                },
                             });
                             // Advance the parser's cursor onto the image's *last*
                             // row, matching how a terminal leaves the cursor after
                             // displaying one: emitters (chafa, imgcat) then add their
                             // own trailing newline to land just below it. Feeding the
                             // full height would leave an extra blank line. `\r` first
-                            // so the column resets like a fresh line.
+                            // so the column resets (and cancels the sentinel's pending
+                            // wrap) like a fresh line.
                             if let Some(h) = rows {
                                 parser.process(b"\r");
                                 parser.process(&vec![b'\n'; h.saturating_sub(1) as usize]);
                             }
                         }
-                        Segment::ClearImages => images.clear(),
                     }
                 }
                 dirty = true;
@@ -329,7 +341,7 @@ fn screen_thread(
             None => {}    // frame due
         }
         if dirty && last_frame.elapsed() >= MIN_FRAME {
-            let _ = frame_tx.send(frame_from(&parser, &images));
+            let _ = frame_tx.send(frame_from(&parser, &mut images));
             dirty = false;
             last_frame = Instant::now();
         }
@@ -340,12 +352,41 @@ fn new_parser(rows: u16, cols: u16) -> vt100::Parser {
     vt100::Parser::new(rows, cols, 0)
 }
 
-/// Snapshot the PTY screen as a [`Frame`] for the diff/stream pipeline, carrying the
-/// currently-placed inline images (tracked outside vt100).
-fn frame_from(parser: &vt100::Parser, images: &[ImagePlacement]) -> Arc<Frame> {
+/// An inline image plus its grid sentinel. The sentinel — a private-use glyph
+/// written into the parser at the image's top-left — rides the vt100 grid, so
+/// scrolling, eviction, and reflow are tracked by the parser, not guessed.
+struct Placed {
+    mark: char,
+    img: ImagePlacement,
+}
+
+/// Snapshot the PTY screen as a [`Frame`], resolving each image's sentinel to its
+/// current cell and dropping images whose sentinel is gone (scrolled off the top,
+/// cleared, or overwritten).
+fn frame_from(parser: &vt100::Parser, images: &mut Vec<Placed>) -> Arc<Frame> {
     let mut grid = crate::parse::grid_from_screen(parser.screen());
-    grid.images = images.to_vec();
+    resolve_images(&mut grid, images);
     Arc::new(Frame::Screen(grid))
+}
+
+/// For each tracked image, find its sentinel in the grid → that's its top-left now;
+/// blank the sentinel cell so it never renders (the overlay covers it, but a
+/// transparent image would otherwise show it). Drop images with no sentinel left.
+fn resolve_images(grid: &mut crate::model::Grid, images: &mut Vec<Placed>) {
+    images.retain_mut(|p| {
+        for (r, row) in grid.rows.iter_mut().enumerate() {
+            for (c, cell) in row.iter_mut().enumerate() {
+                if cell.text.starts_with(p.mark) {
+                    p.img.row = r as u16;
+                    p.img.col = c as u16;
+                    *cell = crate::model::StyledCell::default(); // scrub
+                    return true;
+                }
+            }
+        }
+        false // sentinel gone → evict
+    });
+    grid.images = images.iter().map(|p| p.img.clone()).collect();
 }
 
 /// Controlling-terminal geometry: cell counts plus the PTY's pixel dimensions.
@@ -430,5 +471,56 @@ impl RawMode {
                 &rawt,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn placed(mark: char) -> Placed {
+        Placed {
+            mark,
+            img: ImagePlacement {
+                row: 0,
+                col: 0,
+                cols: Some(2),
+                rows: Some(1),
+                mime: "image/png".into(),
+                data: String::new(),
+            },
+        }
+    }
+
+    /// The grid sentinel rides vt100's own scrolling: it moves up as the screen
+    /// scrolls and disappears (evicting the image) once it passes the top.
+    #[test]
+    fn sentinel_tracks_scroll_and_evicts() {
+        let mut parser = new_parser(3, 10); // 3 rows
+        let mark = '\u{E000}';
+        parser.process(b"\r\n\r\n"); // cursor to the last row
+        parser.process(mark.encode_utf8(&mut [0u8; 4]).as_bytes());
+        let mut imgs = vec![placed(mark)];
+
+        // Placed on the last row; the sentinel cell is scrubbed out of the wire grid.
+        let Frame::Screen(g) = &*frame_from(&parser, &mut imgs) else {
+            panic!("screen")
+        };
+        assert_eq!((g.images[0].row, g.images[0].col), (2, 0));
+        assert!(g.rows[2].first().is_none_or(|c| c.text.is_empty()));
+
+        // One scroll (newline on the last row) lifts the sentinel to row 1.
+        parser.process(b"\r\nx");
+        let Frame::Screen(g) = &*frame_from(&parser, &mut imgs) else {
+            panic!("screen")
+        };
+        assert_eq!(g.images[0].row, 1);
+
+        // Two more scrolls push it off the top → the image is evicted.
+        parser.process(b"\r\n\r\n");
+        let Frame::Screen(g) = &*frame_from(&parser, &mut imgs) else {
+            panic!("screen")
+        };
+        assert!(g.images.is_empty());
     }
 }
