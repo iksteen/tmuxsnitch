@@ -638,25 +638,79 @@ export function patchCells(state, dp) {
     }
     return dirty;
 }
+let paintScheduled = false;
+const dirtyRows = new Set();
+let rebuildDims = null;
+let rebuildBanner = null;
+let lastFlush = 0;
+const TARGET_LOAD = 0.7;
+const MAX_INTERVAL = 250;
+let paintCost = 16;
+const raf = (cb) => (typeof requestAnimationFrame !== "undefined" ? requestAnimationFrame : (f) => setTimeout(f, 16))(cb);
+const clock = () => (typeof performance !== "undefined" ? performance.now() : 0);
+function schedulePaint() {
+    if (paintScheduled)
+        return;
+    paintScheduled = true;
+    raf(flushPaint);
+}
+function flushPaint() {
+    const now = clock();
+    const interval = Math.min(paintCost / TARGET_LOAD, MAX_INTERVAL);
+    if (!rebuildDims && rebuildBanner === null && now - lastFlush < interval) {
+        raf(flushPaint);
+        return;
+    }
+    lastFlush = now;
+    paintScheduled = false;
+    if (rebuildBanner !== null) {
+        screenEl.innerHTML = rebuildBanner;
+        rebuildBanner = null;
+        rebuildDims = null;
+        dirtyRows.clear();
+        return;
+    }
+    const t0 = clock();
+    if (rebuildDims) {
+        paintFull(rebuildDims);
+        rebuildDims = null;
+        dirtyRows.clear();
+    }
+    else {
+        for (const r of dirtyRows) {
+            const el = screen.rowEls[r];
+            if (!el)
+                continue;
+            el.innerHTML = renderRow(screen.cells[r] ?? [], cursorCol(screen.cur, r));
+            redrawCanvasRow(r);
+        }
+        dirtyRows.clear();
+    }
+    raf(() => {
+        paintCost += 0.3 * (clock() - t0 - paintCost);
+    });
+}
 function applyFull(m) {
-    const cur = m.p ?? null;
-    const rows = m.d.map(decodeBlock);
-    let html = `<div class="screen" style="width:${m.w}ch;height:calc(${m.h} * var(--lh));">`;
-    for (let r = 0; r < rows.length; r++) {
-        html += `<div class="row">${renderRow(rows[r], cursorCol(cur, r))}</div>`;
+    screen = { cells: m.d.map(decodeBlock), cur: m.p ?? null, rowEls: [] };
+    rebuildDims = { w: m.w, h: m.h, i: m.i };
+    rebuildBanner = null;
+    dirtyRows.clear();
+    schedulePaint();
+}
+function paintFull(dims) {
+    const cur = screen.cur;
+    let html = `<div class="screen" style="width:${dims.w}ch;height:calc(${dims.h} * var(--lh));">`;
+    for (let r = 0; r < screen.cells.length; r++) {
+        html += `<div class="row">${renderRow(screen.cells[r], cursorCol(cur, r))}</div>`;
     }
     html += "</div>";
     screenEl.innerHTML = html;
     const screenDiv = screenEl.firstElementChild;
-    screen = {
-        cells: rows,
-        cur,
-        rowEls: Array.from(screenDiv.children),
-    };
-    attachCanvas(m.w, m.h, screenDiv);
+    screen.rowEls = Array.from(screenDiv.children);
+    attachCanvas(dims.w, dims.h, screenDiv);
     redrawCanvasAll();
-    if (m.i?.length)
-        screenDiv.insertAdjacentHTML("beforeend", renderImages(m.i));
+    if (dims.i?.length)
+        screenDiv.insertAdjacentHTML("beforeend", renderImages(dims.i));
 }
 function renderImages(imgs) {
     return imgs
@@ -678,13 +732,9 @@ function decodeRow([r, l, text, style]) {
 }
 function applyPatches(cur, rows) {
     const dirty = patchCells(screen, { cur, rows });
-    for (const r of dirty) {
-        const el = screen.rowEls[r];
-        if (!el)
-            continue;
-        el.innerHTML = renderRow(screen.cells[r] ?? [], cursorCol(screen.cur, r));
-        redrawCanvasRow(r);
-    }
+    for (const r of dirty)
+        dirtyRows.add(r);
+    schedulePaint();
 }
 function applyDiff(m) {
     applyPatches(m.p, (m.r ?? []).map(decodeRow));
@@ -701,8 +751,11 @@ function applyLine(m) {
     applyPatches(m.p, [decodeRow(m.l)]);
 }
 function applyBanner(m) {
-    screenEl.innerHTML = m.b;
     screen = { cells: [], cur: null, rowEls: [] };
+    rebuildBanner = m.b;
+    rebuildDims = null;
+    dirtyRows.clear();
+    schedulePaint();
 }
 export function apply(m) {
     if ("v" in m) {

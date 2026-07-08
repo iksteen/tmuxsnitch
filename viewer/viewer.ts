@@ -883,31 +883,123 @@ export function patchCells(
   return dirty;
 }
 
+// Paint is decoupled from apply. A message updates the in-memory `screen` model
+// synchronously (cheap), marks what changed, and schedules one rAF flush; the flush
+// does the expensive DOM/canvas work once per frame. cmatrix-class output pushes
+// ~30fps of near-full-screen diffs; the browser buffers several SSE events while the
+// main thread is busy and, without this, would run their innerHTML+canvas paints
+// back-to-back and never yield — pinning the thread at ~10fps. Coalescing collapses
+// every message queued between two rAFs into a single repaint of the union of dirty
+// rows (or one full rebuild) and yields the thread between frames. A hidden tab
+// (rAF paused) still applies state but skips all paint — dirtyRows is a Set of row
+// indices, so it can't grow past the row count.
+let paintScheduled = false;
+const dirtyRows = new Set<number>();
+let rebuildDims: { w: number; h: number; i?: ImageRef[] } | null = null;
+let rebuildBanner: string | null = null;
+let lastFlush = 0;
+
+// Adaptive frame shaping. A full-screen 30fps repaint (cmatrix, `yes`, a scrolling
+// build log) rebuilds thousands of positioned spans per frame; in a real (GPU) browser
+// one such frame costs tens of ms of layout+paint+composite, so painting every server
+// frame pins the main thread at 100% and the tab stops responding. Rather than a fixed
+// fps cap, we *measure* each paint's real cost (start-of-paint → the next animation
+// frame, which the browser fires only once the previous frame's layout/paint/composite
+// has committed) and pace the next paint so painting occupies at most TARGET_LOAD of
+// wall-clock, leaving the rest for input + message decode. Cheap frames (interactive
+// typing) measure ~one vsync and aren't throttled; expensive frames stretch the
+// interval out — traffic-shaping on frame cost, self-tuning as the cost rises or falls.
+// We always render the *latest* coalesced state and drop the intermediate animation
+// frames, the same "show latest, skip ticks" the server's MIN_FRAME does to the PTY;
+// the screen always converges to the true current state.
+const TARGET_LOAD = 0.7; // spend ≤70% of wall-clock painting
+// ponytail: if a single frame measures slower than MAX_INTERVAL×LOAD, we cap the pacing
+// interval here (≈4fps floor) and knowingly run over budget rather than stall to
+// multi-second gaps — a backstop for a pathologically slow client, not the normal path.
+const MAX_INTERVAL = 250;
+let paintCost = 16; // EWMA of measured frame cost (ms); seeds at one 60fps frame
+
+const raf = (cb: () => void) =>
+  (typeof requestAnimationFrame !== "undefined" ? requestAnimationFrame : (f: () => void) => setTimeout(f, 16))(cb);
+const clock = () => (typeof performance !== "undefined" ? performance.now() : 0);
+
+function schedulePaint(): void {
+  if (paintScheduled) return;
+  paintScheduled = true;
+  raf(flushPaint);
+}
+
+function flushPaint(): void {
+  // A structural rebuild (full frame / banner) always paints now — rare, and it resets
+  // everything. Per-row diffs are shaped: if the pacing interval hasn't elapsed, re-arm
+  // and coalesce more into the next paint (dirtyRows/cursor persist, stays scheduled).
+  const now = clock();
+  const interval = Math.min(paintCost / TARGET_LOAD, MAX_INTERVAL);
+  if (!rebuildDims && rebuildBanner === null && now - lastFlush < interval) {
+    raf(flushPaint);
+    return;
+  }
+  lastFlush = now;
+  paintScheduled = false;
+
+  if (rebuildBanner !== null) {
+    screenEl.innerHTML = rebuildBanner;
+    rebuildBanner = null;
+    rebuildDims = null;
+    dirtyRows.clear();
+    return; // a one-off banner isn't representative steady paint cost — don't sample it
+  }
+  const t0 = clock();
+  if (rebuildDims) {
+    paintFull(rebuildDims);
+    rebuildDims = null;
+    dirtyRows.clear();
+  } else {
+    for (const r of dirtyRows) {
+      const el = screen.rowEls[r];
+      if (!el) continue;
+      el.innerHTML = renderRow(screen.cells[r] ?? [], cursorCol(screen.cur, r));
+      redrawCanvasRow(r);
+    }
+    dirtyRows.clear();
+  }
+  // Sample this frame's true cost once the browser commits it (the next animation frame
+  // fires only after layout+paint+composite) and fold it into the EWMA (α=0.3).
+  raf(() => {
+    paintCost += 0.3 * (clock() - t0 - paintCost);
+  });
+}
+
 function applyFull(m: FullMsg): void {
-  const cur = m.p ?? null;
-  const rows = m.d.map(decodeBlock);
-  let html = `<div class="screen" style="width:${m.w}ch;height:calc(${m.h} * var(--lh));">`;
-  for (let r = 0; r < rows.length; r++) {
-    html += `<div class="row">${renderRow(rows[r], cursorCol(cur, r))}</div>`;
+  // Update the model now so diffs queued behind this full patch the right cells;
+  // the DOM rebuild is deferred to the flush (which reads screen.cells).
+  screen = { cells: m.d.map(decodeBlock), cur: m.p ?? null, rowEls: [] };
+  rebuildDims = { w: m.w, h: m.h, i: m.i };
+  rebuildBanner = null;
+  dirtyRows.clear(); // a full frame supersedes any pending per-row dirt
+  schedulePaint();
+}
+
+function paintFull(dims: { w: number; h: number; i?: ImageRef[] }): void {
+  const cur = screen.cur;
+  let html = `<div class="screen" style="width:${dims.w}ch;height:calc(${dims.h} * var(--lh));">`;
+  for (let r = 0; r < screen.cells.length; r++) {
+    html += `<div class="row">${renderRow(screen.cells[r], cursorCol(cur, r))}</div>`;
   }
   html += "</div>";
   screenEl.innerHTML = html;
 
   const screenDiv = screenEl.firstElementChild as HTMLElement;
-  screen = {
-    cells: rows,
-    cur,
-    rowEls: Array.from(screenDiv.children) as HTMLElement[],
-  };
+  screen.rowEls = Array.from(screenDiv.children) as HTMLElement[];
   // The canvas lives inside .screen (rebuilt each full frame), sized to the grid, and
   // repainted from the fresh cells.
-  attachCanvas(m.w, m.h, screenDiv);
+  attachCanvas(dims.w, dims.h, screenDiv);
   redrawCanvasAll();
 
   // Inline images overlay the grid. They ride only in full frames (an image
   // add/remove/move forces one server-side), so rebuilding them here is authoritative;
   // diffs never touch them. Appended after the canvas ⇒ they stack on top.
-  if (m.i?.length) screenDiv.insertAdjacentHTML("beforeend", renderImages(m.i));
+  if (dims.i?.length) screenDiv.insertAdjacentHTML("beforeend", renderImages(dims.i));
 }
 
 // `<img>` overlays positioned at their cell. Given cols/rows, the image is fit into
@@ -938,12 +1030,8 @@ function decodeRow([r, l, text, style]: WireRow): { r: number; l: number; cells:
 // The cursor (`m.p`) passes through as-is: undefined = unchanged, null = hidden.
 function applyPatches(cur: Cur | undefined, rows: { r: number; l: number; cells: Cell[] }[]): void {
   const dirty = patchCells(screen, { cur, rows });
-  for (const r of dirty) {
-    const el = screen.rowEls[r];
-    if (!el) continue;
-    el.innerHTML = renderRow(screen.cells[r] ?? [], cursorCol(screen.cur, r));
-    redrawCanvasRow(r);
-  }
+  for (const r of dirty) dirtyRows.add(r);
+  schedulePaint();
 }
 
 function applyDiff(m: DiffMsg): void {
@@ -963,8 +1051,11 @@ function applyLine(m: LineMsg): void {
 }
 
 function applyBanner(m: BannerMsg): void {
-  screenEl.innerHTML = m.b;
   screen = { cells: [], cur: null, rowEls: [] };
+  rebuildBanner = m.b;
+  rebuildDims = null;
+  dirtyRows.clear();
+  schedulePaint();
 }
 
 // Tag-free dispatch on which payload key is present. `c` (cell) MUST come first —
