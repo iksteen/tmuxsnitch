@@ -8,15 +8,27 @@
 //! escape sequences across calls on its own. So the only thing this scanner has to
 //! reassemble across PTY read boundaries is an image sequence itself.
 //!
-//! MVP scope (see exp/inline-images): direct base64 payloads in a browser-native
-//! image format (PNG/JPEG/GIF/WebP) only.
-//! - kitty: `t=d` (direct) transfers with `f=100` (PNG) — file/shared-mem mediums
-//!   and raw-pixel formats (`f=24/32`) are skipped, since the browser can't render
-//!   a bare pixel buffer and we won't read the sender's local files.
-//! - iTerm2 payloads are always a direct base64 image file, so all are handled.
+//! Handled: iTerm2 OSC 1337 (always a direct base64 image file); kitty `_G` in
+//! PNG (`f=100`) or raw RGB/RGBA (`f=24`/`f=32`, re-encoded to PNG) over any of the
+//! direct (`t=d`), file (`t=f`/`t=t`), or shared-memory (`t=s`) transmission
+//! mediums. For the file/shm mediums the payload is a path/name, so we read the
+//! same bytes the real terminal reads — read-only, since the terminal keeps
+//! rendering locally and owns any cleanup, so we never race its delete.
 
 use base64::Engine;
-use base64::engine::general_purpose::STANDARD as B64;
+use base64::engine::DecodePaddingMode;
+use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig};
+
+/// Standard base64 that *encodes* with canonical `=` padding but *decodes*
+/// leniently. Terminal graphics emitters (notably `kitten icat`) send unpadded
+/// base64, which the stock `STANDARD` engine rejects — so decode must be
+/// padding-indifferent or real images silently fail to parse.
+const B64: GeneralPurpose = GeneralPurpose::new(
+    &base64::alphabet::STANDARD,
+    GeneralPurposeConfig::new()
+        .with_encode_padding(true)
+        .with_decode_padding_mode(DecodePaddingMode::Indifferent),
+);
 
 /// One extracted inline image, ready to hand the browser as a `data:` URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +84,11 @@ struct KittyAccum {
     px: Option<(u32, u32)>,
     /// `o=z`: the payload is zlib-compressed.
     zlib: bool,
+    /// How the transmitted bytes reach us (the `t` key).
+    medium: KittyMedium,
+    /// `S`/`O`: byte size/offset of the data within a file/shm object.
+    size: Option<usize>,
+    offset: usize,
 }
 
 /// The kitty pixel formats we can turn into something the browser renders.
@@ -82,7 +99,24 @@ enum KittyFmt {
     Rgba,
     /// `f=24`: raw RGB pixels — re-encode as PNG.
     Rgb,
-    /// Unknown format or non-direct transfer medium — drop.
+    /// Unknown format — drop.
+    Unsupported,
+}
+
+/// How the transmitted bytes reach us — the kitty `t` key. For the indirect
+/// mediums the base64 payload is a *reference* (path / shm name), not the image,
+/// so we read the referenced bytes ourselves — the same bytes the real terminal
+/// reads. Read-only: the terminal keeps rendering locally and owns any cleanup, so
+/// we never race its delete.
+enum KittyMedium {
+    /// `t=d` (or absent): the payload is the base64 image itself.
+    Direct,
+    /// `t=f`/`t=t`: the payload is a base64 filesystem path (`t=t` also asks the
+    /// terminal to delete after reading; we leave that to the real terminal).
+    File,
+    /// `t=s`: the payload is a base64 POSIX shared-memory object name.
+    Shm,
+    /// Unknown transmission medium — drop.
     Unsupported,
 }
 
@@ -176,20 +210,28 @@ impl Interceptor {
         // carries the format/medium/size control keys (continuation chunks only
         // repeat `m`).
         if self.kitty.is_none() {
-            let direct = ctrl.get("t").map(|t| t == "d").unwrap_or(true); // default d=direct
             let fmt = match ctrl.get("f").map(String::as_str) {
                 Some("100") => KittyFmt::Png,
                 Some("32") | None => KittyFmt::Rgba, // kitty's default format is 32
                 Some("24") => KittyFmt::Rgb,
                 _ => KittyFmt::Unsupported,
             };
+            let medium = match ctrl.get("t").map(String::as_str) {
+                None | Some("d") => KittyMedium::Direct, // default d=direct
+                Some("f" | "t") => KittyMedium::File,
+                Some("s") => KittyMedium::Shm,
+                _ => KittyMedium::Unsupported,
+            };
             self.kitty = Some(KittyAccum {
                 payload: String::new(),
                 cells: cells_from(ctrl.get("c"), ctrl.get("r")),
-                fmt: if direct { fmt } else { KittyFmt::Unsupported },
+                fmt,
                 px: cells_from(ctrl.get("s"), ctrl.get("v"))
                     .map(|(w, h)| (u32::from(w), u32::from(h))),
                 zlib: ctrl.get("o").map(|o| o == "z").unwrap_or(false),
+                medium,
+                size: ctrl.get("S").and_then(|v| v.parse().ok()),
+                offset: ctrl.get("O").and_then(|v| v.parse().ok()).unwrap_or(0),
             });
         }
         if let Some(acc) = self.kitty.as_mut() {
@@ -199,13 +241,29 @@ impl Interceptor {
         if more {
             return None; // wait for the rest
         }
-        // Last chunk — flush. Decode base64 (and zlib, if o=z), then render per format.
+        // Last chunk — flush. Resolve the medium to the image bytes, then render.
         let acc = self.kitty.take()?;
-        if matches!(acc.fmt, KittyFmt::Unsupported) {
+        if matches!(acc.fmt, KittyFmt::Unsupported)
+            || matches!(acc.medium, KittyMedium::Unsupported)
+        {
             return None;
         }
-        let raw = B64.decode(acc.payload.trim()).ok()?;
-        let bytes = if acc.zlib { zlib_inflate(&raw)? } else { raw };
+        // The base64 payload is either the image itself (direct) or a reference
+        // (path / shm name) we resolve to the same bytes the real terminal reads.
+        let decoded = B64.decode(acc.payload.trim()).ok()?;
+        let mut bytes = match acc.medium {
+            KittyMedium::Direct => decoded,
+            KittyMedium::File => read_capped(std::str::from_utf8(&decoded).ok()?)?,
+            KittyMedium::Shm => read_capped(&shm_path(std::str::from_utf8(&decoded).ok()?))?,
+            KittyMedium::Unsupported => return None,
+        };
+        // `S`/`O`: the transmitted data may be a window into the file/shm object.
+        if let Some(sz) = acc.size {
+            bytes = bytes.get(acc.offset..acc.offset.checked_add(sz)?)?.to_vec();
+        }
+        if acc.zlib {
+            bytes = zlib_inflate(&bytes)?;
+        }
         let image = match acc.fmt {
             KittyFmt::Png => Image {
                 mime: sniff_mime(&bytes)?.to_string(),
@@ -232,6 +290,28 @@ impl Interceptor {
         };
         Some(Segment::Image(image))
     }
+}
+
+/// Read a file referenced by a kitty file/shm transmission, capped so a stray or
+/// hostile reference can't pull an unbounded blob into memory and onto the wire.
+/// The format sniff downstream (`sniff_mime`) then drops anything that isn't an
+/// image, so only genuine image files ever reach a viewer.
+// ponytail: no path allowlist — we read whatever the app referenced, matching the
+// terminal we mirror; the size cap + mime sniff are the backstop. Revisit if
+// broadcasting to a hub makes arbitrary-file reads a concern worth restricting.
+fn read_capped(path: &str) -> Option<Vec<u8>> {
+    const MAX_IMAGE_BYTES: u64 = 16 << 20;
+    if std::fs::metadata(path).ok()?.len() > MAX_IMAGE_BYTES {
+        return None;
+    }
+    std::fs::read(path).ok()
+}
+
+/// Map a POSIX shared-memory object name (kitty `t=s`) to its Linux `/dev/shm`
+/// path. A leading `/` is part of the shm namespace, not a real path component.
+// ponytail: Linux `/dev/shm`; use `shm_open` if a non-Linux Unix ever needs this.
+fn shm_path(name: &str) -> String {
+    format!("/dev/shm/{}", name.strip_prefix('/').unwrap_or(name))
 }
 
 /// Inflate a zlib stream (kitty `o=z` payloads).
@@ -486,10 +566,33 @@ mod tests {
     }
 
     #[test]
-    fn kitty_nondirect_transfer_skipped() {
+    fn kitty_file_transport_reads_the_referenced_png() {
+        // t=f: the payload is a base64 path; we read that PNG file (the same bytes
+        // the real terminal reads) and forward it like a direct image. The path is
+        // base64'd *without* padding, exactly as `kitten icat` emits it — the decode
+        // must tolerate that (the stock STANDARD engine would reject it).
+        let path = std::env::temp_dir().join("sg_icat_file_test.png");
+        std::fs::write(&path, B64.decode(png_b64()).unwrap()).unwrap();
+        let b64path = B64.encode(path.to_str().unwrap().as_bytes());
+        let unpadded = b64path.trim_end_matches('=');
         let mut it = Interceptor::new();
-        // t=f (file transfer) — we won't read the sender's local files; must drop.
-        let s = format!("\x1b_Ga=T,f=100,t=f;{}\x1b\\", png_b64());
+        let s = format!("\x1b_Ga=T,f=100,t=f;{unpadded}\x1b\\");
+        let imgs = only_images(it.feed(s.as_bytes()));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(imgs.len(), 1);
+        assert_eq!(imgs[0].mime, "image/png");
+        assert_eq!(imgs[0].px, Some((1, 1))); // png_b64 is 1x1
+    }
+
+    #[test]
+    fn kitty_missing_file_and_unknown_medium_dropped() {
+        let mut it = Interceptor::new();
+        // t=f pointing at a nonexistent path → nothing to show.
+        let noent = B64.encode(b"/nonexistent/sg/does-not-exist.png");
+        let s = format!("\x1b_Ga=T,f=100,t=f;{noent}\x1b\\");
+        assert!(only_images(it.feed(s.as_bytes())).is_empty());
+        // An unknown transmission medium is dropped.
+        let s = format!("\x1b_Ga=T,f=100,t=x;{}\x1b\\", png_b64());
         assert!(only_images(it.feed(s.as_bytes())).is_empty());
     }
 
