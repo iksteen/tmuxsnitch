@@ -910,12 +910,15 @@ function applyFull(m: FullMsg): void {
   if (m.i?.length) screenDiv.insertAdjacentHTML("beforeend", renderImages(m.i));
 }
 
-// `<img>` overlays positioned at their cell. Given cols/rows, the image is stretched
-// to that cell box; otherwise it renders at natural pixel size.
+// `<img>` overlays positioned at their cell. Given cols/rows, the image is fit into
+// that cell box preserving its own aspect (`contain`, anchored top-left) rather than
+// stretched — the emitter (e.g. chafa) sizes the cell box for the *local* terminal's
+// cell ratio, which needn't match the browser's, so stretching would distort.
+// Without a size it renders at natural pixel size.
 function renderImages(imgs: ImageRef[]): string {
   return imgs
     .map((im) => {
-      const size = im.w && im.h ? `width:${im.w}ch;height:calc(${im.h} * var(--lh));object-fit:fill;` : "";
+      const size = im.w && im.h ? `width:${im.w}ch;height:calc(${im.h} * var(--lh));object-fit:contain;object-position:left top;` : "";
       return `<img class="inline-img" alt="" src="data:${im.m};base64,${im.d}" style="position:absolute;left:${im.c}ch;top:calc(${im.r} * var(--lh));${size}z-index:3;pointer-events:none;">`;
     })
     .join("");
