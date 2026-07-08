@@ -85,7 +85,7 @@ jobs:
           files: shellglass-${{ matrix.target }}.tar.gz
 
       # Hand the raw binary to the docker job (Linux targets are the two image archs).
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bin-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/shellglass
@@ -99,11 +99,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: bin-x86_64-unknown-linux-gnu
           path: dist/amd64
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: bin-aarch64-unknown-linux-gnu
           path: dist/arm64
