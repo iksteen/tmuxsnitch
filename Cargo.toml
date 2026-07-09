@@ -1,3 +1,6 @@
+[workspace]
+members = ["crates/vt100"]
+
 [package]
 name = "shellglass"
 # Placeholder: the real version is stamped from the git tag at release time (see
@@ -32,7 +35,8 @@ tokio = { version = "1.52.3", features = ["full"] }
 tokio-stream = { version = "0.1.17", features = ["sync"] }
 tower-http = { version = "0.7", features = ["compression-br", "compression-gzip"] }
 toml = "1.1.2"
-vt100 = "0.16.2"
+# Vendored (upstream unmaintained) — see crates/vt100/Cargo.toml for provenance.
+vt100 = { path = "crates/vt100" }
 reqwest-websocket = "0.6.0"
 futures-util = { version = "0.3.32", default-features = false, features = ["sink", "std"] }
 tungstenite = { version = "0.29", default-features = false }

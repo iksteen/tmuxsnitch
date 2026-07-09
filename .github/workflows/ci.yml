@@ -23,13 +23,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Formatting
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --workspace --locked --all-targets -- -D warnings
 
       - name: Tests
-        run: cargo test --locked
+        run: cargo test --workspace --locked
 
   # The browser renderer is TypeScript, compiled to the committed viewer/dist/viewer.js
   # that build.rs bakes in. Type-check it, run its unit tests, and confirm the committed
