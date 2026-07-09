@@ -696,9 +696,7 @@ function svgFont(cell) {
     const fam = symbolFamily(cp);
     if (fam)
         return fam;
-    if (isFillGlyph(cp))
-        return cfg.fillFont;
-    return glyphOverflowsCell(t, cell.w ? 2 : 1) ? cfg.fillFont : null;
+    return isFillGlyph(cp) ? cfg.fillFont : null;
 }
 function esc(s) {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -714,7 +712,7 @@ function symbolCell(cell, isCursor, col, w, font) {
     const boxStyle = cellStyle(cell, isCursor);
     const t = cell.t ?? " ";
     const cp = t.codePointAt(0) ?? 0x20;
-    const stretch = isFillGlyph(cp) || (symbolFamily(cp) === null && glyphOverflowsCell(t, w));
+    const stretch = isFillGlyph(cp);
     return symbolSpan(col, w, boxStyle, font, esc(t), stretch);
 }
 function inkFree(s) {
@@ -742,6 +740,14 @@ export function renderRow(cells, cursorCol) {
             runStyle = null;
             cols = 0;
             out += `<span class="run" style="left:${col}ch;width:${w}ch;${cellStyle(cell, isCursor)}color:transparent">${esc(cell.t)}</span>`;
+            col += w;
+            continue;
+        }
+        if (cp0 && glyphOverflowsCell(cell.t, w) && !isFillGlyph(cp0) && !symbolFamily(cp0)) {
+            flushText();
+            runStyle = null;
+            cols = 0;
+            out += `<span class="run" style="left:${col}ch;width:${w}ch;overflow:visible;${cellStyle(cell, isCursor)}">${esc(cell.t)}</span>`;
             col += w;
             continue;
         }

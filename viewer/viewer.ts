@@ -957,8 +957,7 @@ function svgFont(cell: Cell): string | null {
   const cp = t.codePointAt(0)!;
   const fam = symbolFamily(cp);
   if (fam) return fam;
-  if (isFillGlyph(cp)) return cfg.fillFont;
-  return glyphOverflowsCell(t, cell.w ? 2 : 1) ? cfg.fillFont : null;
+  return isFillGlyph(cp) ? cfg.fillFont : null;
 }
 
 function esc(s: string): string {
@@ -992,10 +991,9 @@ function symbolCell(cell: Cell, isCursor: boolean, col: number, w: number, font:
   const boxStyle = cellStyle(cell, isCursor);
   const t = cell.t ?? " ";
   const cp = t.codePointAt(0) ?? 0x20;
-  // Fill glyphs tile the box, and an over-wide fallback (❯, not symbol-mapped) is squeezed
-  // to 1ch at full height — both via stretch. Pure symbol_map glyphs keep their intrinsic
-  // geometry (meet), so an isFillGlyph that is also symbol-mapped still tiles.
-  const stretch = isFillGlyph(cp) || (symbolFamily(cp) === null && glyphOverflowsCell(t, w));
+  // Fill glyphs tile the box (stretch); symbol_map glyphs keep intrinsic geometry (meet).
+  // An isFillGlyph that is also symbol-mapped still tiles.
+  const stretch = isFillGlyph(cp);
   return symbolSpan(col, w, boxStyle, font, esc(t), stretch);
 }
 
@@ -1034,6 +1032,19 @@ export function renderRow(cells: Cell[], cursorCol: number): string {
       runStyle = null;
       cols = 0;
       out += `<span class="run" style="left:${col}ch;width:${w}ch;${cellStyle(cell, isCursor)}color:transparent">${esc(cell.t!)}</span>`;
+      col += w;
+      continue;
+    }
+    // A glyph whose fallback advance exceeds its cell (❯ U+276F at ~1.67ch) would shove
+    // the rest of its coalesced run rightward — off-column and, at the end, under the
+    // cursor. Give it its own cell rendered as plain text at natural size, overflowing
+    // visibly into the (near-always blank) next cell rather than distorting it into 1ch:
+    // every run is absolutely positioned, so neighbours keep their columns regardless.
+    if (cp0 && glyphOverflowsCell(cell.t!, w) && !isFillGlyph(cp0) && !symbolFamily(cp0)) {
+      flushText();
+      runStyle = null;
+      cols = 0;
+      out += `<span class="run" style="left:${col}ch;width:${w}ch;overflow:visible;${cellStyle(cell, isCursor)}">${esc(cell.t!)}</span>`;
       col += w;
       continue;
     }
