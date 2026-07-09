@@ -659,6 +659,35 @@ function symbolFamily(cp) {
     }
     return null;
 }
+let measCtx = null;
+let measOneCh = 0;
+const overflowCache = new Map();
+function resetGlyphMeasure() {
+    measCtx = null;
+    measOneCh = 0;
+    overflowCache.clear();
+}
+function glyphOverflowsCell(t, w) {
+    if (typeof document === "undefined")
+        return false;
+    const cp = t.codePointAt(0) ?? 0;
+    if (cp >= 0x20 && cp <= 0x7e)
+        return false;
+    const cached = overflowCache.get(t);
+    if (cached !== undefined)
+        return cached;
+    if (!measCtx) {
+        measCtx = document.createElement("canvas").getContext("2d");
+        if (!measCtx)
+            return false;
+        const cs = getComputedStyle(screenEl);
+        measCtx.font = `${cs.fontSize} ${cs.fontFamily}`;
+        measOneCh = measCtx.measureText("0").width || 1;
+    }
+    const over = measCtx.measureText(t).width > measOneCh * w * 1.05;
+    overflowCache.set(t, over);
+    return over;
+}
 function svgFont(cell) {
     const t = cell.t ?? "";
     if (!t)
@@ -667,23 +696,26 @@ function svgFont(cell) {
     const fam = symbolFamily(cp);
     if (fam)
         return fam;
-    return isFillGlyph(cp) ? cfg.fillFont : null;
+    if (isFillGlyph(cp))
+        return cfg.fillFont;
+    return glyphOverflowsCell(t, cell.w ? 2 : 1) ? cfg.fillFont : null;
 }
 function esc(s) {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
-function symbolSpan(col, w, boxStyle, font, glyph, first) {
-    const fill = isFillGlyph(first);
-    const par = fill ? "none" : "xMidYMid meet";
-    const stretch = fill ? ' textLength="14" lengthAdjust="spacingAndGlyphs"' : "";
+function symbolSpan(col, w, boxStyle, font, glyph, stretch) {
+    const par = stretch ? "none" : "xMidYMid meet";
+    const len = stretch ? ' textLength="14" lengthAdjust="spacingAndGlyphs"' : "";
     return (`<span class="run" style="left:${col}ch;width:${w}ch;${boxStyle}">` +
         `<svg viewBox="0 0 14 14" preserveAspectRatio="${par}" style="display:block;width:100%;height:100%">` +
-        `<text x="0" y="12" font-family="${font}" font-size="14" fill="currentColor"${stretch}>${glyph}</text></svg></span>`);
+        `<text x="0" y="12" font-family="${font}" font-size="14" fill="currentColor"${len}>${glyph}</text></svg></span>`);
 }
 function symbolCell(cell, isCursor, col, w, font) {
     const boxStyle = cellStyle(cell, isCursor);
     const t = cell.t ?? " ";
-    return symbolSpan(col, w, boxStyle, font, esc(t), t.codePointAt(0) ?? 0x20);
+    const cp = t.codePointAt(0) ?? 0x20;
+    const stretch = isFillGlyph(cp) || (symbolFamily(cp) === null && glyphOverflowsCell(t, w));
+    return symbolSpan(col, w, boxStyle, font, esc(t), stretch);
 }
 function inkFree(s) {
     return !s.includes("background") && !s.includes("text-decoration");
@@ -1005,6 +1037,14 @@ function main() {
     screenEl = document.getElementById("screen");
     connect(boot.events);
     startStats();
+    const reflowGlyphs = () => {
+        resetGlyphMeasure();
+        for (let r = 0; r < screen.cells.length; r++)
+            dirtyRows.add(r);
+        schedulePaint();
+    };
+    document.fonts?.addEventListener("loadingdone", reflowGlyphs);
+    document.fonts?.ready.then(reflowGlyphs);
 }
 if (typeof document !== "undefined" && window.SHELLGLASS) {
     main();

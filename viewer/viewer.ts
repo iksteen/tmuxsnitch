@@ -909,6 +909,47 @@ function symbolFamily(cp: number): string | null {
   return null;
 }
 
+// A glyph whose advance exceeds its cell (w columns) would, inside a coalesced run,
+// shove every later glyph rightward — off its column and, at the end, under the
+// cursor block (e.g. the prompt `❯` U+276F falls back to a non-monospace face at
+// ~1.67ch and eats the character after it). We detect that by measuring against the
+// base `0` advance and pin such glyphs to their own scaled cell. ASCII is always 1ch
+// in the monospace base, so it's skipped; results are memoised per grapheme, and the
+// measuring context is lazily built from #screen's resolved font.
+//
+// CRITICAL: the @font-face web fonts load async, so an early measurement can see the
+// system fallback (❯ at 1ch) and cache the wrong answer for good — the glyph then
+// renders wide once the real font swaps in but stays inline, eating the next char.
+// (Chrome tends to have fonts by first frame; Firefox's FOUT reliably poisons it.)
+// resetGlyphMeasure() clears the cache + context; main() calls it on the fonts
+// loadingdone event so the re-render measures against the loaded fonts.
+let measCtx: CanvasRenderingContext2D | null = null;
+let measOneCh = 0;
+const overflowCache = new Map<string, boolean>();
+function resetGlyphMeasure(): void {
+  measCtx = null;
+  measOneCh = 0;
+  overflowCache.clear();
+}
+function glyphOverflowsCell(t: string, w: number): boolean {
+  if (typeof document === "undefined") return false;
+  const cp = t.codePointAt(0) ?? 0;
+  if (cp >= 0x20 && cp <= 0x7e) return false; // printable ASCII: guaranteed 1ch
+  const cached = overflowCache.get(t);
+  if (cached !== undefined) return cached;
+  if (!measCtx) {
+    measCtx = document.createElement("canvas").getContext("2d");
+    if (!measCtx) return false;
+    const cs = getComputedStyle(screenEl);
+    measCtx.font = `${cs.fontSize} ${cs.fontFamily}`;
+    measOneCh = measCtx.measureText("0").width || 1;
+  }
+  // 5% slack so ordinary rounding doesn't route normal glyphs down the SVG path.
+  const over = measCtx.measureText(t).width > measOneCh * w * 1.05;
+  overflowCache.set(t, over);
+  return over;
+}
+
 // The font stack to render `cell` as a scaled SVG glyph, or null for plain text.
 function svgFont(cell: Cell): string | null {
   const t = cell.t ?? "";
@@ -916,7 +957,8 @@ function svgFont(cell: Cell): string | null {
   const cp = t.codePointAt(0)!;
   const fam = symbolFamily(cp);
   if (fam) return fam;
-  return isFillGlyph(cp) ? cfg.fillFont : null;
+  if (isFillGlyph(cp)) return cfg.fillFont;
+  return glyphOverflowsCell(t, cell.w ? 2 : 1) ? cfg.fillFont : null;
 }
 
 function esc(s: string): string {
@@ -924,33 +966,37 @@ function esc(s: string): string {
 }
 
 // Emit one SVG symbol span (already-escaped glyph, precomputed boxStyle) covering w
-// columns. Fill glyphs (isFillGlyph) stretch to the full box width via textLength so
-// lines tile; other symbol_map glyphs scale to fit (xMidYMid meet).
+// columns. When `stretch`, the glyph is forced to the full box (none + textLength) so
+// fill glyphs tile and an over-wide glyph is squeezed to 1ch at full height; otherwise
+// it scales to fit centred (xMidYMid meet), which keeps symbol_map glyphs' geometry.
 function symbolSpan(
   col: number,
   w: number,
   boxStyle: string,
   font: string,
   glyph: string,
-  first: number,
+  stretch: boolean,
 ): string {
-  const fill = isFillGlyph(first);
-  const par = fill ? "none" : "xMidYMid meet";
-  // Fill glyphs span the whole box so lines tile; a monospace advance is only ~0.6em,
-  // so a bare none-stretch under-fills and horizontals dash. textLength forces the
-  // glyph to the viewBox width; none then maps it onto the full box.
-  const stretch = fill ? ' textLength="14" lengthAdjust="spacingAndGlyphs"' : "";
+  const par = stretch ? "none" : "xMidYMid meet";
+  // textLength forces the glyph advance to the viewBox width; `none` then maps that onto
+  // the full box. Without it a ~0.6em monospace advance under-fills and horizontals dash.
+  const len = stretch ? ' textLength="14" lengthAdjust="spacingAndGlyphs"' : "";
   return (
     `<span class="run" style="left:${col}ch;width:${w}ch;${boxStyle}">` +
     `<svg viewBox="0 0 14 14" preserveAspectRatio="${par}" style="display:block;width:100%;height:100%">` +
-    `<text x="0" y="12" font-family="${font}" font-size="14" fill="currentColor"${stretch}>${glyph}</text></svg></span>`
+    `<text x="0" y="12" font-family="${font}" font-size="14" fill="currentColor"${len}>${glyph}</text></svg></span>`
   );
 }
 
 function symbolCell(cell: Cell, isCursor: boolean, col: number, w: number, font: string): string {
   const boxStyle = cellStyle(cell, isCursor);
   const t = cell.t ?? " ";
-  return symbolSpan(col, w, boxStyle, font, esc(t), t.codePointAt(0) ?? 0x20);
+  const cp = t.codePointAt(0) ?? 0x20;
+  // Fill glyphs tile the box, and an over-wide fallback (❯, not symbol-mapped) is squeezed
+  // to 1ch at full height — both via stretch. Pure symbol_map glyphs keep their intrinsic
+  // geometry (meet), so an isFillGlyph that is also symbol-mapped still tiles.
+  const stretch = isFillGlyph(cp) || (symbolFamily(cp) === null && glyphOverflowsCell(t, w));
+  return symbolSpan(col, w, boxStyle, font, esc(t), stretch);
 }
 
 // ── row rendering (port of render.rs:render_row) ──────────────────────────────
@@ -1381,6 +1427,21 @@ function main(): void {
   screenEl = document.getElementById("screen")!;
   connect(boot.events);
   startStats();
+  // Web fonts load async; any glyph-width measured before they land is cached wrong
+  // (see resetGlyphMeasure). Drop the cache and re-render every row when fonts arrive so
+  // over-wide glyphs (❯) get pinned to their own cell instead of eating the next char.
+  const reflowGlyphs = (): void => {
+    resetGlyphMeasure();
+    for (let r = 0; r < screen.cells.length; r++) dirtyRows.add(r);
+    schedulePaint();
+  };
+  // `loadingdone` (not `ready`): @font-face faces load lazily — nothing uses Noto until
+  // the first row renders, so document.fonts.ready resolves BEFORE the face starts
+  // loading and a one-shot `.then` re-measures while still in FOUT. `loadingdone` fires
+  // when a face actually finishes — exactly when re-measuring ❯ becomes correct. `ready`
+  // stays as a fallback for the case where the face was already cached before we listen.
+  document.fonts?.addEventListener("loadingdone", reflowGlyphs);
+  document.fonts?.ready.then(reflowGlyphs);
 }
 
 // Only bootstrap in the browser; importing this module in Node (tests) is inert.
