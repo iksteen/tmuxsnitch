@@ -325,3 +325,7 @@ renders), standalone + client/hub push, an optional read-only SSH view (`--ssh-b
 viewer templating (built-in page with a CRT toggle, or a custom template), and optional
 hub TLS (own cert or ACME/Let's Encrypt). Not yet: scrollback, multiple sessions/panes in
 one view.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
