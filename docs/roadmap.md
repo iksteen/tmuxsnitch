@@ -26,10 +26,17 @@ where it matters).
    callbacks, so unhandled CSI/escape/OSC vanish silently — which is exactly why
    the SCOSC gap shipped unnoticed. Implement `vt100::Callbacks` in `pty.rs`
    with `unhandled_csi`/`unhandled_escape`/`unhandled_osc`/`unhandled_char`
-   logging once per distinct sequence kind (debug level; never per-occurrence —
-   a busy TUI can emit thousands per second). Do this FIRST: it converts every
-   remaining gap on this page — and future ones — from a user bug report into a
-   log line.
+   recording once per distinct sequence kind (never per-occurrence — a busy TUI
+   can emit thousands per second). **Sink constraint**: in serve/push mode we
+   own the terminal (raw mode + tee), so NOTHING may be printed while the
+   session runs — a stray log line lands inside the mirrored screen. Instead:
+   accumulate the (tiny, deduplicated) set in memory and print one summary line
+   to stderr on exit, *after* raw mode is restored and the screen thread has
+   quiesced ("shellglass: N escape sequences not mirrored: CSI b, OSC 9 —
+   please report"). For live debugging of long-running sessions, an env-gated
+   file sink (`SHELLGLASS_SEQ_LOG=<path>`, append + flush per new kind) — a
+   file, never the tty. Do this FIRST: it converts every remaining gap on this
+   page — and future ones — from a user bug report into an exit line.
 
 2. **REP (`CSI b`, repeat preceding graphic character).** Missing from the CSI
    dispatch, and both `xterm-256color` and `xterm-kitty` terminfo advertise
