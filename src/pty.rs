@@ -358,7 +358,7 @@ fn screen_thread(
                                     cols,
                                     rows,
                                     mime: img.mime,
-                                    data: img.base64,
+                                    data: img.base64.into(),
                                 },
                             });
                         }
@@ -458,25 +458,44 @@ fn frame_from(parser: &vt100::Parser, images: &mut Vec<Placed>) -> Arc<Frame> {
 /// a transparent image would otherwise show it). Drop images with no corner left —
 /// fully scrolled off, cleared, or wholly overwritten.
 fn resolve_images(grid: &mut crate::model::Grid, images: &mut Vec<Placed>) {
+    // One pass over the grid (not one per image): find and scrub every tracked
+    // sentinel. The row vec omits wide continuation cells, so the true screen
+    // column is tracked by advancing per cell *width* — a CJK/emoji prompt before
+    // a sentinel on its row must not drag the reconstructed column left, or the
+    // browser draws the overlay shifted onto the preceding text.
+    let mut hits: Vec<(char, i16, u16)> = Vec::new();
+    for (r, row) in grid.rows.iter_mut().enumerate() {
+        let mut col: u16 = 0;
+        for cell in row.iter_mut() {
+            let width = if cell.wide { 2 } else { 1 };
+            if let Some(ch) = cell.text.chars().next() {
+                // Sentinels live in Plane-16 PUA — cheap pre-filter, then confirm
+                // the glyph belongs to a tracked image before scrubbing it.
+                if ch >= '\u{100000}'
+                    && images
+                        .iter()
+                        .any(|p| p.marks.iter().any(|&(m, _, _)| m == ch))
+                {
+                    hits.push((ch, r as i16, col));
+                    *cell = crate::model::StyledCell::default(); // scrub
+                }
+            }
+            col += width;
+        }
+    }
     images.retain_mut(|p| {
         let mut found: Option<(i16, u16)> = None; // reconstructed top-left
         let mut best = usize::MAX;
-        for (r, row) in grid.rows.iter_mut().enumerate() {
-            for (c, cell) in row.iter_mut().enumerate() {
-                let Some(ch) = cell.text.chars().next() else {
-                    continue;
-                };
-                if let Some(i) = p.marks.iter().position(|&(m, _, _)| m == ch) {
-                    if i < best {
-                        let (_, dr, dc) = p.marks[i];
-                        best = i;
-                        found = Some((
-                            r as i16 - i16::try_from(dr).unwrap_or(i16::MAX),
-                            (c as u16).saturating_sub(dc),
-                        ));
-                    }
-                    *cell = crate::model::StyledCell::default(); // scrub
-                }
+        for &(ch, r, c) in &hits {
+            if let Some(i) = p.marks.iter().position(|&(m, _, _)| m == ch)
+                && i < best
+            {
+                let (_, dr, dc) = p.marks[i];
+                best = i;
+                found = Some((
+                    r - i16::try_from(dr).unwrap_or(i16::MAX),
+                    c.saturating_sub(dc),
+                ));
             }
         }
         if let Some((row, col)) = found {
@@ -566,10 +585,14 @@ fn probe_caps() -> Caps {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 256];
     // A real terminal answers DA in milliseconds and we break the instant it does
-    // (VTIME returns on first byte, it doesn't wait out the tick). This 0.5s cap
-    // (5 × 0.1s) only bounds the pathological "tty that never answers DA" — a bare
-    // pty, not a real terminal — while still covering a slow ssh round-trip.
-    for _ in 0..5 {
+    // (VTIME returns on first byte, it doesn't wait out the tick), so the deadline
+    // only bounds the pathological "tty that never answers DA" — a bare pty, not
+    // a real terminal. It must err generous: a reply arriving *after* we stop
+    // draining is forwarded to the child shell as typed input (ESC-prefixed
+    // garbage at the prompt) and capability detection silently fails. 2s covers
+    // slow ssh round-trips; beyond that the residual risk is accepted.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
         match rustix::io::read(fd, &mut chunk) {
             Ok(0) => {} // timeout tick, keep waiting
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
@@ -715,7 +738,7 @@ mod tests {
             cols: Some(2),
             rows: Some(2),
             mime: "image/png".into(),
-            data: String::new(),
+            data: "".into(),
         }
     }
 
@@ -735,7 +758,7 @@ mod tests {
     #[test]
     fn sentinel_tracks_scroll_clips_then_evicts() {
         let mut parser = new_parser(3, 10); // 3 rows
-        let mark = '\u{E000}';
+        let mark = '\u{100003}'; // sentinels are always Plane-16 PUA (see drop_mark)
         parser.process(b"\r\n\r\n"); // cursor to the last row
         parser.process(mark.encode_utf8(&mut [0u8; 4]).as_bytes());
         let mut imgs = vec![placed(mark)];
@@ -817,7 +840,7 @@ mod tests {
                 cols: Some(20),
                 rows: Some(1),
                 mime: "image/png".into(),
-                data: String::new(),
+                data: "".into(),
             },
         }];
 
@@ -828,6 +851,26 @@ mod tests {
         };
         assert_eq!(g.images.len(), 1);
         assert_eq!((g.images[0].row, g.images[0].col), (0, 0));
+    }
+
+    // Wide glyphs occupy two screen columns but only one row-vec slot (parsing
+    // drops the continuation cell) — CJK/emoji before a sentinel on its row must
+    // not drag the reconstructed column left, or the browser draws the overlay
+    // shifted onto the preceding text.
+    #[test]
+    fn sentinel_column_correct_after_wide_glyphs() {
+        let mark = '\u{100000}';
+        let mut parser = new_parser(4, 30);
+        parser.process("日本語 ".as_bytes()); // three wide glyphs + a space → col 7
+        parser.process(mark.encode_utf8(&mut [0u8; 4]).as_bytes());
+        let mut imgs = vec![Placed {
+            marks: vec![(mark, 0, 0)],
+            img: img_2x2(),
+        }];
+        let Frame::Screen(g) = &*frame_from(&parser, &mut imgs) else {
+            panic!("screen")
+        };
+        assert_eq!((g.images[0].row, g.images[0].col), (0, 7));
     }
 
     // A 1-row image narrower than what overwrites it is evicted — every corner is
@@ -849,7 +892,7 @@ mod tests {
                 cols: Some(5),
                 rows: Some(1),
                 mime: "image/png".into(),
-                data: String::new(),
+                data: "".into(),
             },
         }];
 

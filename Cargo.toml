@@ -24,7 +24,7 @@ reqwest = { version = "0.13", default-features = false, features = ["stream", "r
 rustix = { version = "1", features = ["termios"] }
 russh = "0.62"
 rustls-acme = { version = "0.15", features = ["axum", "tokio"] }
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive", "rc"] }
 signal-hook = { version = "0.4", default-features = false, features = ["iterator"] }
 serde_json = "1"
 tokio = { version = "1.52.3", features = ["full"] }

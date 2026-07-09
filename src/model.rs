@@ -103,7 +103,7 @@ pub(crate) fn is_false(b: &bool) -> bool {
 /// An inline image (iTerm2/kitty) placed at a terminal cell, forwarded to the
 /// browser as a `data:` URL overlay. Serializes compactly for the full-frame wire
 /// message under the `i` key (see [`crate::diff`]); the browser decodes the base64.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct ImagePlacement {
     /// Top-left cell of the image. May be negative when the image has partially
     /// scrolled off the top: the viewer clips it above the screen edge.
@@ -119,9 +119,26 @@ pub struct ImagePlacement {
     pub rows: Option<u16>,
     #[serde(rename = "m")]
     pub mime: String,
-    /// The image file, base64.
+    /// The image file, base64. `Arc` because a placement is cloned into every
+    /// frame it's visible in (and compared frame-over-frame in `encode_delta`) —
+    /// the multi-MB payload must ride along by refcount, not by copy.
     #[serde(rename = "d")]
-    pub data: String,
+    pub data: std::sync::Arc<str>,
+}
+
+/// Frame-over-frame image equality runs on every dirty frame (any change to the
+/// image set forces a full wire frame), so compare the payload by pointer first:
+/// an unchanged placement shares its `Arc` with the previous frame, making the
+/// common no-change case O(1) instead of a multi-MB memcmp.
+impl PartialEq for ImagePlacement {
+    fn eq(&self, other: &Self) -> bool {
+        self.row == other.row
+            && self.col == other.col
+            && self.cols == other.cols
+            && self.rows == other.rows
+            && self.mime == other.mime
+            && (std::sync::Arc::ptr_eq(&self.data, &other.data) || self.data == other.data)
+    }
 }
 
 /// The terminal screen as cells. `rows[r]` holds the visible cells of row `r`, with
