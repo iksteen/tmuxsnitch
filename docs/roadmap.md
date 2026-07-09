@@ -54,6 +54,37 @@ movement + tab stops `4c4e809`.
    position is the bug class of the powerline incident; this batch is cheap
    insurance against the rest of the family. One commit.
 
+## Phase 1.5 — direct phase-1 fallout
+
+The very first telemetry runs (item 1) surfaced both of these in trivial test
+sessions, so real workloads hit them constantly. Quick-win sized; do before
+phase 2.
+
+1. **DECSTR (`CSI ! p`, soft terminal reset).** Small and mechanical: restore
+   the defined subset of state without touching screen content or cursor
+   position — SGR to normal, scroll margins to full screen, origin mode off,
+   autowrap on, insert→replace mode, cursor visible, saved-cursor state
+   cleared, keypad/cursor-keys to normal. All of it already exists as state in
+   the vendored `Screen`/`Grid`; needs a `Some(b'!')` intermediate branch in
+   `csi_dispatch` (only bare and `?` exist). The care is the checklist —
+   match xterm's documented reset list exactly, one test assertion per aspect.
+   Without it, apps that soft-reset on exit leave the mirror with stale
+   margins/attrs the local terminal already dropped.
+
+2. **Synchronized output (`CSI ? 2026 h/l`).** neovim and modern tmux wrap
+   redraws in BSU/ESU so the terminal presents atomically; kitty honors it
+   locally, so a ≤30fps frame snapshot landing *mid-redraw* shows the browser
+   a torn frame the local screen never displayed — a transient but real
+   fidelity violation, on every redraw of every 2026-aware app. Vendored side
+   is trivial (mode bit in the existing `?h`/`?l` dispatch + a public
+   `synchronized_update()` accessor). pty.rs side: the frame publish
+   condition additionally holds while the mode is set — keep-showing-the-
+   last-frame is exactly the spec's presentation semantics — plus a MANDATORY
+   timeout guard (~1s, like real terminals): an app Ctrl-C'd between `h` and
+   `l` leaves the mode set forever, the same failure class as an unterminated
+   image sequence. With the timeout, worst case degrades to today's behavior.
+   No wire/viewer/salt impact for either item.
+
 ## Phase 2 — good to have
 
 4. **First-class image placements in the grid** *(the reason the crate was
