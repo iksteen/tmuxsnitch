@@ -117,6 +117,16 @@ struct ItermAccum {
 
 struct KittyAccum {
     payload: String,
+    /// `a=T` — transmit *and display*. Every other action (`q` capability query,
+    /// `t` transmit-only, `d` delete, `f`/`a` animation, `c` compose) draws
+    /// nothing at the cursor, so emitting an image for one would show the web
+    /// viewer content the local kitty never displayed. The sequence is still
+    /// consumed (accumulated and flushed) so `m=1` chains stay coherent.
+    // ponytail: `a=p` (place a previously-transmitted id) would need an id→image
+    // store keyed on `i=`; until then a t-then-p emitter shows no web image.
+    // `a=d` could evict placements, but corner-sentinel erase already covers the
+    // common clears.
+    display: bool,
     cells: Option<(u16, u16)>,
     fmt: KittyFmt,
     /// Source pixel dimensions (kitty `s`×`v`), needed to encode raw formats.
@@ -368,6 +378,12 @@ impl Interceptor {
         }
         if let Some(args) = body.strip_prefix(b"MultipartFile=") {
             let kv = parse_kv(args, b';');
+            // `inline=0` (the default) is a *download* — iTerm2 saves the file and
+            // renders nothing, so neither do we. No accumulator ⇒ the transfer's
+            // FilePart/FileEnd verbs fall through as no-ops.
+            if kv.get("inline").map(String::as_str) != Some("1") {
+                return None;
+            }
             self.iterm = Some(ItermAccum {
                 payload: String::new(),
                 cells: cells_from(kv.get("width"), kv.get("height")),
@@ -417,6 +433,8 @@ impl Interceptor {
             };
             self.kitty = Some(KittyAccum {
                 payload: String::new(),
+                // kitty's default action is `t` (transmit-only) — absent ⇒ no display.
+                display: ctrl.get("a").map(String::as_str) == Some("T"),
                 cells: cells_from(ctrl.get("c"), ctrl.get("r")),
                 fmt,
                 px: cells_from(ctrl.get("s"), ctrl.get("v"))
@@ -434,9 +452,13 @@ impl Interceptor {
         if more {
             return None; // wait for the rest
         }
-        // Last chunk — flush. Resolve the medium to the image bytes, then render.
+        // Last chunk — flush. A non-display action ends here: consumed, never
+        // rendered (and its file/shm reference never read — a capability query
+        // must not touch the filesystem). Mirror fidelity: the local kitty drew
+        // nothing for it either.
         let acc = self.kitty.take()?;
-        if matches!(acc.fmt, KittyFmt::Unsupported)
+        if !acc.display
+            || matches!(acc.fmt, KittyFmt::Unsupported)
             || matches!(acc.medium, KittyMedium::Unsupported)
         {
             return None;
@@ -590,6 +612,12 @@ fn iterm_single(args: &[u8]) -> Option<Image> {
     let params = &args[..colon];
     let b64 = std::str::from_utf8(&args[colon + 1..]).ok()?.trim();
     let kv = parse_kv(params, b';');
+    // `inline=0` (the default) is a *download* — iTerm2 saves the file and renders
+    // nothing inline. Displaying it would show viewers a (possibly private) file
+    // the local screen never showed, and desync the mirrored cursor.
+    if kv.get("inline").map(String::as_str) != Some("1") {
+        return None;
+    }
     let cells = cells_from(kv.get("width"), kv.get("height"));
     image_from_b64(b64.to_string(), cells)
 }
@@ -1028,6 +1056,70 @@ mod tests {
         assert_eq!(imgs.len(), 1);
         assert_eq!(imgs[0].mime, "image/png");
         assert_eq!(imgs[0].px, Some((w, h)));
+    }
+
+    #[test]
+    fn kitty_non_display_actions_render_nothing() {
+        // Only `a=T` (transmit-and-display) draws at the cursor. A capability
+        // query — including the exact probe shellglass itself sends in pty.rs —
+        // a transmit-only, a delete, or an action-less sequence (spec default is
+        // `t`) must not become a phantom web image.
+        for seq in [
+            "\x1b_Gi=1,a=q,s=1,v=1,t=d,f=24;AAAA\x1b\\".to_string(), // pty.rs's own probe
+            format!("\x1b_Ga=t,f=100,t=d;{}\x1b\\", png_b64()),      // transmit-only
+            format!("\x1b_Gf=100,t=d;{}\x1b\\", png_b64()),          // no action ⇒ default t
+            "\x1b_Ga=d,d=A\x1b\\".to_string(),                       // delete
+        ] {
+            let mut it = Interceptor::new();
+            assert!(
+                only_images(it.feed(seq.as_bytes())).is_empty(),
+                "non-display action rendered an image: {seq:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn kitty_query_never_reads_referenced_file() {
+        // `a=q` with a file medium must not touch the filesystem: the query asks
+        // "can you?", it doesn't transmit. Point it at a real file and verify the
+        // flush bails on the action before resolving the medium.
+        let path = std::env::temp_dir().join("sg_query_no_read_test.png");
+        std::fs::write(&path, B64.decode(png_b64()).unwrap()).unwrap();
+        let b64path = B64.encode(path.to_str().unwrap().as_bytes());
+        let mut it = Interceptor::new();
+        let s = format!("\x1b_Ga=q,f=100,t=f;{b64path}\x1b\\");
+        let imgs = only_images(it.feed(s.as_bytes()));
+        let _ = std::fs::remove_file(&path);
+        assert!(imgs.is_empty());
+    }
+
+    #[test]
+    fn iterm_download_not_displayed() {
+        // `inline=0` — and iTerm2's default of no `inline` key at all — is a file
+        // *download*: the real terminal saves it and renders nothing.
+        let b64 = png_b64();
+        for seq in [
+            format!("\x1b]1337;File=name=cGljLnBuZw==;inline=0:{b64}\x07"),
+            format!("\x1b]1337;File=name=cGljLnBuZw==:{b64}\x07"),
+        ] {
+            let mut it = Interceptor::new();
+            assert!(
+                only_images(it.feed(seq.as_bytes())).is_empty(),
+                "download displayed as inline image: {seq:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn iterm_multipart_download_not_displayed() {
+        // A multipart transfer without inline=1 opens no accumulator, so its
+        // parts and end are no-ops.
+        let mut it = Interceptor::new();
+        let b64 = png_b64();
+        let mut segs = it.feed(b"\x1b]1337;MultipartFile=inline=0;width=4;height=2\x07");
+        segs.extend(it.feed(format!("\x1b]1337;FilePart={b64}\x07").as_bytes()));
+        segs.extend(it.feed(b"\x1b]1337;FileEnd\x07"));
+        assert!(only_images(segs).is_empty());
     }
 
     #[test]
