@@ -174,3 +174,70 @@ fn rep() {
         vt100::Color::Idx(1)
     );
 }
+
+// shellglass: the cursor-movement aliases stock 0.16.2 dropped.
+#[test]
+fn movement_aliases() {
+    // HVP (CSI f) positions like CUP.
+    let mut vt = vt100::Parser::default();
+    vt.process(b"\x1b[5;10f");
+    assert_eq!(vt.screen().cursor_position(), (4, 9));
+    // HPA (CSI `) — column absolute; VPA-style 1-based.
+    vt.process(b"\x1b[3`");
+    assert_eq!(vt.screen().cursor_position(), (4, 2));
+    // HPR (CSI a) — column relative.
+    vt.process(b"\x1b[4a");
+    assert_eq!(vt.screen().cursor_position(), (4, 6));
+    // VPR (CSI e) — row relative.
+    vt.process(b"\x1b[2e");
+    assert_eq!(vt.screen().cursor_position(), (6, 6));
+}
+
+// shellglass: tab stops — HTS (ESC H) sets, TBC (CSI g) clears, HT/CHT/CBT
+// navigate the table.
+#[test]
+fn tab_stops() {
+    // Power-on stops every 8 columns, unchanged behavior.
+    let mut vt = vt100::Parser::default();
+    vt.process(b"ab\tX");
+    assert_eq!(vt.screen().rows(0, 80).next().unwrap(), "ab      X");
+
+    // A custom stop: HTS at column 3.
+    let mut vt = vt100::Parser::default();
+    vt.process(b"\x1b[1;4H\x1bH\r\tX");
+    assert_eq!(vt.screen().cursor_position(), (0, 4));
+    assert_eq!(vt.screen().rows(0, 80).next().unwrap(), "   X");
+
+    // CBT (CSI Z) goes back through stops; column 0 when none remain.
+    let mut vt = vt100::Parser::default();
+    vt.process(b"\x1b[1;20H\x1b[Z");
+    assert_eq!(vt.screen().cursor_position(), (0, 16));
+    vt.process(b"\x1b[3Z");
+    assert_eq!(vt.screen().cursor_position(), (0, 0));
+
+    // CHT (CSI I) goes forward through stops.
+    let mut vt = vt100::Parser::default();
+    vt.process(b"\x1b[2I");
+    assert_eq!(vt.screen().cursor_position(), (0, 16));
+
+    // TBC 0 clears the stop under the cursor; the next tab skips past it.
+    let mut vt = vt100::Parser::default();
+    vt.process(b"\x1b[1;9H\x1b[g\r\t");
+    assert_eq!(vt.screen().cursor_position(), (0, 16));
+
+    // TBC 3 clears them all: tab lands on the right margin.
+    let mut vt = vt100::Parser::default();
+    vt.process(b"\x1b[3g\t");
+    assert_eq!(vt.screen().cursor_position(), (0, 79));
+
+    // Widening the screen extends the default stops into the new region.
+    let mut vt = vt100::Parser::default();
+    vt.screen_mut().set_size(24, 100);
+    vt.process(b"\x1b[1;85H\t");
+    assert_eq!(vt.screen().cursor_position(), (0, 88));
+
+    // RIS restores the power-on stops.
+    let mut vt = vt100::Parser::default();
+    vt.process(b"\x1b[3g\x1bc\t");
+    assert_eq!(vt.screen().cursor_position(), (0, 8));
+}

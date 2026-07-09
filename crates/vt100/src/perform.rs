@@ -69,6 +69,7 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                 b'8' => self.screen.decrc(),
                 b'=' => self.screen.deckpam(),
                 b'>' => self.screen.deckpnm(),
+                b'H' => self.screen.hts(), // shellglass: HTS
                 b'M' => self.screen.ri(),
                 b'c' => self.screen.ris(),
                 b'g' => self.callbacks.visual_bell(&mut self.screen),
@@ -104,13 +105,27 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             None => match c {
                 '@' => self.screen.ich(canonicalize_params_1(params, 1)),
                 'A' => self.screen.cuu(canonicalize_params_1(params, 1)),
-                'B' => self.screen.cud(canonicalize_params_1(params, 1)),
-                'C' => self.screen.cuf(canonicalize_params_1(params, 1)),
+                // shellglass: VPR (e) moves like CUD
+                'B' | 'e' => {
+                    self.screen.cud(canonicalize_params_1(params, 1));
+                }
+                // shellglass: HPR (a) moves like CUF
+                'C' | 'a' => {
+                    self.screen.cuf(canonicalize_params_1(params, 1));
+                }
                 'D' => self.screen.cub(canonicalize_params_1(params, 1)),
                 'E' => self.screen.cnl(canonicalize_params_1(params, 1)),
                 'F' => self.screen.cpl(canonicalize_params_1(params, 1)),
-                'G' => self.screen.cha(canonicalize_params_1(params, 1)),
-                'H' => self.screen.cup(canonicalize_params_2(params, 1, 1)),
+                // shellglass: HPA (`) moves like CHA
+                'G' | '`' => {
+                    self.screen.cha(canonicalize_params_1(params, 1));
+                }
+                // shellglass: HVP (f) is the CUP alias
+                'H' | 'f' => {
+                    self.screen.cup(canonicalize_params_2(params, 1, 1));
+                }
+                // shellglass: CHT
+                'I' => self.screen.cht(canonicalize_params_1(params, 1)),
                 'J' => self
                     .screen
                     .ed(canonicalize_params_1(params, 0), unhandled),
@@ -123,9 +138,13 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                 'S' => self.screen.su(canonicalize_params_1(params, 1)),
                 'T' => self.screen.sd(canonicalize_params_1(params, 1)),
                 'X' => self.screen.ech(canonicalize_params_1(params, 1)),
+                // shellglass: CBT
+                'Z' => self.screen.cbt(canonicalize_params_1(params, 1)),
                 // shellglass: REP
                 'b' => self.screen.rep(canonicalize_params_1(params, 1)),
                 'd' => self.screen.vpa(canonicalize_params_1(params, 1)),
+                // shellglass: TBC
+                'g' => self.screen.tbc(canonicalize_params_1(params, 0)),
                 'm' => self.screen.sgr(params, unhandled),
                 'r' => self.screen.decstbm(canonicalize_params_decstbm(
                     params,

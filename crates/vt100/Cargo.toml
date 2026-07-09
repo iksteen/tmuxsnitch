@@ -9,6 +9,11 @@
 #     with DECSC like xterm. Tests in tests/csi.rs (scosc_scorc).
 #   - screen.rs/perform.rs: REP (`CSI b`) — repeat the last graphic character
 #     through the print path. Tests in tests/csi.rs (rep).
+#   - screen.rs/perform.rs/grid.rs: cursor-movement aliases HVP/HPA/HPR/VPR
+#     (`CSI f`/`` ` ``/`a`/`e`) and a real tab-stop table — HTS (`ESC H`),
+#     TBC (`CSI g`), CHT (`CSI I`), CBT (`CSI Z`); HT consults the table
+#     (grid::col_tab removed). Tests in tests/csi.rs (movement_aliases,
+#     tab_stops).
 [package]
 name = "vt100"
 version = "0.16.2"

@@ -64,6 +64,12 @@ pub struct Screen {
     // character in the *data stream*, and kitty/xterm behave the same way.
     last_graphic_char: Option<char>,
 
+    // shellglass: tab stops (upstream hardcoded every-8 in grid::col_tab).
+    // Screen-level (not per-grid) because the primary and alternate screens
+    // share one tab-stop table in real terminals. HTS sets, TBC clears, HT/
+    // CHT/CBT navigate; RIS resets via Screen::new.
+    tab_stops: std::collections::BTreeSet<u16>,
+
     modes: u8,
     mouse_protocol_mode: MouseProtocolMode,
     mouse_protocol_encoding: MouseProtocolEncoding,
@@ -85,6 +91,8 @@ impl Screen {
 
             last_graphic_char: None,
 
+            tab_stops: default_tab_stops(size.cols),
+
             modes: 0,
             mouse_protocol_mode: MouseProtocolMode::default(),
             mouse_protocol_encoding: MouseProtocolEncoding::default(),
@@ -93,6 +101,13 @@ impl Screen {
 
     /// Resizes the terminal.
     pub fn set_size(&mut self, rows: u16, cols: u16) {
+        // shellglass: newly-revealed columns get default tab stops (existing
+        // stops are kept — navigation bounds itself by the current width).
+        let old_cols = self.grid.size().cols;
+        if cols > old_cols {
+            self.tab_stops
+                .extend(default_tab_stops(cols).range(old_cols..));
+        }
         self.grid.set_size(crate::grid::Size { rows, cols });
         self.alternate_grid
             .set_size(crate::grid::Size { rows, cols });
@@ -957,7 +972,17 @@ impl Screen {
     }
 
     pub(crate) fn tab(&mut self) {
-        self.grid_mut().col_tab();
+        // shellglass: next tab stop after the cursor, else the last column
+        // (the right margin), consulting the HTS/TBC-managed table.
+        let col = self.grid().pos().col;
+        let cols = self.grid().size().cols;
+        let next = self
+            .tab_stops
+            .range((col + 1)..cols)
+            .next()
+            .copied()
+            .unwrap_or(cols - 1);
+        self.grid_mut().col_set(next);
     }
 
     pub(crate) fn lf(&mut self) {
@@ -986,6 +1011,12 @@ impl Screen {
     // ESC 8
     pub(crate) fn decrc(&mut self) {
         self.restore_cursor();
+    }
+
+    // shellglass: ESC H (HTS) — set a tab stop at the cursor column.
+    pub(crate) fn hts(&mut self) {
+        let col = self.grid().pos().col;
+        self.tab_stops.insert(col);
     }
 
     // ESC =
@@ -1149,6 +1180,39 @@ impl Screen {
             for _ in 0..count {
                 self.text(c);
             }
+        }
+    }
+
+    // shellglass: CSI I (CHT) — forward `count` tab stops.
+    pub(crate) fn cht(&mut self, count: u16) {
+        for _ in 0..count {
+            self.tab();
+        }
+    }
+
+    // shellglass: CSI Z (CBT) — back `count` tab stops (or column 0).
+    pub(crate) fn cbt(&mut self, count: u16) {
+        for _ in 0..count {
+            let col = self.grid().pos().col;
+            let prev = self
+                .tab_stops
+                .range(..col)
+                .next_back()
+                .copied()
+                .unwrap_or(0);
+            self.grid_mut().col_set(prev);
+        }
+    }
+
+    // shellglass: CSI g (TBC) — clear the tab stop at the cursor (0) or all (3).
+    pub(crate) fn tbc(&mut self, mode: u16) {
+        match mode {
+            0 => {
+                let col = self.grid().pos().col;
+                self.tab_stops.remove(&col);
+            }
+            3 => self.tab_stops.clear(),
+            _ => {}
         }
     }
 
@@ -1379,6 +1443,11 @@ impl Screen {
     pub(crate) fn scorc(&mut self) {
         self.grid_mut().restore_cursor();
     }
+}
+
+// shellglass: the power-on tab stops — every 8th column.
+fn default_tab_stops(cols: u16) -> std::collections::BTreeSet<u16> {
+    (8..cols).step_by(8).collect()
 }
 
 fn u16_to_u8(i: u16) -> Option<u8> {
