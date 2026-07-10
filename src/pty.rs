@@ -882,6 +882,24 @@ mod tests {
         );
     }
 
+    // The five kinds from the second exit report (roadmap phase 1.7): DECAWM
+    // and IRM are modeled now, cursor blink and SCS-ASCII are deliberate
+    // no-ops — all silent. ESC ( 0 (DEC line drawing) is a real gap and must
+    // stay loud.
+    #[test]
+    fn seqlog_silent_on_round3_kinds() {
+        let (seqlog, seen) = SeqLog::new();
+        let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, seqlog);
+        parser.process(b"\x1b[4h\x1b[4l\x1b[?7h\x1b[?7l\x1b[?12h\x1b[?12l");
+        parser.process(b"\x1b(B\x1b)B");
+        assert!(seen.lock().unwrap().is_empty(), "round-3 kinds are handled");
+        parser.process(b"\x1b(0");
+        assert_eq!(
+            seen.lock().unwrap().iter().cloned().collect::<Vec<_>>(),
+            vec!["ESC ( 0".to_string()]
+        );
+    }
+
     #[test]
     fn seqlog_kind_cap_bounds_memory() {
         let (mut seqlog, seen) = SeqLog::new();

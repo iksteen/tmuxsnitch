@@ -117,6 +117,29 @@ telemetry noise to silence deliberately.
    `h`/`l`/`m` in `csi_kind`) so a future unknown op is diagnosable straight
    from the exit line instead of reading as a bare `CSI t`.
 
+## Phase 1.7 — telemetry fallout, round 3 ✅ (landed 2026-07-10: vt100 `95e0058`)
+
+The second exit report (`CSI 4 l`, `CSI ? 7 h/l`, `CSI ? 12 h`, `ESC ( B`)
+split differently from round 2: two real gaps, two noise kinds.
+
+1. **DECAWM (`CSI ? 7 h/l`, autowrap)** — real. The parser wrapped
+   unconditionally; with autowrap off a real terminal clamps the cursor at the
+   right margin and overwrites the edge cell (status bars write the
+   bottom-right cell this way), so the mirror showed spilled lines the local
+   screen never had. Modeled as an inverted mode bit (zero default = wrap on),
+   reset by DECSTR.
+2. **IRM (`CSI 4 h/l`, insert mode)** — real. Bare SM/RM had no dispatch at
+   all; insert mode now shifts the rest of the row right before each glyph
+   lands. Other bare modes keep reporting (params ride the telemetry kind).
+   Reset by DECSTR.
+3. **Cursor blink (`CSI ? 12 h/l`)** — noise: the mirror renders a steady
+   cursor by design (the `cursorDeco` ponytail in viewer.ts); un-ignore if
+   blink is ever rendered.
+4. **SCS US-ASCII (`ESC ( B` / `ESC ) B`)** — noise: designating the only
+   charset the crate models is already true. `ESC ( 0` (DEC line drawing)
+   stays loud — if it ever shows up in a report, charset support becomes a
+   real roadmap item.
+
 ## Phase 2 — good to have
 
 4. **First-class image placements in the grid** ✅ *(the reason the crate was
