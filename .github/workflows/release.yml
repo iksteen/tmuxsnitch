@@ -99,10 +99,14 @@ jobs:
           files: shellglass-${{ matrix.target }}.tar.gz
 
       # Hand the raw binary to the docker job (Linux targets are the two image archs).
+      # if-no-files-found: error — a wrong path here must fail THIS job, not
+      # surface downstream as the docker job's "artifact not found" (which is
+      # exactly how the release→dist profile move slipped through).
       - uses: actions/upload-artifact@v7
         with:
           name: bin-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/shellglass
+          path: target/${{ matrix.target }}/dist/shellglass
+          if-no-files-found: error
 
   # Assemble the multi-arch image from the already-built Linux binaries — no second
   # Rust compile, so no slow aws-lc-rs build under arm64 QEMU. Only the tiny runtime
