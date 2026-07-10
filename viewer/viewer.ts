@@ -29,6 +29,7 @@ export interface Cell {
   s?: Flag; // strikethrough
   k?: Color; // underline color; absent = follow the text color
   n?: Flag; // inverse
+  a?: number; // OSC 8 hyperlink id, resolved through the frame's `y` table
   w?: Flag; // wide (two columns)
 }
 
@@ -71,6 +72,7 @@ interface FullMsg {
   q?: number; // DECSCUSR cursor style 0-6; absent = 0 (default block)
   e?: [Color, Color]; // OSC 10/11 default fg/bg overrides; absent = none
   t?: string; // window title (OSC 0/2); absent = none set
+  y?: Record<number, string>; // OSC 8 link table (id -> URI); absent = empty
   i?: ImageRef[]; // inline images placed on the screen; absent = none
 }
 // One inline image (iTerm2/kitty) placed at a cell. `m`/`d` build a data: URL;
@@ -92,6 +94,7 @@ interface DiffMsg {
   p?: Cur;
   q?: number;
   t?: string; // window title, two-state: absent = unchanged ("" = cleared)
+  y?: Record<number, string>; // NEW link-table entries, merged in
 }
 // A uniform span: c is the bare [row, left, "…"] tuple — ONE CELL PER CODEPOINT
 // — and the style flattened into the message applies to every cell.
@@ -926,7 +929,7 @@ function setStorm(on: boolean): void {
     stormHot = 0;
     for (let r = 0; r < screen.cells.length; r++) {
       const el = screen.rowEls[r];
-      if (el) el.innerHTML = renderRow(screen.cells[r], cursorCol(screen.cur, r));
+      if (el) el.innerHTML = renderRow(screen.cells[r], cursorCol(screen.cur, r), screen.sty, screen.links);
     }
     redrawCanvasAll();
   }
@@ -1018,6 +1021,21 @@ function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+// Attribute-context escape (href): quotes too.
+function escAttr(s: string): string {
+  return esc(s).replace(/"/g, "&quot;");
+}
+
+// OSC 8 comes from whatever program runs in the mirrored session, so treat the
+// URI as hostile: only schemes that can't execute in the page are rendered as
+// anchors (javascript:/data:/vbscript: would be viewer XSS one click away).
+export function linkHref(links: Record<number, string>, id: number | undefined): string | null {
+  if (id === undefined) return null;
+  const uri = links[id];
+  if (!uri) return null; // pruned table entry: render unlinked
+  return /^(https?|ftp|mailto):/i.test(uri) ? uri : null;
+}
+
 // Emit one SVG symbol span (already-escaped glyph, precomputed boxStyle) covering w
 // columns. When `stretch`, the glyph is forced to the full box (none + textLength) so
 // fill glyphs tile and an over-wide glyph is squeezed to 1ch at full height; otherwise
@@ -1073,17 +1091,32 @@ function cursorDeco(sty: number): string {
 // Render one row's cells to inner HTML. `cursorCol` is the cursor column (or -1),
 // `curSty` the DECSCUSR style: 0-2 render as the classic reverse-video block,
 // 3-6 leave the cell's colors alone and add an underline/bar decoration.
-export function renderRow(cells: Cell[], cursorCol: number, curSty = 0): string {
+// `links` is the OSC 8 id→URI table: linked runs render as real anchors.
+export function renderRow(
+  cells: Cell[],
+  cursorCol: number,
+  curSty = 0,
+  links: Record<number, string> = {},
+): string {
   const blocky = curSty <= 2;
   let out = "";
   let col = 0;
   let runStyle: string | null = null;
+  let runHref: string | null = null;
   let runCol = 0;
   let cols = 0;
   let text = "";
   const flushText = () => {
     if (text.length === 0) return;
-    out += `<span class="run" style="left:${runCol}ch;width:${cols}ch;${runStyle ?? ""}">${text}</span>`;
+    const st = `left:${runCol}ch;width:${cols}ch;${runStyle ?? ""}`;
+    // A linked run is a real anchor. rel severs the referrer/opener; the
+    // scheme was allowlisted in linkHref. Color/decoration are inherited via
+    // the injected #screen a.run rule, so page-template `a` styling can't
+    // repaint terminal text.
+    out +=
+      runHref === null
+        ? `<span class="run" style="${st}">${text}</span>`
+        : `<a class="run" href="${escAttr(runHref)}" target="_blank" rel="noopener noreferrer" style="${st}">${text}</a>`;
     text = "";
   };
   for (const cell of cells) {
@@ -1101,6 +1134,7 @@ export function renderRow(cells: Cell[], cursorCol: number, curSty = 0): string 
       // selectable/copyable. Own span (color forced transparent, background retained).
       flushText();
       runStyle = null;
+      runHref = null;
       cols = 0;
       out += `<span class="run" style="left:${col}ch;width:${w}ch;${cellStyle(cell, curBlock)}${deco}color:transparent">${esc(cell.t!)}</span>`;
       col += w;
@@ -1114,6 +1148,7 @@ export function renderRow(cells: Cell[], cursorCol: number, curSty = 0): string 
     if (cp0 && glyphOverflowsCell(cell.t!, w) && !isFillGlyph(cp0) && !symbolFamily(cp0)) {
       flushText();
       runStyle = null;
+      runHref = null;
       cols = 0;
       out += `<span class="run" style="left:${col}ch;width:${w}ch;overflow:visible;${cellStyle(cell, curBlock)}${deco}">${esc(cell.t!)}</span>`;
       col += w;
@@ -1123,18 +1158,26 @@ export function renderRow(cells: Cell[], cursorCol: number, curSty = 0): string 
     if (font) {
       // A symbol_map or long-tail fill glyph: its own scaled-SVG span (per cell — these
       // are rare, so run-merging them isn't worth the bookkeeping).
+      // ponytail: canvas-glyph/overflow/symbol cells stay plain spans — a
+      // linked box-drawing or symbol_map glyph is fringe; the run resets so
+      // the anchor never bleeds across.
       flushText();
       runStyle = null;
+      runHref = null;
       cols = 0;
       out += symbolCell(cell, curBlock, col, w, font, deco);
     } else {
       let style = cellStyle(cell, curBlock) + deco;
+      const href = linkHref(links, cell.a);
       // A blank cell with no visible ink (no bg, no underline) renders identically
       // under any fg/weight — let it ride the open run instead of splitting it, as
       // long as that run is equally ink-free (adopting a bg/underline run would
-      // paint the gap). Halves the span count on sparse animated screens (cmatrix).
+      // paint the gap) and NOT a link (a blank must never become clickable).
+      // Halves the span count on sparse animated screens (cmatrix).
       if (
         (!cell.t || cell.t === " ") &&
+        href === null &&
+        runHref === null &&
         runStyle !== null &&
         runStyle !== style &&
         inkFree(style) &&
@@ -1142,9 +1185,10 @@ export function renderRow(cells: Cell[], cursorCol: number, curSty = 0): string 
       ) {
         style = runStyle;
       }
-      if (runStyle !== style) {
+      if (runStyle !== style || runHref !== href) {
         flushText();
         runStyle = style;
+        runHref = href;
         cols = 0;
       }
       if (cols === 0) runCol = col;
@@ -1167,10 +1211,11 @@ interface ScreenState {
   cells: Cell[][];
   cur: Cur;
   sty: number; // DECSCUSR cursor style 0-6
+  links: Record<number, string>; // OSC 8 id -> URI
   rowEls: HTMLElement[];
 }
 
-let screen: ScreenState = { cells: [], cur: null, sty: 0, rowEls: [] };
+let screen: ScreenState = { cells: [], cur: null, sty: 0, links: {}, rowEls: [] };
 let screenEl: HTMLElement;
 
 // Update the screen's cell buffer + cursor from decoded line patches, returning
@@ -1316,7 +1361,7 @@ function flushPaint(): void {
       } else {
         const el = screen.rowEls[r];
         if (!el) continue;
-        el.innerHTML = renderRow(screen.cells[r] ?? [], cursorCol(screen.cur, r), screen.sty);
+        el.innerHTML = renderRow(screen.cells[r] ?? [], cursorCol(screen.cur, r), screen.sty, screen.links);
         redrawCanvasRow(r);
       }
     }
@@ -1332,7 +1377,13 @@ function flushPaint(): void {
 function applyFull(m: FullMsg): void {
   // Update the model now so diffs queued behind this full patch the right cells;
   // the DOM rebuild is deferred to the flush (which reads screen.cells).
-  screen = { cells: m.d.map(decodeBlock), cur: m.p ?? null, sty: m.q ?? 0, rowEls: [] };
+  screen = {
+    cells: m.d.map(decodeBlock),
+    cur: m.p ?? null,
+    sty: m.q ?? 0,
+    links: m.y ?? {},
+    rowEls: [],
+  };
   // Default-color overrides apply now (cfg feeds every style computation);
   // the element CSS lands with the rebuild below. Fulls carry the title
   // absolutely: absent = none set.
@@ -1364,7 +1415,7 @@ function paintFull(dims: { w: number; h: number; i?: ImageRef[] }): void {
   const cur = screen.cur;
   let html = `<div class="screen" style="width:${dims.w}ch;height:calc(${dims.h} * var(--lh));">`;
   for (let r = 0; r < screen.cells.length; r++) {
-    html += `<div class="row">${renderRow(screen.cells[r], cursorCol(cur, r), screen.sty)}</div>`;
+    html += `<div class="row">${renderRow(screen.cells[r], cursorCol(cur, r), screen.sty, screen.links)}</div>`;
   }
   html += "</div>";
   screenEl.innerHTML = html;
@@ -1421,6 +1472,8 @@ function applyPatches(
 
 function applyDiff(m: DiffMsg): void {
   if (m.t !== undefined) setTitle(m.t); // two-state: absent = unchanged
+  // New link-table entries merge; the next full frame prunes scrolled-off ids.
+  if (m.y) Object.assign(screen.links, m.y);
   applyPatches(m.p, m.q, (m.r ?? []).map(decodeRow));
 }
 
@@ -1437,7 +1490,7 @@ function applyLine(m: LineMsg): void {
 }
 
 function applyBanner(m: BannerMsg): void {
-  screen = { cells: [], cur: null, sty: 0, rowEls: [] };
+  screen = { cells: [], cur: null, sty: 0, links: {}, rowEls: [] };
   rebuildBanner = m.b;
   rebuildDims = null;
   dirtyRows.clear();
@@ -1543,6 +1596,13 @@ function main(): void {
   setConfig(boot.cfg);
   setProto(boot.proto, boot.js);
   screenEl = document.getElementById("screen")!;
+  // OSC 8 anchors: inherit the terminal styling (a page template's own `a`
+  // rules must not repaint terminal text) and underline on hover, like kitty.
+  const linkCss = document.createElement("style");
+  linkCss.textContent =
+    "#screen a.run{color:inherit;text-decoration:none}" +
+    "#screen a.run:hover{text-decoration:underline}";
+  document.head.appendChild(linkCss);
   connect(boot.events);
   startStats();
   // Web fonts load async; any glyph-width measured before they land is cached wrong

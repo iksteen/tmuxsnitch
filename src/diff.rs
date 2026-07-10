@@ -334,6 +334,8 @@ enum WireMsg<'a> {
         defaults: (Color, Color),
         /// Window title: the `t` key, omitted when empty.
         title: &'a str,
+        /// OSC 8 link table (id → URI): the `y` key, omitted when empty.
+        links: &'a std::collections::BTreeMap<u32, String>,
         rows: Vec<CellBlock<'a>>,
         /// Inline images (empty for the common text-only case ⇒ `i` key omitted).
         images: &'a [ImagePlacement],
@@ -352,6 +354,9 @@ enum WireMsg<'a> {
         /// cleared). Only on this shape and Full — never the flattened `c`
         /// form, where an old viewer would spread `t` into cell text.
         title: Option<&'a str>,
+        /// New OSC 8 table entries this diff's cells introduce (`y`, merged
+        /// into the viewer's table). A diff needing this forces this shape.
+        links: std::collections::BTreeMap<u32, &'a String>,
         rows: Vec<WireRow<'a>>,
     },
     /// A uniform span — the hottest diffs (spinner ticks, typing echo, appended
@@ -387,6 +392,7 @@ impl Serialize for WireMsg<'_> {
                 sty,
                 defaults,
                 title,
+                links,
                 rows,
                 images,
             } => {
@@ -405,6 +411,9 @@ impl Serialize for WireMsg<'_> {
                 if !title.is_empty() {
                     m.serialize_entry("t", title)?;
                 }
+                if !links.is_empty() {
+                    m.serialize_entry("y", links)?;
+                }
                 if !images.is_empty() {
                     m.serialize_entry("i", images)?;
                 }
@@ -413,6 +422,7 @@ impl Serialize for WireMsg<'_> {
                 cur,
                 sty,
                 title,
+                links,
                 rows,
             } => {
                 if !rows.is_empty() {
@@ -426,6 +436,9 @@ impl Serialize for WireMsg<'_> {
                 }
                 if let Some(t) = title {
                     m.serialize_entry("t", t)?;
+                }
+                if !links.is_empty() {
+                    m.serialize_entry("y", links)?;
                 }
             }
             WireMsg::Cell { cur, sty, r, style } => {
@@ -638,6 +651,9 @@ struct CellStyle {
         serialize_with = "flag"
     )]
     inverse: bool,
+    /// OSC 8 hyperlink id, resolved through the frame's `y` table.
+    #[serde(rename = "a", skip_serializing_if = "Option::is_none")]
+    link: Option<u32>,
     #[serde(
         rename = "w",
         skip_serializing_if = "crate::model::is_false",
@@ -663,6 +679,9 @@ impl CellStyle {
         if self.underline != 0 {
             m.serialize_entry("u", &self.underline)?;
         }
+        if let Some(link) = self.link {
+            m.serialize_entry("a", &link)?;
+        }
         for (set, key) in [
             (self.bold, "b"),
             (self.dim, "d"),
@@ -686,6 +705,7 @@ fn is_plain(c: &StyledCell) -> bool {
         && c.bg == Color::Default
         && c.ulcolor == Color::Default
         && c.underline == 0
+        && c.link.is_none()
         && !(c.bold || c.dim || c.italic || c.strike || c.inverse || c.wide)
 }
 
@@ -700,6 +720,7 @@ fn cell_style(c: &StyledCell) -> CellStyle {
         strike: c.strike,
         ulcolor: c.ulcolor,
         inverse: c.inverse,
+        link: c.link,
         wide: c.wide,
     }
 }
@@ -775,6 +796,7 @@ fn full_message_grid(g: &Grid) -> String {
         sty: g.cursor_style,
         defaults: g.default_colors,
         title: &g.title,
+        links: &g.links,
         rows: g.rows.iter().map(|r| cell_block(r.iter())).collect(),
         images: &g.images,
     };
@@ -803,12 +825,23 @@ fn diff_message(a: &Grid, b: &Grid) -> Option<String> {
     // a harmless cursor no-op.
     let sty = (a.cursor_style != b.cursor_style).then_some(b.cursor_style);
     let title = (a.title != b.title).then_some(b.title.as_str());
+    // OSC 8 entries this frame's cells introduce (ids are stable, so an id the
+    // previous frame carried needs no re-send; the viewer merges additions and
+    // prunes on the next full).
+    let links: std::collections::BTreeMap<u32, &String> = b
+        .links
+        .iter()
+        .filter(|(id, _)| !a.links.contains_key(id))
+        .map(|(&id, uri)| (id, uri))
+        .collect();
     // Absent = unchanged; Some(None) = became hidden; Some(pos) = moved.
     let cur = (a.cursor != b.cursor || sty.is_some() || title.is_some()).then_some(b.cursor);
-    // A title change forces the Diff shape: the compact `c` form flattens its
-    // style into the envelope, where old viewers spread unknown keys into
-    // cell objects — a `t` there would overwrite cell text.
-    let msg = if rows.len() == 1 && title.is_none() {
+    // A title change or a new link table entry forces the Diff shape: the
+    // compact `c` form flattens its style into the envelope, where old
+    // viewers spread unknown keys into cell objects — a `t` there would
+    // overwrite cell text (and keeping `y` off the compact forms keeps the
+    // decode surface small).
+    let msg = if rows.len() == 1 && title.is_none() && links.is_empty() {
         match rows.pop().expect("len checked") {
             WireRow::Cell { r, l, cell } => WireMsg::Cell {
                 cur,
@@ -840,6 +873,7 @@ fn diff_message(a: &Grid, b: &Grid) -> Option<String> {
             cur,
             sty,
             title,
+            links,
             rows,
         }
     };
@@ -914,6 +948,7 @@ enum WireMsgIn {
         sty: u8,
         defaults: (Color, Color),
         title: String,
+        links: std::collections::BTreeMap<u32, String>,
         rows: Vec<CellBlockIn>,
         images: Vec<ImagePlacement>,
     },
@@ -921,6 +956,7 @@ enum WireMsgIn {
         cur: Option<Option<(u16, u16)>>,
         sty: Option<u8>,
         title: Option<String>,
+        links: std::collections::BTreeMap<u32, String>,
         rows: Vec<WireRowIn>,
     },
     Cell {
@@ -979,6 +1015,13 @@ impl<'de> Deserialize<'de> for WireMsgIn {
                 Some(t) => Ok(Some(from_val(t)?)),
             }
         };
+        // OSC 8 link table `y`: full table on fulls, additions on diffs.
+        let links = || -> Result<std::collections::BTreeMap<u32, String>, D::Error> {
+            match obj.get("y") {
+                None => Ok(std::collections::BTreeMap::new()),
+                Some(y) => from_val(y),
+            }
+        };
         if let Some(c) = obj.get("c") {
             return Ok(WireMsgIn::Cell {
                 cur: tri()?,
@@ -999,6 +1042,7 @@ impl<'de> Deserialize<'de> for WireMsgIn {
                 cur: tri()?,
                 sty: sty()?,
                 title: title()?,
+                links: links()?,
                 rows: from_val(r)?,
             });
         }
@@ -1024,6 +1068,7 @@ impl<'de> Deserialize<'de> for WireMsgIn {
                     Some(t) => from_val(t)?,
                     None => String::new(),
                 },
+                links: links()?,
                 rows: from_val(rows)?,
                 images: match obj.get("i") {
                     Some(i) => from_val(i)?,
@@ -1047,6 +1092,7 @@ impl<'de> Deserialize<'de> for WireMsgIn {
                 cur,
                 sty: sty()?,
                 title: title()?,
+                links: links()?,
                 rows: Vec::new(),
             });
         }
@@ -1301,6 +1347,8 @@ struct CellStyleIn {
     ulcolor: Color,
     #[serde(rename = "n", default, deserialize_with = "truthy")]
     inverse: bool,
+    #[serde(rename = "a", default)]
+    link: Option<u32>,
     #[serde(rename = "w", default, deserialize_with = "truthy")]
     wide: bool,
 }
@@ -1334,6 +1382,7 @@ fn decode_block(block: CellBlockIn) -> Vec<StyledCell> {
             c.strike = s.strike;
             c.ulcolor = s.ulcolor;
             c.inverse = s.inverse;
+            c.link = s.link;
             c.wide = s.wide;
         }
     }
@@ -1345,14 +1394,15 @@ fn decode_block(block: CellBlockIn) -> Vec<StyledCell> {
 /// lockstep with every browser. `None` = drop the message (a diff arriving while
 /// the state is a banner is a desync; forwarding it would corrupt viewers too).
 fn apply_wire(prev: &Frame, msg: WireMsgIn) -> Option<Frame> {
-    // Normalize the three diff shapes into (cursor, style, title, row patches).
-    let (cur, sty, title, rows) = match msg {
+    // Normalize the three diff shapes into (cursor, style, title, links, rows).
+    let (cur, sty, title, links, rows) = match msg {
         WireMsgIn::Full {
             w,
             cur,
             sty,
             defaults,
             title,
+            links,
             rows,
             images,
         } => {
@@ -1363,6 +1413,7 @@ fn apply_wire(prev: &Frame, msg: WireMsgIn) -> Option<Frame> {
                 cursor_style: sty,
                 default_colors: defaults,
                 title,
+                links,
                 images,
             }));
         }
@@ -1371,8 +1422,9 @@ fn apply_wire(prev: &Frame, msg: WireMsgIn) -> Option<Frame> {
             cur,
             sty,
             title,
+            links,
             rows,
-        } => (cur, sty, title, rows),
+        } => (cur, sty, title, links, rows),
         WireMsgIn::Cell { cur, sty, r, style } => {
             let (row, l, text) = r;
             let n = text.chars().count();
@@ -1380,6 +1432,7 @@ fn apply_wire(prev: &Frame, msg: WireMsgIn) -> Option<Frame> {
                 cur,
                 sty,
                 None,
+                std::collections::BTreeMap::new(),
                 vec![WireRowIn {
                     r: row,
                     l,
@@ -1390,7 +1443,9 @@ fn apply_wire(prev: &Frame, msg: WireMsgIn) -> Option<Frame> {
                 }],
             )
         }
-        WireMsgIn::Line { cur, sty, r } => (cur, sty, None, vec![r]),
+        WireMsgIn::Line { cur, sty, r } => {
+            (cur, sty, None, std::collections::BTreeMap::new(), vec![r])
+        }
     };
     let Frame::Screen(grid) = prev else {
         return None; // a diff can't apply to a banner — drop it
@@ -1436,6 +1491,7 @@ fn apply_wire(prev: &Frame, msg: WireMsgIn) -> Option<Frame> {
     if let Some(t) = title {
         grid.title = t; // absent = unchanged
     }
+    grid.links.extend(links); // additions merge; fulls replace (above)
     Some(Frame::Screen(grid))
 }
 
@@ -1460,6 +1516,7 @@ mod tests {
             cursor_style: 0,
             default_colors: (Color::Default, Color::Default),
             title: String::new(),
+            links: std::collections::BTreeMap::new(),
             images: Vec::new(),
         }
     }
@@ -1924,6 +1981,54 @@ mod tests {
         })
         .expect("clear is a change");
         assert!(msg.contains(r#""t":"""#), "{msg}");
+    }
+
+    // OSC 8: cell ids ride as style key `a`, the id→URI table as `y` — whole
+    // table on fulls, new entries only on diffs (which forces the Diff shape,
+    // keeping `y` off the compact forms), merged into the hub matrix.
+    #[test]
+    fn links_ride_as_a_ids_and_y_table() {
+        let mut a = grid(&["ab"]);
+        a.links.insert(1, "https://one.example".into());
+        a.rows[0][0].link = Some(1);
+        let full = full_message_grid(&a);
+        assert!(full.contains(r#"{"a":1}"#), "{full}");
+        assert!(
+            full.contains(r#""y":{"1":"https://one.example"}"#),
+            "{full}"
+        );
+
+        let prev = Frame::Banner("x".into());
+        let Some(Frame::Screen(g)) = apply(&prev, &full) else {
+            panic!("full applies")
+        };
+        assert_eq!(g.rows[0][0].link, Some(1));
+        assert_eq!(
+            g.links.get(&1).map(String::as_str),
+            Some("https://one.example")
+        );
+
+        // A diff whose cells introduce a NEW id carries just that entry and
+        // refuses the compact single-cell form; the hub merges it.
+        let mut b = a.clone();
+        b.links.insert(2, "https://two.example".into());
+        b.rows[0][1].link = Some(2);
+        let msg = diff_message(&a, &b).expect("link change is a change");
+        assert!(
+            msg.contains(r#""y":{"2":"https://two.example"}"#) && !msg.contains(r#""c":"#),
+            "{msg}"
+        );
+        let Some(Frame::Screen(g)) = apply(&Frame::Screen(a.clone()), &msg) else {
+            panic!("diff applies")
+        };
+        assert_eq!(g.rows[0][1].link, Some(2));
+        assert_eq!(g.links.len(), 2, "new entry merged, old kept");
+
+        // A diff touching only cells with an already-known id sends no table.
+        let mut c = b.clone();
+        c.rows[0][0].text = "X".into();
+        let msg = diff_message(&b, &c).expect("change");
+        assert!(!msg.contains(r#""y":"#), "known id needs no re-send: {msg}");
     }
 
     #[test]

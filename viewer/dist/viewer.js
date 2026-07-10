@@ -657,7 +657,7 @@ function setStorm(on) {
         for (let r = 0; r < screen.cells.length; r++) {
             const el = screen.rowEls[r];
             if (el)
-                el.innerHTML = renderRow(screen.cells[r], cursorCol(screen.cur, r));
+                el.innerHTML = renderRow(screen.cells[r], cursorCol(screen.cur, r), screen.sty, screen.links);
         }
         redrawCanvasAll();
     }
@@ -722,6 +722,17 @@ function svgFont(cell) {
 function esc(s) {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
+function escAttr(s) {
+    return esc(s).replace(/"/g, "&quot;");
+}
+export function linkHref(links, id) {
+    if (id === undefined)
+        return null;
+    const uri = links[id];
+    if (!uri)
+        return null;
+    return /^(https?|ftp|mailto):/i.test(uri) ? uri : null;
+}
 function symbolSpan(col, w, boxStyle, font, glyph, stretch) {
     const par = stretch ? "none" : "xMidYMid meet";
     const len = stretch ? ' textLength="14" lengthAdjust="spacingAndGlyphs"' : "";
@@ -744,18 +755,23 @@ function cursorDeco(sty) {
         ? "box-shadow:inset 0.14em 0 0 0 currentColor;"
         : "box-shadow:inset 0 -0.14em 0 0 currentColor;";
 }
-export function renderRow(cells, cursorCol, curSty = 0) {
+export function renderRow(cells, cursorCol, curSty = 0, links = {}) {
     const blocky = curSty <= 2;
     let out = "";
     let col = 0;
     let runStyle = null;
+    let runHref = null;
     let runCol = 0;
     let cols = 0;
     let text = "";
     const flushText = () => {
         if (text.length === 0)
             return;
-        out += `<span class="run" style="left:${runCol}ch;width:${cols}ch;${runStyle ?? ""}">${text}</span>`;
+        const st = `left:${runCol}ch;width:${cols}ch;${runStyle ?? ""}`;
+        out +=
+            runHref === null
+                ? `<span class="run" style="${st}">${text}</span>`
+                : `<a class="run" href="${escAttr(runHref)}" target="_blank" rel="noopener noreferrer" style="${st}">${text}</a>`;
         text = "";
     };
     for (const cell of cells) {
@@ -767,6 +783,7 @@ export function renderRow(cells, cursorCol, curSty = 0) {
         if (cp0 && isCanvasGlyph(cp0) && !(cp0 >= 0xe000 && symbolFamily(cp0))) {
             flushText();
             runStyle = null;
+            runHref = null;
             cols = 0;
             out += `<span class="run" style="left:${col}ch;width:${w}ch;${cellStyle(cell, curBlock)}${deco}color:transparent">${esc(cell.t)}</span>`;
             col += w;
@@ -775,6 +792,7 @@ export function renderRow(cells, cursorCol, curSty = 0) {
         if (cp0 && glyphOverflowsCell(cell.t, w) && !isFillGlyph(cp0) && !symbolFamily(cp0)) {
             flushText();
             runStyle = null;
+            runHref = null;
             cols = 0;
             out += `<span class="run" style="left:${col}ch;width:${w}ch;overflow:visible;${cellStyle(cell, curBlock)}${deco}">${esc(cell.t)}</span>`;
             col += w;
@@ -784,21 +802,26 @@ export function renderRow(cells, cursorCol, curSty = 0) {
         if (font) {
             flushText();
             runStyle = null;
+            runHref = null;
             cols = 0;
             out += symbolCell(cell, curBlock, col, w, font, deco);
         }
         else {
             let style = cellStyle(cell, curBlock) + deco;
+            const href = linkHref(links, cell.a);
             if ((!cell.t || cell.t === " ") &&
+                href === null &&
+                runHref === null &&
                 runStyle !== null &&
                 runStyle !== style &&
                 inkFree(style) &&
                 inkFree(runStyle)) {
                 style = runStyle;
             }
-            if (runStyle !== style) {
+            if (runStyle !== style || runHref !== href) {
                 flushText();
                 runStyle = style;
+                runHref = href;
                 cols = 0;
             }
             if (cols === 0)
@@ -814,7 +837,7 @@ export function renderRow(cells, cursorCol, curSty = 0) {
 function cursorCol(cur, row) {
     return cur && cur[0] === row ? cur[1] : -1;
 }
-let screen = { cells: [], cur: null, sty: 0, rowEls: [] };
+let screen = { cells: [], cur: null, sty: 0, links: {}, rowEls: [] };
 let screenEl;
 export function patchCells(state, dp) {
     const dirty = new Set();
@@ -917,7 +940,7 @@ function flushPaint() {
                 const el = screen.rowEls[r];
                 if (!el)
                     continue;
-                el.innerHTML = renderRow(screen.cells[r] ?? [], cursorCol(screen.cur, r), screen.sty);
+                el.innerHTML = renderRow(screen.cells[r] ?? [], cursorCol(screen.cur, r), screen.sty, screen.links);
                 redrawCanvasRow(r);
             }
         }
@@ -928,7 +951,13 @@ function flushPaint() {
     });
 }
 function applyFull(m) {
-    screen = { cells: m.d.map(decodeBlock), cur: m.p ?? null, sty: m.q ?? 0, rowEls: [] };
+    screen = {
+        cells: m.d.map(decodeBlock),
+        cur: m.p ?? null,
+        sty: m.q ?? 0,
+        links: m.y ?? {},
+        rowEls: [],
+    };
     defaultsCss = applyDefaults(m.e);
     setTitle(m.t ?? "");
     rebuildDims = { w: m.w, h: m.h, i: m.i };
@@ -951,7 +980,7 @@ function paintFull(dims) {
     const cur = screen.cur;
     let html = `<div class="screen" style="width:${dims.w}ch;height:calc(${dims.h} * var(--lh));">`;
     for (let r = 0; r < screen.cells.length; r++) {
-        html += `<div class="row">${renderRow(screen.cells[r], cursorCol(cur, r), screen.sty)}</div>`;
+        html += `<div class="row">${renderRow(screen.cells[r], cursorCol(cur, r), screen.sty, screen.links)}</div>`;
     }
     html += "</div>";
     screenEl.innerHTML = html;
@@ -989,6 +1018,8 @@ function applyPatches(cur, sty, rows) {
 function applyDiff(m) {
     if (m.t !== undefined)
         setTitle(m.t);
+    if (m.y)
+        Object.assign(screen.links, m.y);
     applyPatches(m.p, m.q, (m.r ?? []).map(decodeRow));
 }
 function applyCell(m) {
@@ -1003,7 +1034,7 @@ function applyLine(m) {
     applyPatches(m.p, m.q, [decodeRow(m.l)]);
 }
 function applyBanner(m) {
-    screen = { cells: [], cur: null, sty: 0, rowEls: [] };
+    screen = { cells: [], cur: null, sty: 0, links: {}, rowEls: [] };
     rebuildBanner = m.b;
     rebuildDims = null;
     dirtyRows.clear();
@@ -1090,6 +1121,11 @@ function main() {
     setConfig(boot.cfg);
     setProto(boot.proto, boot.js);
     screenEl = document.getElementById("screen");
+    const linkCss = document.createElement("style");
+    linkCss.textContent =
+        "#screen a.run{color:inherit;text-decoration:none}" +
+            "#screen a.run:hover{text-decoration:underline}";
+    document.head.appendChild(linkCss);
     connect(boot.events);
     startStats();
     const reflowGlyphs = () => {

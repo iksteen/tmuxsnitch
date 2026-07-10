@@ -7,6 +7,7 @@ import {
   resolveRgb,
   cellStyle,
   applyDefaults,
+  linkHref,
   isFillGlyph,
   isCanvasGlyph,
   glyphOps,
@@ -120,6 +121,45 @@ test("cellStyle renders modern SGR: underline styles, strike, underline color", 
 test("renderRow coalesces same-style cells into one positioned run", () => {
   const html = renderRow([{ t: "a" }, { t: "b" }, { t: "c" }], -1);
   assert.equal(html, '<span class="run" style="left:0ch;width:3ch;">abc</span>');
+});
+
+test("renderRow turns OSC 8 runs into safe anchors", () => {
+  const links = { 1: "https://example.com/?q=\"x\"", 2: "javascript:alert(1)" };
+  // Linked cells coalesce into one anchor; href is attribute-escaped; the
+  // neighbours stay plain spans.
+  const html = renderRow(
+    [{ t: "x" }, { t: "a", a: 1 }, { t: "b", a: 1 }, { t: "y" }],
+    -1,
+    0,
+    links,
+  );
+  assert.equal(
+    html,
+    '<span class="run" style="left:0ch;width:1ch;">x</span>' +
+      '<a class="run" href="https://example.com/?q=&quot;x&quot;" target="_blank" rel="noopener noreferrer" style="left:1ch;width:2ch;">ab</a>' +
+      '<span class="run" style="left:3ch;width:1ch;">y</span>',
+  );
+  // Adjacent cells with different links must not merge into one anchor.
+  const two = renderRow([{ t: "a", a: 1 }, { t: "b", a: 2 }], -1, 0, {
+    1: "https://a.example",
+    2: "https://b.example",
+  });
+  assert.equal(two.match(/<a /g)?.length, 2);
+  // A blank cell must not ride a linked run (no clickable gaps).
+  const gap = renderRow([{ t: "a", a: 1 }, {}, { t: "b", a: 1 }], -1, 0, {
+    1: "https://a.example",
+  });
+  assert.equal(gap.match(/<a /g)?.length, 2, "blank splits the anchor");
+});
+
+test("linkHref allowlists schemes and tolerates pruned ids", () => {
+  const links = { 1: "https://ok", 2: "javascript:alert(1)", 3: "DATA:text/html,x", 4: "MAILTO:a@b" };
+  assert.equal(linkHref(links, 1), "https://ok");
+  assert.equal(linkHref(links, 2), null, "javascript: refused");
+  assert.equal(linkHref(links, 3), null, "data: refused");
+  assert.equal(linkHref(links, 4), "MAILTO:a@b", "scheme match is case-insensitive");
+  assert.equal(linkHref(links, 9), null, "pruned id renders unlinked");
+  assert.equal(linkHref(links, undefined), null);
 });
 
 test("renderRow draws DECSCUSR cursor shapes", () => {

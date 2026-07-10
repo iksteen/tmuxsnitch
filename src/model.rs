@@ -94,6 +94,9 @@ pub struct StyledCell {
     /// Underline color (SGR 58/59); `Default` = follow the text color.
     pub ulcolor: Color,
     pub inverse: bool,
+    /// OSC 8 hyperlink id, resolved through [`Grid::links`]. Rides the wire
+    /// as style key `a`.
+    pub link: Option<u32>,
     /// Occupies two terminal columns.
     pub wide: bool,
 }
@@ -168,6 +171,11 @@ pub struct Grid {
     /// flattened `c` form: an old viewer spreads unknown `c`-envelope keys
     /// into every cell, where `t` would overwrite cell *text*.
     pub title: String,
+    /// OSC 8 hyperlink table for the ids referenced by on-screen cells,
+    /// id → URI. Rides the wire as the optional `y` key: the whole table on
+    /// full frames, new entries only on the Diff shape (a diff introducing a
+    /// new id forces that shape).
+    pub links: std::collections::BTreeMap<u32, String>,
     /// Inline images currently placed on the screen (empty for the common case).
     pub images: Vec<ImagePlacement>,
 }

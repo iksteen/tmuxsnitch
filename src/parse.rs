@@ -25,6 +25,9 @@ pub fn grid_from_screen(screen: &vt100::Screen) -> Grid {
     let (srows, scols) = screen.size();
 
     let mut grid_rows: Vec<Vec<StyledCell>> = Vec::with_capacity(srows as usize);
+    // OSC 8: the id→URI table for the ids actually on screen, built during
+    // the same scan (ids are stable, so entries never change once inserted).
+    let mut links = std::collections::BTreeMap::new();
     for r in 0..srows {
         let mut row = Vec::with_capacity(scols as usize);
         let mut c = 0;
@@ -46,6 +49,13 @@ pub fn grid_from_screen(screen: &vt100::Screen) -> Grid {
             if text.is_empty() {
                 text.push(' ');
             }
+            // A link id whose URI was pruned from the parser's bounded table
+            // renders unlinked rather than dangling.
+            let link = cell.link().and_then(|id| {
+                let uri = screen.link_uri(id)?;
+                links.entry(id.get()).or_insert_with(|| uri.to_string());
+                Some(id.get())
+            });
             row.push(StyledCell {
                 text,
                 fg: conv_color(cell.fgcolor()),
@@ -57,6 +67,7 @@ pub fn grid_from_screen(screen: &vt100::Screen) -> Grid {
                 strike: cell.strikethrough(),
                 ulcolor: conv_color(cell.ulcolor()),
                 inverse: cell.inverse(),
+                link,
                 wide,
             });
             c += if wide { 2 } else { 1 };
@@ -84,6 +95,7 @@ pub fn grid_from_screen(screen: &vt100::Screen) -> Grid {
                 .map_or(Color::Default, |(r, g, b)| Color::Rgb(r, g, b)),
         ),
         title: screen.title().to_string(),
+        links,
         // Images are tracked outside vt100 (it drops the sequences); the PTY backend
         // fills this in after extraction. Text-only extraction leaves it empty.
         images: Vec::new(),
@@ -128,6 +140,24 @@ mod tests {
         assert!(!row[0].strike);
         assert_eq!(row[1].underline, 0);
         assert!(row[1].strike);
+    }
+
+    #[test]
+    fn hyperlinks_extract_ids_and_table() {
+        let g = grid_from_capture(
+            "\x1b]8;;https://example.com\x1b\\hi\x1b]8;;\x1b\\ there",
+            20,
+            1,
+        );
+        let row = &g.rows[0];
+        let id = row[0].link.expect("linked");
+        assert_eq!(row[1].link, Some(id));
+        assert_eq!(row[2].link, None);
+        assert_eq!(
+            g.links.get(&id).map(String::as_str),
+            Some("https://example.com")
+        );
+        assert_eq!(g.links.len(), 1);
     }
 
     #[test]
