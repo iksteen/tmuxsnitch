@@ -1674,6 +1674,9 @@ impl<T> Screen<T> {
                 [4, n] if *n <= 5 => {
                     self.attrs.set_underline_style(to_u8!(*n));
                 }
+                // shellglass: blink — 5 slow and 6 rapid share one bit (kitty
+                // doesn't distinguish either)
+                [5 | 6] => self.attrs.set_blink(true),
                 [7] => self.attrs.set_inverse(true),
                 // shellglass: conceal (ECMA-48 "hidden"; kitty ignores it,
                 // most other terminals blank the glyph — see attrs.rs)
@@ -1685,6 +1688,8 @@ impl<T> Screen<T> {
                 [22] => self.attrs.set_normal_intensity(),
                 [23] => self.attrs.set_italic(false),
                 [24] => self.attrs.set_underline(false),
+                // shellglass: blink off
+                [25] => self.attrs.set_blink(false),
                 [27] => self.attrs.set_inverse(false),
                 // shellglass: conceal off (reveal)
                 [28] => self.attrs.set_concealed(false),

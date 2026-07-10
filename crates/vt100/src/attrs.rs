@@ -32,6 +32,9 @@ const TEXT_MODE_UNDERLINE: u16 = 0b1110_0000;
 // SGR table has no case 8), a documented deviation we do NOT copy: the mirror
 // showing text a concealing terminal hides is a content leak.
 const TEXT_MODE_CONCEALED: u16 = 0b1_0000_0000;
+// shellglass: blink (SGR 5/6 set — one bit, rapid isn't distinguished, same
+// as kitty — SGR 25 clears). kitty renders blinking text (cursor.c: S(blink)).
+const TEXT_MODE_BLINK: u16 = 0b10_0000_0000;
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Attrs {
@@ -148,6 +151,19 @@ impl Attrs {
         }
     }
 
+    // shellglass: blink (SGR 5/6, 25 off).
+    pub fn blink(&self) -> bool {
+        self.mode & TEXT_MODE_BLINK != 0
+    }
+
+    pub fn set_blink(&mut self, blink: bool) {
+        if blink {
+            self.mode |= TEXT_MODE_BLINK;
+        } else {
+            self.mode &= !TEXT_MODE_BLINK;
+        }
+    }
+
     pub fn write_escape_code_diff(
         &self,
         contents: &mut Vec<u8>,
@@ -211,6 +227,12 @@ impl Attrs {
             attrs
         } else {
             attrs.concealed(self.concealed())
+        };
+        // shellglass: blink
+        let attrs = if self.blink() == other.blink() {
+            attrs
+        } else {
+            attrs.blink(self.blink())
         };
 
         attrs.write_buf(contents);

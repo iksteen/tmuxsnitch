@@ -126,6 +126,8 @@ pub struct Attrs {
     inverse: Option<bool>,
     // shellglass: conceal (SGR 8/28)
     concealed: Option<bool>,
+    // shellglass: blink (SGR 5, 25 off)
+    blink: Option<bool>,
 }
 
 impl Attrs {
@@ -177,6 +179,12 @@ impl Attrs {
         self.concealed = Some(concealed);
         self
     }
+
+    // shellglass
+    pub fn blink(mut self, blink: bool) -> Self {
+        self.blink = Some(blink);
+        self
+    }
 }
 
 impl BufWrite for Attrs {
@@ -192,6 +200,7 @@ impl BufWrite for Attrs {
             && self.strikethrough.is_none()
             && self.inverse.is_none()
             && self.concealed.is_none()
+            && self.blink.is_none()
         {
             return;
         }
@@ -308,6 +317,16 @@ impl BufWrite for Attrs {
                 write_param!(8);
             } else {
                 write_param!(28);
+            }
+        }
+
+        // shellglass: blink — re-emitted so the SSH view's real terminal
+        // animates it itself.
+        if let Some(blink) = self.blink {
+            if blink {
+                write_param!(5);
+            } else {
+                write_param!(25);
             }
         }
 

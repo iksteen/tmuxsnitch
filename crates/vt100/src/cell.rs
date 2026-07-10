@@ -244,4 +244,11 @@ impl<T> Cell<T> {
     pub fn concealed(&self) -> bool {
         self.attrs.concealed()
     }
+
+    /// Returns whether the cell should be rendered blinking (SGR 5/6, 25 off).
+    // shellglass
+    #[must_use]
+    pub fn blink(&self) -> bool {
+        self.attrs.blink()
+    }
 }

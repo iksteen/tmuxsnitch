@@ -43,6 +43,10 @@
 #     re-emits 8/28. Deliberate deviation from kitty, which ignores SGR 8:
 #     a mirror SHOWING text the local terminal hides is a content leak.
 #     Tests in tests/attr.rs (conceal).
+#   - attrs.rs/term.rs/screen.rs/cell.rs: blink (SGR 5/6 → one bit, 25 off;
+#     kitty renders blinking text and doesn't distinguish rapid either).
+#     Cell::blink() for renderers; formatted output re-emits 5/25. Tests in
+#     tests/attr.rs (blink).
 #   - screen.rs/perform.rs: DECSCUSR (`CSI n SP q`) cursor style — raw 0-6
 #     tracked on Screen (cursor_style()), reset by DECSTR and RIS; out-of-range
 #     values stay unhandled. Tests in tests/csi.rs (decscusr).

@@ -101,3 +101,28 @@ fn conceal() {
         );
     }
 }
+
+// shellglass: blink (SGR 5/6, 25 off) — kitty renders blinking text, so the
+// bit is modeled and the repaint path re-emits 5/25.
+#[test]
+fn blink() {
+    let mut vt = vt100::Parser::default();
+    vt.process(b"\x1b[5ma\x1b[25mb\x1b[6mc\x1b[md");
+    let blink = |vt: &vt100::Parser, col: u16| {
+        vt.screen().cell(0, col).unwrap().blink()
+    };
+    assert!(blink(&vt, 0), "SGR 5 blinks");
+    assert!(!blink(&vt, 1), "SGR 25 stops");
+    assert!(blink(&vt, 2), "SGR 6 rapid shares the bit");
+    assert!(!blink(&vt, 3), "SGR 0 resets");
+
+    let mut vt2 = vt100::Parser::default();
+    vt2.process(&vt.screen().contents_formatted());
+    for col in 0..4 {
+        assert_eq!(
+            blink(&vt, col),
+            blink(&vt2, col),
+            "formatted roundtrip, col {col}"
+        );
+    }
+}
