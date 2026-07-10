@@ -98,3 +98,30 @@ fn st_is_deliberately_ignored() {
     parser.process(b"a\x1b]10;?\x1b\\b");
     assert_eq!(parser.screen().contents(), "ab");
 }
+
+// shellglass: SCS ESC ( B / ESC ) B (designate US-ASCII) is the only charset
+// this crate models — silent; ESC ( 0 (DEC line drawing) is a real gap and
+// must keep reporting.
+#[test]
+fn scs_ascii_is_ignored_dec_graphics_reports() {
+    #[derive(Default)]
+    struct Rec(Vec<(Option<u8>, u8)>);
+    impl vt100::Callbacks for Rec {
+        fn unhandled_escape(
+            &mut self,
+            _: &mut vt100::Screen,
+            i1: Option<u8>,
+            _: Option<u8>,
+            b: u8,
+        ) {
+            self.0.push((i1, b));
+        }
+    }
+    let mut parser =
+        vt100::Parser::new_with_callbacks(24, 80, 0, Rec::default());
+    parser.process(b"a\x1b(B\x1b)Bb");
+    assert_eq!(parser.callbacks().0, vec![]);
+    assert_eq!(parser.screen().contents(), "ab");
+    parser.process(b"\x1b(0");
+    assert_eq!(parser.callbacks().0, vec![(Some(b'('), b'0')]);
+}

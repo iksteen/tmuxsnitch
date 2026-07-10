@@ -8,6 +8,11 @@ const MODE_ALTERNATE_SCREEN: u8 = 0b0000_1000;
 const MODE_BRACKETED_PASTE: u8 = 0b0001_0000;
 // shellglass: DEC private mode 2026 — synchronized update in progress.
 const MODE_SYNCHRONIZED_UPDATE: u8 = 0b0010_0000;
+// shellglass: DECAWM off (`CSI ? 7 l`) — inverted so the zero default keeps
+// autowrap on, like a real terminal's power-on state.
+const MODE_NO_AUTOWRAP: u8 = 0b0100_0000;
+// shellglass: IRM (`CSI 4 h`) — printed text shifts the rest of the row right.
+const MODE_INSERT: u8 = 0b1000_0000;
 
 /// The xterm mouse handling mode currently in use.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
@@ -839,24 +844,41 @@ impl Screen {
         // reconsidering this behavior, but only with a really good reason
         // (xterm handles this by introducing the concept of triple width
         // cells, which i really don't want to do).
-        let mut wrap = false;
-        if pos.col > size.cols - width {
-            let last_cell = self
-                .grid()
-                .drawing_cell(crate::grid::Pos {
-                    row: pos.row,
-                    col: size.cols - 1,
-                })
-                // pos.row is valid, since it comes directly from
-                // self.grid().pos() which we assume to always have a valid
-                // row value. size.cols - 1 is also always a valid column.
-                .unwrap();
-            if last_cell.has_contents() || last_cell.is_wide_continuation() {
-                wrap = true;
+        // shellglass: with autowrap off (DECAWM, `CSI ? 7 l`) the cursor
+        // clamps at the right margin and new text overwrites the edge cell,
+        // like xterm — never spilling onto the next line.
+        if self.mode(MODE_NO_AUTOWRAP) {
+            if width > 0 && pos.col > size.cols - width {
+                self.grid_mut().col_set(size.cols - width);
             }
+        } else {
+            let mut wrap = false;
+            if pos.col > size.cols - width {
+                let last_cell = self
+                    .grid()
+                    .drawing_cell(crate::grid::Pos {
+                        row: pos.row,
+                        col: size.cols - 1,
+                    })
+                    // pos.row is valid, since it comes directly from
+                    // self.grid().pos() which we assume to always have a valid
+                    // row value. size.cols - 1 is also always a valid column.
+                    .unwrap();
+                if last_cell.has_contents()
+                    || last_cell.is_wide_continuation()
+                {
+                    wrap = true;
+                }
+            }
+            self.grid_mut().col_wrap(width, wrap);
         }
-        self.grid_mut().col_wrap(width, wrap);
         let pos = self.grid().pos();
+        // shellglass: insert mode (IRM, `CSI 4 h`) shifts the rest of the row
+        // right before the glyph lands; combining characters (width 0) still
+        // modify the preceding cell in place.
+        if width > 0 && self.mode(MODE_INSERT) {
+            self.grid_mut().insert_cells(width);
+        }
 
         if width == 0 {
             if pos.col > 0 {
@@ -1133,16 +1155,18 @@ impl Screen {
     // shellglass: CSI ! p (DECSTR, soft terminal reset) — restore the defined
     // subset of state without touching screen content or the cursor position:
     // SGR to normal, saved-cursor (DECSC) data cleared, scroll margins to the
-    // full screen, origin mode off, cursor visible, cursor keys and keypad to
-    // normal. Deliberately untouched, matching xterm: content, cursor
-    // position, the alternate screen, tab stops (only RIS resets those), and
-    // mouse tracking. (Insert mode and autowrap aren't modeled by this crate.)
+    // full screen, origin mode off, autowrap on, insert→replace mode, cursor
+    // visible, cursor keys and keypad to normal. Deliberately untouched,
+    // matching xterm: content, cursor position, the alternate screen, tab
+    // stops (only RIS resets those), and mouse tracking.
     pub(crate) fn decstr(&mut self) {
         self.attrs = crate::attrs::Attrs::default();
         self.saved_attrs = crate::attrs::Attrs::default();
         self.clear_mode(MODE_HIDE_CURSOR);
         self.clear_mode(MODE_APPLICATION_CURSOR);
         self.clear_mode(MODE_APPLICATION_KEYPAD);
+        self.clear_mode(MODE_NO_AUTOWRAP);
+        self.clear_mode(MODE_INSERT);
         self.cursor_style = 0; // xterm's DECSTR resets DECSCUSR too
         self.grid_mut().soft_reset();
     }
@@ -1335,6 +1359,34 @@ impl Screen {
     }
 
     // CSI ? h
+    // shellglass: CSI h (SM) — only IRM is modeled; the rest keep reporting.
+    pub(crate) fn sm(
+        &mut self,
+        params: &vte::Params,
+        mut unhandled: impl FnMut(&mut Self),
+    ) {
+        for param in params {
+            match param {
+                [4] => self.set_mode(MODE_INSERT),
+                _ => unhandled(self),
+            }
+        }
+    }
+
+    // shellglass: CSI l (RM)
+    pub(crate) fn rm(
+        &mut self,
+        params: &vte::Params,
+        mut unhandled: impl FnMut(&mut Self),
+    ) {
+        for param in params {
+            match param {
+                [4] => self.clear_mode(MODE_INSERT),
+                _ => unhandled(self),
+            }
+        }
+    }
+
     pub(crate) fn decset(
         &mut self,
         params: &vte::Params,
@@ -1344,7 +1396,13 @@ impl Screen {
             match param {
                 [1] => self.set_mode(MODE_APPLICATION_CURSOR),
                 [6] => self.grid_mut().set_origin_mode(true),
+                // shellglass: DECAWM — autowrap back on (the default)
+                [7] => self.clear_mode(MODE_NO_AUTOWRAP),
                 [9] => self.set_mouse_mode(MouseProtocolMode::Press),
+                // shellglass: att610 cursor blink — the mirror renders a
+                // steady cursor by design (see viewer.ts cursorDeco), so
+                // deliberately ignored, not unhandled.
+                [12] => {}
                 [25] => self.clear_mode(MODE_HIDE_CURSOR),
                 [47] => self.enter_alternate_grid(),
                 [1000] => {
@@ -1386,7 +1444,11 @@ impl Screen {
             match param {
                 [1] => self.clear_mode(MODE_APPLICATION_CURSOR),
                 [6] => self.grid_mut().set_origin_mode(false),
+                // shellglass: DECAWM — autowrap off (clamp at the margin)
+                [7] => self.set_mode(MODE_NO_AUTOWRAP),
                 [9] => self.clear_mouse_mode(MouseProtocolMode::Press),
+                // shellglass: cursor blink off — steady is all we render
+                [12] => {}
                 [25] => self.set_mode(MODE_HIDE_CURSOR),
                 [47] => {
                     self.exit_alternate_grid();

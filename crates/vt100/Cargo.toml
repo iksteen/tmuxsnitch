@@ -35,11 +35,18 @@
 #   - screen.rs/perform.rs: DECSCUSR (`CSI n SP q`) cursor style — raw 0-6
 #     tracked on Screen (cursor_style()), reset by DECSTR and RIS; out-of-range
 #     values stay unhandled. Tests in tests/csi.rs (decscusr).
+#   - screen.rs/perform.rs: DECAWM (`CSI ? 7 h/l`, autowrap — off clamps the
+#     cursor at the right margin like xterm) and IRM (`CSI 4 h/l`, insert mode
+#     shifts the row right; first bare-SM/RM dispatch). Both reset by DECSTR.
+#     Tests in tests/mode.rs (decawm_off…, irm_…).
 #   - perform.rs: deliberate no-ops for non-visual queries/syntax — Primary and
 #     Secondary DA (`CSI c`/`CSI > c`), bare ST (`ESC \`), XTWINOPS reports and
-#     title stack (`CSI 11/13/14/16/18/19/21/22/23 t`), and OSC 10/11 color
-#     *queries* (`;?` only; the set form stays unhandled on purpose). Tests in
-#     tests/csi.rs, tests/escape.rs, tests/osc.rs.
+#     title stack (`CSI 11/13/14/16/18/19/21/22/23 t`), OSC 10/11 color
+#     *queries* (`;?` only; the set form stays unhandled on purpose), cursor
+#     blink (`CSI ? 12 h/l` — the mirror renders a steady cursor by design),
+#     and SCS US-ASCII (`ESC ( B`/`ESC ) B` — the only charset modeled;
+#     `ESC ( 0` DEC graphics keeps reporting). Tests in tests/csi.rs,
+#     tests/escape.rs, tests/osc.rs.
 [package]
 name = "vt100"
 version = "0.16.2"

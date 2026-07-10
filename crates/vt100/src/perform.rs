@@ -57,6 +57,13 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, b: u8) {
         if let Some(i) = intermediates.first() {
+            // shellglass: SCS `ESC ( B` / `ESC ) B` designates US-ASCII into
+            // G0/G1 — the only charset this crate models, so it's already
+            // true; deliberately ignored. Any other designation (e.g.
+            // `ESC ( 0`, DEC line drawing) is a real gap and keeps reporting.
+            if matches!(*i, b'(' | b')') && b == b'B' {
+                return;
+            }
             self.callbacks.unhandled_escape(
                 &mut self.screen,
                 Some(*i),
@@ -153,6 +160,9 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                 'c' => {}
                 // shellglass: TBC
                 'g' => self.screen.tbc(canonicalize_params_1(params, 0)),
+                // shellglass: SM/RM (IRM is the one modeled mode)
+                'h' => self.screen.sm(params, unhandled),
+                'l' => self.screen.rm(params, unhandled),
                 'm' => self.screen.sgr(params, unhandled),
                 'r' => self.screen.decstbm(canonicalize_params_decstbm(
                     params,
