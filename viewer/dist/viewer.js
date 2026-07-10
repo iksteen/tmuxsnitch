@@ -603,6 +603,14 @@ function cellBgRgb(cell, isCursor) {
         return resolveRgb(cell.f) ?? parseHex(cfg.defFg);
     return resolveRgb(cell.g);
 }
+let crtBox;
+function crtOn() {
+    if (crtBox === undefined) {
+        crtBox = document.getElementById("crt");
+        crtBox?.addEventListener("change", () => redrawCanvasAll());
+    }
+    return crtBox !== null && crtBox.checked;
+}
 function drawRowStorm(r) {
     if (!ctx || !canvasEl)
         return;
@@ -725,6 +733,14 @@ function drawRowStorm(r) {
                 ctx.fillRect(x0, y1 - cw, x1 - x0, cw);
         }
         c += w;
+    }
+    if (crtOn()) {
+        ctx.save();
+        ctx.globalCompositeOperation = "lighter";
+        ctx.globalAlpha = 0.4;
+        ctx.filter = `blur(${1.5 * dpr}px)`;
+        ctx.drawImage(canvasEl, 0, y0, canvasEl.width, y1 - y0, 0, y0, canvasEl.width, y1 - y0);
+        ctx.restore();
     }
 }
 let hoverA;

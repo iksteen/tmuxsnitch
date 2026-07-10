@@ -435,10 +435,14 @@ own CRT effect.
 6. ✅ **Over-wide fallback glyphs** (landed 2026-07-10, `canvas-track-a`):
    `drawRowStorm` drops the `fillText` maxWidth clamp for
    `glyphOverflowsCell` cells (DOM lets ❯ overflow; canvas now does too).
-7. **Per-mode CRT.** The one localStorage toggle drives whichever effect
-   matches the active renderer: DOM keeps the text-shadow CRT as-is; canvas
-   gets its own post-pass (scanlines + bloom drawn over the composed frame
-   each flush). Verify both with the toggle on `showcase.sh`.
+7. ✅ **Per-mode CRT** (landed 2026-07-10, `canvas-track-a`): discovery —
+   the scanline/grille/sweep/vignette overlays and the `#screen` filter are
+   blend-mode layers that already composite over the canvas; only the
+   text-shadow phosphor is text-bound. Canvas rows re-create exactly that:
+   a per-row blurred lighter self-composite in `drawRowStorm` (per-row, not
+   per-flush, so undirtied rows aren't re-brightened). Driven by the same
+   `#crt` checkbox; the DOM's chromatic fringe stays text-shadow-only.
+   Verified: `verify.py` `?mode=crt` self-check.
 8. **The renderer switch.** A user-facing mode setting (`?render=canvas` /
    `localStorage sg-render`, plus an in-page toggle next to the CRT one):
    DOM mode = today's classic renderer with storm escalation to canvas;

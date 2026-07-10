@@ -871,6 +871,20 @@ function cellBgRgb(cell: Cell, isCursor: boolean): RGB | null {
 // show through), per-cell backgrounds, then ink — crisp geometry for canvas glyphs,
 // fillText for everything else. maxWidth pins a glyph into its cell box like the
 // DOM's .run overflow:hidden does.
+// The template's CRT is mostly blend-mode overlays + a #screen filter, which
+// composite over the canvas for free; only the text-shadow phosphor bloom is
+// text-bound (and forced off on ghost rows). Canvas rows re-create it below in
+// drawRowStorm. Any template with a #crt checkbox opts in; none = no CRT.
+let crtBox: HTMLInputElement | null | undefined;
+function crtOn(): boolean {
+  if (crtBox === undefined) {
+    crtBox = document.getElementById("crt") as HTMLInputElement | null;
+    // repaint canvas rows when the toggle flips (CSS handles the DOM side)
+    crtBox?.addEventListener("change", () => redrawCanvasAll());
+  }
+  return crtBox !== null && crtBox.checked;
+}
+
 function drawRowStorm(r: number): void {
   if (!ctx || !canvasEl) return;
   const y0 = Math.round(r * cellH * dpr);
@@ -1003,6 +1017,17 @@ function drawRowStorm(r: number): void {
       else ctx.fillRect(x0, y1 - cw, x1 - x0, cw);
     }
     c += w;
+  }
+  if (crtOn()) {
+    // Phosphor bloom: blurred lighter self-composite of the row band, glowing
+    // in the ink's own color. Per-row, not per-flush over the full canvas —
+    // undirtied rows must not be re-brightened every flush.
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.globalAlpha = 0.4;
+    ctx.filter = `blur(${1.5 * dpr}px)`;
+    ctx.drawImage(canvasEl, 0, y0, canvasEl.width, y1 - y0, 0, y0, canvasEl.width, y1 - y0);
+    ctx.restore();
   }
 }
 
