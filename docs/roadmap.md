@@ -85,6 +85,38 @@ phase 2.
    image sequence. With the timeout, worst case degrades to today's behavior.
    No wire/viewer/salt impact for either item.
 
+## Phase 1.6 — telemetry fallout, round 2
+
+A real-workload exit report (2026-07-10) flagged five kinds: `CSI c`, `CSI t`,
+`ESC \`, `OSC 10`, `OSC 11`. Verified against the vendored source: four of the
+five have **no rendering effect** — they are queries, whose replies are the
+*real* terminal's job (it sees the teed output and answers into our stdin→PTY
+bridge), or pure string syntax. Only the OSC 10/11 *set* form can change what
+the screen looks like — that's item 13 in phase 3; everything else is
+telemetry noise to silence deliberately.
+
+1. **No-op arms for non-visual sequences, so telemetry stays high-signal.**
+   Deliberately-ignored ≠ unhandled: give these real (empty) dispatch arms in
+   the vendored crate so they stop landing in the exit report, each with a
+   comment naming why ignoring is faithful:
+   - `CSI c` / `CSI > c` (Primary/Secondary DA) — identity queries, zero
+     render effect; the local terminal answers via the tee (`probe_caps`
+     relies on exactly that reply reaching us, not the parser).
+   - `ESC \` (ST) — vte ends an OSC/DCS string itself and then reports the
+     terminator as a bare esc_dispatch; pure syntax. (These sightings were
+     the terminators of the OSC 10/11 queries below.)
+   - `CSI t` (XTWINOPS), every op except the already-handled `8` (resize,
+     `Callbacks::resize`): the report ops (11/13/14/16/18/19/21) are queries
+     answered by the tee, and title push/pop (22/23) renders nothing while the
+     mirror has no title feature — item 12 must un-ignore 22/23 if it lands.
+   - `OSC 10;?` / `OSC 11;?` (default-color *queries*) — vim/neovim background
+     detection; answered by the tee. The **set** form must NOT be silenced:
+     it really changes the local screen, and must keep reporting until item 13
+     mirrors it.
+   While there: record `CSI t`'s params in the telemetry kind (join them like
+   `h`/`l`/`m` in `csi_kind`) so a future unknown op is diagnosable straight
+   from the exit line instead of reading as a bare `CSI t`.
+
 ## Phase 2 — good to have
 
 4. **First-class image placements in the grid** ✅ *(the reason the crate was
@@ -166,6 +198,21 @@ phase 2.
    viewer UX (scroll = viewport offset messages?), and memory bounds per
    session on the hub. Write a design note before code; this one can balloon.
 
+13. **OSC 10/11 set form: default foreground/background color.** *(the one
+    real gap in the 2026-07-10 telemetry batch — see phase 1.6 for the noise
+    half)*. `OSC 10;<color>` / `OSC 11;<color>` (plus the `OSC 110`/`111`
+    resets) change the terminal's default fg/bg; kitty applies them live, so
+    after a theme switcher or an `OSC 11`-emitting TUI runs, the local screen
+    repaints and the mirror silently keeps its configured colors — visible
+    divergence on every default-colored cell. Cross-layer, the item-5 pattern:
+    the vendored `Screen` stores the two overrides (parse at least `#RRGGBB`
+    and `rgb:RR/GG/BB`; unparseable values stay unhandled so telemetry keeps
+    flagging them), the wire ships them as an additive full-frame key (old
+    viewers ignore it → no salt bump), and the viewer maps them onto the
+    default-color CSS it already derives from the render config. Gate: only
+    emit what the viewer renders, and keep the *query* forms in phase 1.6's
+    no-op arms — they must not set anything.
+
 ## Phase 4 — maybe one day
 
 10. **Sixel interception via vte's DCS hooks.** vte routes DCS byte-by-byte
@@ -187,7 +234,8 @@ phase 2.
 12. **Window title in the viewer.** vt100 already tracks OSC 0/2 titles; the
     viewer page title could follow the session's. Trivial-ish (additive wire
     key), just never important. Bundle it with whichever phase-2/3 item next
-    touches the wire.
+    touches the wire. If this lands, un-ignore XTWINOPS 22/23 (title push/pop,
+    no-op'd in phase 1.6) — with a rendered title they become state changes.
 
 ## Sequencing note
 
