@@ -140,6 +140,48 @@ split differently from round 2: two real gaps, two noise kinds.
    stays loud — if it ever shows up in a report, charset support becomes a
    real roadmap item.
 
+## Phase 1.8 — telemetry fallout, round 4
+
+The fourth exit report (10 kinds) splits 2 real / 8 noise.
+
+1. **SGR 8 conceal (`CSI 8 m`, `28` reveal)** — real, and the worse
+   direction: the local terminal HIDES concealed text while the mirror shows
+   it — the one way "never more, never less" can leak content (conceal is
+   password-prompt adjacent). Vendored crate: a `concealed` bit on `Attrs`
+   (8 sets, 28 clears, SGR 0 resets; formatted output re-emits 8 — the SSH
+   view then hides it for free); tests in `tests/attr.rs`. Wire: additive
+   style flag (letter `o`; must dodge both style letters and the flattened
+   `c`-envelope keys — see the diff.rs key table), no salt bump. Viewers:
+   DOM paints the glyph transparent, canvas skips the `fillText`; the ghost
+   layer keeps the buffer's real characters (terminals still copy concealed
+   text). Check kitty's source for whether decorations stay visible on
+   concealed cells before deciding ours.
+2. **SGR 5/6 blink (`CSI 5 m`, `25` reset)** — real, with a rendering
+   decision to make at implementation time (kitty blinks; the mirror's
+   cursor precedent is steady-by-design). Model the bit in the vendored
+   `Attrs` regardless (5/6 → one bit, 25 clears, 0 resets; formatted output
+   re-emits 5), ship the wire flag, then either: steady-with-attribute
+   (document like cursor blink) or real blink — DOM via a `.blink` CSS
+   animation class, canvas via an interval redraw of rows holding blink
+   cells (row redraw is already the storm unit). Verify with the rig either
+   way.
+3. **No-op arms, round 4** — real (empty) dispatch arms in the vendored
+   crate, each with a comment naming why ignoring is faithful; tests per arm
+   in `tests/csi.rs`:
+   - `CSI > 4 m` (XTMODKEYS, modifyOtherKeys) — keyboard protocol, zero
+     render effect.
+   - `CSI > q` (XTVERSION) — identity query; the tee delivers the local
+     terminal's answer.
+   - `CSI ? 1004 h/l` (focus-event reporting) — input protocol; the real
+     terminal sends the focus events.
+   - `CSI ? 2031 h/l` (color-scheme-change notifications) — subscription to
+     dark/light change reports; answered by the tee.
+   - `CSI ? 7727 h/l` (urxvt application-ESC mode) — keyboard protocol.
+   - `CSI ? … n` (private DSR: DECXCPR-class status/position reports) —
+     queries answered by the tee. While there: join the params into the
+     telemetry kind (the report showed a bare `CSI ? n`) so an unknown
+     private DSR stays diagnosable from the exit line.
+
 ## Phase 2 — good to have
 
 4. **First-class image placements in the grid** ✅ *(the reason the crate was
