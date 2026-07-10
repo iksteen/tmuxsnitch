@@ -247,6 +247,24 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                     );
                 }
             },
+            // shellglass: DECSCUSR (`CSI n SP q`, set cursor style) — 0-6
+            // (default / blinking+steady block / underline / bar); anything
+            // else keeps reporting.
+            Some(b' ') => match (c, canonicalize_params_1(params, 0)) {
+                ('q', style @ 0..=6) => {
+                    // 0-6 always fits u8
+                    self.screen.decscusr(u8::try_from(style).unwrap());
+                }
+                _ => {
+                    self.callbacks.unhandled_csi(
+                        &mut self.screen,
+                        Some(b' '),
+                        intermediates.get(1).copied(),
+                        &params.iter().collect::<Vec<_>>(),
+                        c,
+                    );
+                }
+            },
             // shellglass: intermediate `!`
             Some(b'!') => match c {
                 // DECSTR, soft terminal reset

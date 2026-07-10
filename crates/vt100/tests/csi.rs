@@ -333,3 +333,27 @@ fn da_and_xtwinops_noise_is_deliberately_ignored() {
     vt.process(b"\x1b[9;1t");
     assert_eq!(vt.callbacks().0, vec![(None, vec![9, 1], 't')]);
 }
+
+// shellglass: DECSCUSR (CSI n SP q) cursor style — tracked 0-6, reset by
+// DECSTR and RIS, out-of-range values report instead of clobbering state.
+#[test]
+fn decscusr() {
+    let mut vt = vt100::Parser::default();
+    assert_eq!(vt.screen().cursor_style(), 0);
+    vt.process(b"\x1b[5 q"); // blinking bar (vim insert mode)
+    assert_eq!(vt.screen().cursor_style(), 5);
+    vt.process(b"\x1b[2 q");
+    assert_eq!(vt.screen().cursor_style(), 2);
+    // A bare `CSI SP q` (param 0) is "default".
+    vt.process(b"\x1b[ q");
+    assert_eq!(vt.screen().cursor_style(), 0);
+    // Out of range: state untouched (and reported via unhandled_csi).
+    vt.process(b"\x1b[3 q\x1b[9 q");
+    assert_eq!(vt.screen().cursor_style(), 3);
+    // DECSTR resets the style (xterm's reset list includes DECSCUSR).
+    vt.process(b"\x1b[6 q\x1b[!p");
+    assert_eq!(vt.screen().cursor_style(), 0);
+    // RIS resets too.
+    vt.process(b"\x1b[6 q\x1bc");
+    assert_eq!(vt.screen().cursor_style(), 0);
+}

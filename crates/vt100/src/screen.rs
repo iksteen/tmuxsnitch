@@ -80,6 +80,10 @@ pub struct Screen {
     sync_starts: u32,
     sync_ends: u32,
 
+    // shellglass: DECSCUSR (`CSI n SP q`) cursor style, raw value 0-6 —
+    // 0 default, 1/2 blinking/steady block, 3/4 underline, 5/6 bar.
+    cursor_style: u8,
+
     modes: u8,
     mouse_protocol_mode: MouseProtocolMode,
     mouse_protocol_encoding: MouseProtocolEncoding,
@@ -105,6 +109,8 @@ impl Screen {
 
             sync_starts: 0,
             sync_ends: 0,
+
+            cursor_style: 0,
 
             modes: 0,
             mouse_protocol_mode: MouseProtocolMode::default(),
@@ -644,6 +650,14 @@ impl Screen {
         self.mode(MODE_HIDE_CURSOR)
     }
 
+    /// shellglass: the DECSCUSR (`CSI n SP q`) cursor style, raw value 0-6 —
+    /// 0 default, 1 blinking block, 2 steady block, 3 blinking underline,
+    /// 4 steady underline, 5 blinking bar, 6 steady bar.
+    #[must_use]
+    pub fn cursor_style(&self) -> u8 {
+        self.cursor_style
+    }
+
     /// shellglass: whether a synchronized update (DEC private mode 2026) is
     /// in progress — the application asked for output between BSU and ESU to
     /// be presented atomically.
@@ -1129,7 +1143,13 @@ impl Screen {
         self.clear_mode(MODE_HIDE_CURSOR);
         self.clear_mode(MODE_APPLICATION_CURSOR);
         self.clear_mode(MODE_APPLICATION_KEYPAD);
+        self.cursor_style = 0; // xterm's DECSTR resets DECSCUSR too
         self.grid_mut().soft_reset();
+    }
+
+    // shellglass: CSI n SP q (DECSCUSR, set cursor style).
+    pub(crate) fn decscusr(&mut self, style: u8) {
+        self.cursor_style = style;
     }
 
     // csi codes
