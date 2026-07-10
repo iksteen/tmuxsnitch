@@ -5,7 +5,8 @@
 #
 # then open the printed URL. It composes one screen of terminal art — line
 # weights, corner styles, thin↔thick intersections, blocks/shades/mosaics, the
-# modern SGR text styles (undercurl & friends) and a powerline prompt — all
+# modern SGR text styles (undercurl & friends), OSC 8 hyperlinks and a
+# powerline prompt — all
 # rendered from the font with no local install. The renderer draws box-drawing
 # as crisp device-pixel geometry, so mixed-weight junctions (┿ ╂ ┝) and tiling
 # stay sharp. Wants ≥30 rows. Press Enter to quit.
@@ -150,6 +151,17 @@ styled 26 13 '4:3;58;5;220'     'deprecated()'
 styled 26 27 '4:4;58;5;39'      'hint'
 styled 26 33 '4;58;2;0;200;120' 'truecolor line'
 styled 26 49 '9;4:3;58;5;196'   'strike + red curl'
+
+# OSC 8 hyperlinks — the browser mirror renders these as real clickable
+# anchors (hover to see); styles compose. link URL TEXT [SGR]
+link() {
+  [ -n "${3:-}" ] && sgr "$3"
+  printf '\e]8;;%s\e\\%s\e]8;;\e\\%s' "$1" "$2" "$RST"
+}
+at 27 2; sgr '37'; printf 'links   '; printf '%s' "$RST"
+link 'https://github.com/iksteen/shellglass' 'shellglass'
+at 27 22; link 'mailto:iksteen@gmail.com' 'mail the author' '38;5;39'
+at 27 40; link 'https://en.wikipedia.org/wiki/ANSI_escape_code' 'ANSI escape codes' '1;4;38;5;213'
 
 # A powerline prompt (each ► inherits the previous segment's colour).
 a=$(printf '\ue0b0')
