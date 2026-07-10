@@ -566,12 +566,20 @@ struct CellStyle {
         serialize_with = "flag"
     )]
     italic: bool,
+    /// Underline style 1-5 (kitty's `4:n` numbering); `1` doubles as the plain
+    /// underline flag, so pre-style decoders (truthiness checks) still render
+    /// a single underline for any style — additive in value space, no salt bump.
+    #[serde(rename = "u", skip_serializing_if = "is_zero")]
+    underline: u8,
     #[serde(
-        rename = "u",
+        rename = "s",
         skip_serializing_if = "crate::model::is_false",
         serialize_with = "flag"
     )]
-    underline: bool,
+    strike: bool,
+    /// Underline color; absent = follow the text color (CSS default).
+    #[serde(rename = "k", skip_serializing_if = "crate::model::is_default_color")]
+    ulcolor: Color,
     #[serde(
         rename = "n",
         skip_serializing_if = "crate::model::is_false",
@@ -597,11 +605,17 @@ impl CellStyle {
         if !crate::model::is_default_color(&self.bg) {
             m.serialize_entry("g", &self.bg)?;
         }
+        if !crate::model::is_default_color(&self.ulcolor) {
+            m.serialize_entry("k", &self.ulcolor)?;
+        }
+        if self.underline != 0 {
+            m.serialize_entry("u", &self.underline)?;
+        }
         for (set, key) in [
             (self.bold, "b"),
             (self.dim, "d"),
             (self.italic, "i"),
-            (self.underline, "u"),
+            (self.strike, "s"),
             (self.inverse, "n"),
             (self.wide, "w"),
         ] {
@@ -618,7 +632,9 @@ impl CellStyle {
 fn is_plain(c: &StyledCell) -> bool {
     c.fg == Color::Default
         && c.bg == Color::Default
-        && !(c.bold || c.dim || c.italic || c.underline || c.inverse || c.wide)
+        && c.ulcolor == Color::Default
+        && c.underline == 0
+        && !(c.bold || c.dim || c.italic || c.strike || c.inverse || c.wide)
 }
 
 fn cell_style(c: &StyledCell) -> CellStyle {
@@ -629,6 +645,8 @@ fn cell_style(c: &StyledCell) -> CellStyle {
         dim: c.dim,
         italic: c.italic,
         underline: c.underline,
+        strike: c.strike,
+        ulcolor: c.ulcolor,
         inverse: c.inverse,
         wide: c.wide,
     }
@@ -1101,6 +1119,31 @@ impl<'de> Deserialize<'de> for TextIn {
     }
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)] // signature required by serde's skip_serializing_if
+fn is_zero(v: &u8) -> bool {
+    *v == 0
+}
+
+/// Deserialize an underline style from its wire number, with the same leniency
+/// as [`truthy`]: a bool reads as single/none, an out-of-range number clamps to
+/// single — pre-style senders only ever said "underlined".
+fn ustyle<'de, D: Deserializer<'de>>(d: D) -> Result<u8, D::Error> {
+    struct UnderlineVisitor;
+    impl Visitor<'_> for UnderlineVisitor {
+        type Value = u8;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("an underline style number or a bool")
+        }
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<u8, E> {
+            Ok(u8::try_from(v).map_or(1, |n| if n > 5 { 1 } else { n }))
+        }
+        fn visit_bool<E: de::Error>(self, v: bool) -> Result<u8, E> {
+            Ok(u8::from(v))
+        }
+    }
+    d.deserialize_any(UnderlineVisitor)
+}
+
 /// Deserialize a flag from `1`/`0` (the wire form) or a bool (leniency).
 fn truthy<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
     struct FlagVisitor;
@@ -1132,8 +1175,12 @@ struct CellStyleIn {
     dim: bool,
     #[serde(rename = "i", default, deserialize_with = "truthy")]
     italic: bool,
-    #[serde(rename = "u", default, deserialize_with = "truthy")]
-    underline: bool,
+    #[serde(rename = "u", default, deserialize_with = "ustyle")]
+    underline: u8,
+    #[serde(rename = "s", default, deserialize_with = "truthy")]
+    strike: bool,
+    #[serde(rename = "k", default)]
+    ulcolor: Color,
     #[serde(rename = "n", default, deserialize_with = "truthy")]
     inverse: bool,
     #[serde(rename = "w", default, deserialize_with = "truthy")]
@@ -1166,6 +1213,8 @@ fn decode_block(block: CellBlockIn) -> Vec<StyledCell> {
             c.dim = s.dim;
             c.italic = s.italic;
             c.underline = s.underline;
+            c.strike = s.strike;
+            c.ulcolor = s.ulcolor;
             c.inverse = s.inverse;
             c.wide = s.wide;
         }
@@ -1605,6 +1654,37 @@ mod tests {
             full.contains(r#"[["aBc"],[[1,1,{"f":1,"b":1}]]]"#),
             "{full}"
         );
+    }
+
+    // Modern SGR on the wire: `u` carries the style number (1 doubles as the
+    // legacy underline flag for pre-style decoders), strikethrough rides `s`,
+    // underline color rides `k` — and the hub-side decode reconstructs all
+    // three, including the old bare-flag forms.
+    #[test]
+    fn modern_sgr_rides_the_wire_and_decodes() {
+        let mut g = grid(&["xy"]);
+        g.rows[0][0].underline = 3; // undercurl
+        g.rows[0][0].ulcolor = Color::Idx(1);
+        g.rows[0][1].strike = true;
+        let full = full_message_grid(&g);
+        assert!(full.contains(r#"{"u":3,"k":1}"#), "{full}");
+        assert!(full.contains(r#"{"s":1}"#), "{full}");
+
+        // Round trip through the hub's decode path.
+        let prev = Frame::Banner("x".into());
+        let Some(Frame::Screen(out)) = apply(&prev, &full) else {
+            panic!("full applies")
+        };
+        assert_grid_equiv(&out, &g);
+
+        // Leniency: an old-world sender's `"u":1` (or a bool) is single underline.
+        let s: CellStyleIn = serde_json::from_str(r#"{"u":1}"#).unwrap();
+        assert_eq!(s.underline, 1);
+        let s: CellStyleIn = serde_json::from_str(r#"{"u":true}"#).unwrap();
+        assert_eq!(s.underline, 1);
+        // An out-of-range style from the future clamps to single, not garbage.
+        let s: CellStyleIn = serde_json::from_str(r#"{"u":9}"#).unwrap();
+        assert_eq!(s.underline, 1);
     }
 
     #[test]

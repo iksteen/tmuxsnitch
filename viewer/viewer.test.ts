@@ -82,6 +82,30 @@ test("cellStyle dim matches the Rust floor formula, italic/underline emit", () =
   );
 });
 
+test("cellStyle renders modern SGR: underline styles, strike, underline color", () => {
+  // u carries the style number: 1 plain, 3 wavy undercurl, 2/4/5 the rest.
+  assert.equal(cellStyle({ u: 1 }, false), "text-decoration:underline;");
+  assert.equal(cellStyle({ u: 3 }, false), "text-decoration:underline wavy;");
+  assert.equal(cellStyle({ u: 2 }, false), "text-decoration:underline double;");
+  assert.equal(cellStyle({ u: 4 }, false), "text-decoration:underline dotted;");
+  assert.equal(cellStyle({ u: 5 }, false), "text-decoration:underline dashed;");
+  // Strikethrough alone, and combined with an underline.
+  assert.equal(cellStyle({ s: 1 }, false), "text-decoration:line-through;");
+  assert.equal(
+    cellStyle({ u: 1, s: 1 }, false),
+    "text-decoration:underline line-through;",
+  );
+  // Underline color rides the shorthand; absent = currentcolor.
+  assert.equal(
+    cellStyle({ u: 3, k: 9 }, false),
+    "text-decoration:underline wavy #ff0000;",
+  );
+  assert.equal(
+    cellStyle({ u: 1, k: [1, 2, 3] }, false),
+    "text-decoration:underline #010203;",
+  );
+});
+
 test("renderRow coalesces same-style cells into one positioned run", () => {
   const html = renderRow([{ t: "a" }, { t: "b" }, { t: "c" }], -1);
   assert.equal(html, '<span class="run" style="left:0ch;width:3ch;">abc</span>');

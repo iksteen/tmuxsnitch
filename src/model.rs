@@ -86,7 +86,13 @@ pub struct StyledCell {
     pub bold: bool,
     pub dim: bool,
     pub italic: bool,
-    pub underline: bool,
+    /// Underline style, kitty's SGR `4:n` numbering: 0 none, 1 single,
+    /// 2 double, 3 curly, 4 dotted, 5 dashed.
+    pub underline: u8,
+    /// Strikethrough (SGR 9/29).
+    pub strike: bool,
+    /// Underline color (SGR 58/59); `Default` = follow the text color.
+    pub ulcolor: Color,
     pub inverse: bool,
     /// Occupies two terminal columns.
     pub wide: bool,

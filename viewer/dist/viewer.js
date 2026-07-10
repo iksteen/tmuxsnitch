@@ -99,8 +99,16 @@ export function cellStyle(cell, isCursor) {
         s += "font-weight:bold;";
     if (cell.i)
         s += "font-style:italic;";
-    if (cell.u)
-        s += "text-decoration:underline;";
+    if (cell.u || cell.s) {
+        let d = `${cell.u ? "underline" : ""}${cell.s ? " line-through" : ""}`;
+        const us = { 2: "double", 3: "wavy", 4: "dotted", 5: "dashed" }[cell.u];
+        if (us)
+            d += ` ${us}`;
+        const k = resolveRgb(cell.k);
+        if (k)
+            d += ` ${hex(k)}`;
+        s += `text-decoration:${d.trim()};`;
+    }
     return s;
 }
 let cellW = 8;
@@ -580,6 +588,8 @@ function drawRowStorm(r) {
             ctx.fillText(cell.t, x0, midY, x1 - x0);
             if (cell.u)
                 ctx.fillRect(x0, y1 - ul, x1 - x0, ul);
+            if (cell.s)
+                ctx.fillRect(x0, Math.round((y0 + y1) / 2), x1 - x0, ul);
         }
         c += w;
     }

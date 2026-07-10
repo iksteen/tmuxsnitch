@@ -159,7 +159,9 @@ struct Style {
     bold: bool,
     dim: bool,
     italic: bool,
-    underline: bool,
+    underline: u8,
+    strike: bool,
+    ulcolor: Color,
     inverse: bool,
 }
 
@@ -172,6 +174,8 @@ impl Style {
             dim: c.dim,
             italic: c.italic,
             underline: c.underline,
+            strike: c.strike,
+            ulcolor: c.ulcolor,
             inverse: c.inverse,
         }
     }
@@ -184,7 +188,7 @@ impl Style {
             (self.bold, "1"),
             (self.dim, "2"),
             (self.italic, "3"),
-            (self.underline, "4"),
+            (self.strike, "9"),
             (self.inverse, "7"),
         ] {
             if set {
@@ -192,10 +196,35 @@ impl Style {
                 p.push_str(code);
             }
         }
+        // Plain `4` for single underline (maximally compatible); the kitty
+        // `4:n` subparam form only for the fancy styles.
+        match self.underline {
+            0 => {}
+            1 => p.push_str(";4"),
+            n => {
+                let _ = write!(p, ";4:{n}");
+            }
+        }
+        if self.ulcolor != Color::Default {
+            push_ulcolor(&mut p, self.ulcolor);
+        }
         push_color(&mut p, self.fg, false);
         push_color(&mut p, self.bg, true);
         p.push('m');
         p
+    }
+}
+
+/// Append an SGR 58 underline-color parameter (no idx-form shorthands exist).
+fn push_ulcolor(p: &mut String, c: Color) {
+    match c {
+        Color::Default => {}
+        Color::Idx(i) => {
+            let _ = write!(p, ";58;5;{i}");
+        }
+        Color::Rgb(r, g, b) => {
+            let _ = write!(p, ";58;2;{r};{g};{b}");
+        }
     }
 }
 

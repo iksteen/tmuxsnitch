@@ -25,7 +25,9 @@ export interface Cell {
   b?: Flag; // bold
   d?: Flag; // dim
   i?: Flag; // italic
-  u?: Flag; // underline
+  u?: Flag | number; // underline style: 1 single, 2 double, 3 curly, 4 dotted, 5 dashed
+  s?: Flag; // strikethrough
+  k?: Color; // underline color; absent = follow the text color
   n?: Flag; // inverse
   w?: Flag; // wide (two columns)
 }
@@ -59,8 +61,8 @@ type WireRow =
 
 // There is no "t" tag: each message type owns one payload key (d/r/c/l/b/v), and
 // apply() dispatches on which is present — `c` FIRST, since the single-cell form
-// flattens its style letters (f,g,b,d,i,u,n,w) into the envelope. The cursor is a
-// separate `p` key on every diff-family message.
+// flattens its style letters (f,g,b,d,i,u,s,k,n,w) into the envelope. The cursor
+// is a separate `p` key on every diff-family message.
 interface FullMsg {
   d: Block[];
   w: number;
@@ -231,7 +233,22 @@ export function cellStyle(cell: Cell, isCursor: boolean): string {
   if (bg) s += `background:${hex(bg)};`;
   if (cell.b) s += "font-weight:bold;";
   if (cell.i) s += "font-style:italic;";
-  if (cell.u) s += "text-decoration:underline;";
+  if (cell.u || cell.s) {
+    // The text-decoration shorthand: lines, then style (u: 2 double, 3 wavy
+    // undercurl, 4 dotted, 5 dashed), then color (absent = currentcolor, which
+    // already follows the inverse/dim fg math above). One CSS limitation,
+    // accepted: style and color apply to the strikethrough too when both
+    // lines are on — kitty draws the strike straight/fg, but the combination
+    // is vanishingly rare.
+    let d = `${cell.u ? "underline" : ""}${cell.s ? " line-through" : ""}`;
+    const us = { 2: "double", 3: "wavy", 4: "dotted", 5: "dashed" }[
+      cell.u as number
+    ];
+    if (us) d += ` ${us}`;
+    const k = resolveRgb(cell.k);
+    if (k) d += ` ${hex(k)}`;
+    s += `text-decoration:${d.trim()};`;
+  }
   return s;
 }
 
@@ -801,7 +818,10 @@ function drawRowStorm(r: number): void {
       }
       ctx.fillStyle = hex(cellFg(cell, isCursor));
       ctx.fillText(cell.t, x0, midY, x1 - x0);
+      // Storm is the low-fidelity escape hatch: any underline style draws as a
+      // plain bar (and ignores `k`); strikethrough gets a mid-height bar.
       if (cell.u) ctx.fillRect(x0, y1 - ul, x1 - x0, ul);
+      if (cell.s) ctx.fillRect(x0, Math.round((y0 + y1) / 2), x1 - x0, ul);
     }
     c += w;
   }
