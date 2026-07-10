@@ -524,7 +524,7 @@ function redrawCanvasRow(r) {
         const w = cell.w ? 2 : 1;
         const cp = cell.t ? cell.t.codePointAt(0) : 0;
         if (cp && isCanvasGlyph(cp)) {
-            const isCursor = !!screen.cur && screen.cur[0] === r && screen.cur[1] === c;
+            const isCursor = !!screen.cur && screen.cur[0] === r && screen.cur[1] === c && screen.sty <= 2;
             drawGlyph(r, c, cp, cell, isCursor);
         }
         c += w;
@@ -718,17 +718,23 @@ function symbolSpan(col, w, boxStyle, font, glyph, stretch) {
         `<svg viewBox="0 0 14 14" preserveAspectRatio="${par}" style="display:block;width:100%;height:100%">` +
         `<text x="0" y="12" font-family="${font}" font-size="14" fill="currentColor"${len}>${glyph}</text></svg></span>`);
 }
-function symbolCell(cell, isCursor, col, w, font) {
-    const boxStyle = cellStyle(cell, isCursor);
+function symbolCell(cell, isCursor, col, w, font, deco = "") {
+    const boxStyle = cellStyle(cell, isCursor) + deco;
     const t = cell.t ?? " ";
     const cp = t.codePointAt(0) ?? 0x20;
     const stretch = isFillGlyph(cp);
     return symbolSpan(col, w, boxStyle, font, esc(t), stretch);
 }
 function inkFree(s) {
-    return !s.includes("background") && !s.includes("text-decoration");
+    return !s.includes("background") && !s.includes("text-decoration") && !s.includes("box-shadow");
 }
-export function renderRow(cells, cursorCol) {
+function cursorDeco(sty) {
+    return sty >= 5
+        ? "box-shadow:inset 0.14em 0 0 0 currentColor;"
+        : "box-shadow:inset 0 -0.14em 0 0 currentColor;";
+}
+export function renderRow(cells, cursorCol, curSty = 0) {
+    const blocky = curSty <= 2;
     let out = "";
     let col = 0;
     let runStyle = null;
@@ -743,13 +749,15 @@ export function renderRow(cells, cursorCol) {
     };
     for (const cell of cells) {
         const isCursor = col === cursorCol;
+        const curBlock = isCursor && blocky;
+        const deco = isCursor && !blocky ? cursorDeco(curSty) : "";
         const w = cell.w ? 2 : 1;
         const cp0 = cell.t ? cell.t.codePointAt(0) : 0;
         if (cp0 && isCanvasGlyph(cp0) && !(cp0 >= 0xe000 && symbolFamily(cp0))) {
             flushText();
             runStyle = null;
             cols = 0;
-            out += `<span class="run" style="left:${col}ch;width:${w}ch;${cellStyle(cell, isCursor)}color:transparent">${esc(cell.t)}</span>`;
+            out += `<span class="run" style="left:${col}ch;width:${w}ch;${cellStyle(cell, curBlock)}${deco}color:transparent">${esc(cell.t)}</span>`;
             col += w;
             continue;
         }
@@ -757,7 +765,7 @@ export function renderRow(cells, cursorCol) {
             flushText();
             runStyle = null;
             cols = 0;
-            out += `<span class="run" style="left:${col}ch;width:${w}ch;overflow:visible;${cellStyle(cell, isCursor)}">${esc(cell.t)}</span>`;
+            out += `<span class="run" style="left:${col}ch;width:${w}ch;overflow:visible;${cellStyle(cell, curBlock)}${deco}">${esc(cell.t)}</span>`;
             col += w;
             continue;
         }
@@ -766,10 +774,10 @@ export function renderRow(cells, cursorCol) {
             flushText();
             runStyle = null;
             cols = 0;
-            out += symbolCell(cell, isCursor, col, w, font);
+            out += symbolCell(cell, curBlock, col, w, font, deco);
         }
         else {
-            let style = cellStyle(cell, isCursor);
+            let style = cellStyle(cell, curBlock) + deco;
             if ((!cell.t || cell.t === " ") &&
                 runStyle !== null &&
                 runStyle !== style &&
@@ -795,7 +803,7 @@ export function renderRow(cells, cursorCol) {
 function cursorCol(cur, row) {
     return cur && cur[0] === row ? cur[1] : -1;
 }
-let screen = { cells: [], cur: null, rowEls: [] };
+let screen = { cells: [], cur: null, sty: 0, rowEls: [] };
 let screenEl;
 export function patchCells(state, dp) {
     const dirty = new Set();
@@ -805,6 +813,11 @@ export function patchCells(state, dp) {
         if (dp.cur)
             dirty.add(dp.cur[0]);
         state.cur = dp.cur;
+    }
+    if (dp.sty !== undefined && dp.sty !== (state.sty ?? 0)) {
+        state.sty = dp.sty;
+        if (state.cur)
+            dirty.add(state.cur[0]);
     }
     for (const patch of dp.rows) {
         let row = state.cells[patch.r];
@@ -893,7 +906,7 @@ function flushPaint() {
                 const el = screen.rowEls[r];
                 if (!el)
                     continue;
-                el.innerHTML = renderRow(screen.cells[r] ?? [], cursorCol(screen.cur, r));
+                el.innerHTML = renderRow(screen.cells[r] ?? [], cursorCol(screen.cur, r), screen.sty);
                 redrawCanvasRow(r);
             }
         }
@@ -904,7 +917,7 @@ function flushPaint() {
     });
 }
 function applyFull(m) {
-    screen = { cells: m.d.map(decodeBlock), cur: m.p ?? null, rowEls: [] };
+    screen = { cells: m.d.map(decodeBlock), cur: m.p ?? null, sty: m.q ?? 0, rowEls: [] };
     rebuildDims = { w: m.w, h: m.h, i: m.i };
     rebuildBanner = null;
     dirtyRows.clear();
@@ -914,7 +927,7 @@ function paintFull(dims) {
     const cur = screen.cur;
     let html = `<div class="screen" style="width:${dims.w}ch;height:calc(${dims.h} * var(--lh));">`;
     for (let r = 0; r < screen.cells.length; r++) {
-        html += `<div class="row">${renderRow(screen.cells[r], cursorCol(cur, r))}</div>`;
+        html += `<div class="row">${renderRow(screen.cells[r], cursorCol(cur, r), screen.sty)}</div>`;
     }
     html += "</div>";
     screenEl.innerHTML = html;
@@ -943,28 +956,28 @@ function decodeRow([r, l, text, style]) {
     }
     return { r, l, cells: decodeCells(text, style) };
 }
-function applyPatches(cur, rows) {
-    const dirty = patchCells(screen, { cur, rows });
+function applyPatches(cur, sty, rows) {
+    const dirty = patchCells(screen, { cur, sty, rows });
     for (const r of dirty)
         dirtyRows.add(r);
     schedulePaint();
 }
 function applyDiff(m) {
-    applyPatches(m.p, (m.r ?? []).map(decodeRow));
+    applyPatches(m.p, m.q, (m.r ?? []).map(decodeRow));
 }
 function applyCell(m) {
-    const { c: r, p: _p, ...style } = m;
+    const { c: r, p: _p, q: _q, ...style } = m;
     const styled = Object.keys(style).length > 0;
     const cells = [];
     for (const ch of r[2])
         cells.push(styled ? { t: ch, ...style } : { t: ch });
-    applyPatches(m.p, [{ r: r[0], l: r[1], cells }]);
+    applyPatches(m.p, m.q, [{ r: r[0], l: r[1], cells }]);
 }
 function applyLine(m) {
-    applyPatches(m.p, [decodeRow(m.l)]);
+    applyPatches(m.p, m.q, [decodeRow(m.l)]);
 }
 function applyBanner(m) {
-    screen = { cells: [], cur: null, rowEls: [] };
+    screen = { cells: [], cur: null, sty: 0, rowEls: [] };
     rebuildBanner = m.b;
     rebuildDims = null;
     dirtyRows.clear();

@@ -322,15 +322,22 @@ enum WireMsg<'a> {
         w: u16,
         h: usize,
         cur: Option<(u16, u16)>,
+        /// DECSCUSR style, absolute: the `q` key, omitted when 0 (default).
+        sty: u8,
         rows: Vec<CellBlock<'a>>,
         /// Inline images (empty for the common text-only case ⇒ `i` key omitted).
         images: &'a [ImagePlacement],
     },
     /// Changed lines. Cursor is TRI-STATE: absent = unchanged, `null` = became
     /// hidden, `[row, col]` = moved. An empty `rows` drops the `r` key (a
-    /// cursor-only move serializes to just `{"p":…}`).
+    /// cursor-only move serializes to just `{"p":…}`). `sty` (the `q` key) is
+    /// two-state: absent = unchanged, value = changed-to (0 = back to default);
+    /// the encoder always sends `p` alongside `q`, so old decoders — which
+    /// dispatch a rows-less message on `p` — still parse it (as a cursor
+    /// no-op) instead of dropping it.
     Diff {
         cur: Option<Option<(u16, u16)>>,
+        sty: Option<u8>,
         rows: Vec<WireRow<'a>>,
     },
     /// A uniform span — the hottest diffs (spinner ticks, typing echo, appended
@@ -339,12 +346,14 @@ enum WireMsg<'a> {
     /// the style flattens into the message itself, applying to every cell.
     Cell {
         cur: Option<Option<(u16, u16)>>,
+        sty: Option<u8>,
         r: (usize, usize, String),
         style: Option<CellStyle>,
     },
     /// A single changed line: `l` is the bare `[row, left, entries, runs?]` tuple.
     Line {
         cur: Option<Option<(u16, u16)>>,
+        sty: Option<u8>,
         r: WireRow<'a>,
     },
     Banner {
@@ -361,6 +370,7 @@ impl Serialize for WireMsg<'_> {
                 w,
                 h,
                 cur,
+                sty,
                 rows,
                 images,
             } => {
@@ -370,31 +380,43 @@ impl Serialize for WireMsg<'_> {
                 if let Some(c) = cur {
                     m.serialize_entry("p", c)?;
                 }
+                if *sty != 0 {
+                    m.serialize_entry("q", sty)?;
+                }
                 if !images.is_empty() {
                     m.serialize_entry("i", images)?;
                 }
             }
-            WireMsg::Diff { cur, rows } => {
+            WireMsg::Diff { cur, sty, rows } => {
                 if !rows.is_empty() {
                     m.serialize_entry("r", rows)?;
                 }
                 if let Some(c) = cur {
                     m.serialize_entry("p", c)?;
                 }
+                if let Some(sty) = sty {
+                    m.serialize_entry("q", sty)?;
+                }
             }
-            WireMsg::Cell { cur, r, style } => {
+            WireMsg::Cell { cur, sty, r, style } => {
                 m.serialize_entry("c", r)?;
                 if let Some(c) = cur {
                     m.serialize_entry("p", c)?;
+                }
+                if let Some(sty) = sty {
+                    m.serialize_entry("q", sty)?;
                 }
                 if let Some(st) = style {
                     st.flatten_into(&mut m)?;
                 }
             }
-            WireMsg::Line { cur, r } => {
+            WireMsg::Line { cur, sty, r } => {
                 m.serialize_entry("l", r)?;
                 if let Some(c) = cur {
                     m.serialize_entry("p", c)?;
+                }
+                if let Some(sty) = sty {
+                    m.serialize_entry("q", sty)?;
                 }
             }
             WireMsg::Banner { html } => {
@@ -720,6 +742,7 @@ fn full_message_grid(g: &Grid) -> String {
         w: g.cols,
         h: g.rows.len(),
         cur: g.cursor,
+        sty: g.cursor_style,
         rows: g.rows.iter().map(|r| cell_block(r.iter())).collect(),
         images: &g.images,
     };
@@ -734,15 +757,21 @@ fn banner_message(html: &str) -> String {
 /// changed. Single-row diffs get their own compact tags (`c` / `l`).
 fn diff_message(a: &Grid, b: &Grid) -> Option<String> {
     let mut rows = grid_rows(a, b);
-    if rows.is_empty() && a.cursor == b.cursor {
+    if rows.is_empty() && a.cursor == b.cursor && a.cursor_style == b.cursor_style {
         return None; // nothing this viewer would see changed
     }
+    // Cursor style, two-state: absent = unchanged, value = changed-to. When it
+    // changes, the cursor rides along even if unmoved: old decoders dispatch a
+    // rows-less message on `p`, so `{"q":…}` alone would be dropped by an old
+    // hub while `{"p":…,"q":…}` degrades to a harmless cursor no-op.
+    let sty = (a.cursor_style != b.cursor_style).then_some(b.cursor_style);
     // Absent = unchanged; Some(None) = became hidden; Some(pos) = moved.
-    let cur = (a.cursor != b.cursor).then_some(b.cursor);
+    let cur = (a.cursor != b.cursor || sty.is_some()).then_some(b.cursor);
     let msg = if rows.len() == 1 {
         match rows.pop().expect("len checked") {
             WireRow::Cell { r, l, cell } => WireMsg::Cell {
                 cur,
+                sty,
                 r: (r, l, cell.text.clone()),
                 style: (!is_plain(cell)).then(|| cell_style(cell)),
             },
@@ -758,14 +787,15 @@ fn diff_message(a: &Grid, b: &Grid) -> Option<String> {
                 };
                 WireMsg::Cell {
                     cur,
+                    sty,
                     r: (r, l, run),
                     style: style.pop().map(|(_, _, st)| st),
                 }
             }
-            row => WireMsg::Line { cur, r: row },
+            row => WireMsg::Line { cur, sty, r: row },
         }
     } else {
-        WireMsg::Diff { cur, rows }
+        WireMsg::Diff { cur, sty, rows }
     };
     Some(serde_json::to_string(&msg).expect("diff wire message serializes"))
 }
@@ -835,21 +865,25 @@ enum WireMsgIn {
         w: u16,
         // The row count is implied by `d`; the wire's `h` is for the viewer.
         cur: Option<(u16, u16)>,
+        sty: u8,
         rows: Vec<CellBlockIn>,
         images: Vec<ImagePlacement>,
     },
     Diff {
         cur: Option<Option<(u16, u16)>>,
+        sty: Option<u8>,
         rows: Vec<WireRowIn>,
     },
     Cell {
         cur: Option<Option<(u16, u16)>>,
+        sty: Option<u8>,
         // One cell per codepoint; the flattened style applies to all of them.
         r: (usize, usize, String),
         style: CellStyleIn,
     },
     Line {
         cur: Option<Option<(u16, u16)>>,
+        sty: Option<u8>,
         r: WireRowIn,
     },
     Banner {
@@ -882,22 +916,32 @@ impl<'de> Deserialize<'de> for WireMsgIn {
                 Some(p) => Ok(Some(Some(from_val(p)?))),
             }
         };
+        // Cursor style `q`, two-state on diffs: absent = unchanged.
+        let sty = || -> Result<Option<u8>, D::Error> {
+            match obj.get("q") {
+                None => Ok(None),
+                Some(q) => Ok(Some(from_val(q)?)),
+            }
+        };
         if let Some(c) = obj.get("c") {
             return Ok(WireMsgIn::Cell {
                 cur: tri()?,
+                sty: sty()?,
                 r: from_val(c)?,
-                style: from_val(&v)?, // whole envelope: reads style letters, ignores c/p
+                style: from_val(&v)?, // whole envelope: reads style letters, ignores c/p/q
             });
         }
         if let Some(l) = obj.get("l") {
             return Ok(WireMsgIn::Line {
                 cur: tri()?,
+                sty: sty()?,
                 r: from_val(l)?,
             });
         }
         if let Some(r) = obj.get("r") {
             return Ok(WireMsgIn::Diff {
                 cur: tri()?,
+                sty: sty()?,
                 rows: from_val(r)?,
             });
         }
@@ -911,6 +955,7 @@ impl<'de> Deserialize<'de> for WireMsgIn {
             return Ok(WireMsgIn::Full {
                 w: from_val(w)?,
                 cur,
+                sty: sty()?.unwrap_or(0), // full is absolute: absent = default
                 rows: from_val(rows)?,
                 images: match obj.get("i") {
                     Some(i) => from_val(i)?,
@@ -921,14 +966,18 @@ impl<'de> Deserialize<'de> for WireMsgIn {
         if let Some(b) = obj.get("b") {
             return Ok(WireMsgIn::Banner { html: from_val(b)? });
         }
-        if let Some(p) = obj.get("p") {
-            // Cursor-only move: no row payload, just the tri-state cursor.
-            let cur = match p {
-                Value::Null => Some(None),
-                _ => Some(Some(from_val(p)?)),
+        if obj.get("p").is_some() || obj.get("q").is_some() {
+            // Cursor-only change: no row payload, just the tri-state cursor
+            // and/or its style. (Our encoder always pairs q with p, but accept
+            // a bare q for robustness.)
+            let cur = match obj.get("p") {
+                None => None,
+                Some(Value::Null) => Some(None),
+                Some(p) => Some(Some(from_val(p)?)),
             };
             return Ok(WireMsgIn::Diff {
                 cur,
+                sty: sty()?,
                 rows: Vec::new(),
             });
         }
@@ -1227,11 +1276,12 @@ fn decode_block(block: CellBlockIn) -> Vec<StyledCell> {
 /// lockstep with every browser. `None` = drop the message (a diff arriving while
 /// the state is a banner is a desync; forwarding it would corrupt viewers too).
 fn apply_wire(prev: &Frame, msg: WireMsgIn) -> Option<Frame> {
-    // Normalize the three diff shapes into (cursor, row patches).
-    let (cur, rows) = match msg {
+    // Normalize the three diff shapes into (cursor, style, row patches).
+    let (cur, sty, rows) = match msg {
         WireMsgIn::Full {
             w,
             cur,
+            sty,
             rows,
             images,
         } => {
@@ -1239,16 +1289,18 @@ fn apply_wire(prev: &Frame, msg: WireMsgIn) -> Option<Frame> {
                 cols: w,
                 rows: rows.into_iter().map(decode_block).collect(),
                 cursor: cur,
+                cursor_style: sty,
                 images,
             }));
         }
         WireMsgIn::Banner { html } => return Some(Frame::Banner(html)),
-        WireMsgIn::Diff { cur, rows } => (cur, rows),
-        WireMsgIn::Cell { cur, r, style } => {
+        WireMsgIn::Diff { cur, sty, rows } => (cur, sty, rows),
+        WireMsgIn::Cell { cur, sty, r, style } => {
             let (row, l, text) = r;
             let n = text.chars().count();
             (
                 cur,
+                sty,
                 vec![WireRowIn {
                     r: row,
                     l,
@@ -1259,7 +1311,7 @@ fn apply_wire(prev: &Frame, msg: WireMsgIn) -> Option<Frame> {
                 }],
             )
         }
-        WireMsgIn::Line { cur, r } => (cur, vec![r]),
+        WireMsgIn::Line { cur, sty, r } => (cur, sty, vec![r]),
     };
     let Frame::Screen(grid) = prev else {
         return None; // a diff can't apply to a banner — drop it
@@ -1299,6 +1351,9 @@ fn apply_wire(prev: &Frame, msg: WireMsgIn) -> Option<Frame> {
     if let Some(c) = cur {
         grid.cursor = c; // absent = unchanged; null = hidden; pos = moved
     }
+    if let Some(s) = sty {
+        grid.cursor_style = s; // absent = unchanged
+    }
     Some(Frame::Screen(grid))
 }
 
@@ -1320,6 +1375,7 @@ mod tests {
             cols: rows.iter().map(|r| r.chars().count()).max().unwrap_or(0) as u16,
             rows: rows.iter().map(|r| r.chars().map(cell).collect()).collect(),
             cursor: None,
+            cursor_style: 0,
             images: Vec::new(),
         }
     }
@@ -1685,6 +1741,37 @@ mod tests {
         // An out-of-range style from the future clamps to single, not garbage.
         let s: CellStyleIn = serde_json::from_str(r#"{"u":9}"#).unwrap();
         assert_eq!(s.underline, 1);
+    }
+
+    // DECSCUSR rides as `q`: absolute on fulls (absent = default), two-state on
+    // diffs (absent = unchanged) — and always alongside `p`, so an old decoder
+    // that dispatches rows-less messages on `p` parses a style-only change as a
+    // harmless cursor no-op instead of dropping it.
+    #[test]
+    fn cursor_style_rides_as_q_with_p_alongside() {
+        let mut a = grid(&["hi"]);
+        a.cursor = Some((0, 1));
+        let mut b = a.clone();
+        b.cursor_style = 5; // vim insert: blinking bar
+        let msg = diff_message(&a, &b).expect("style change is a change");
+        assert_eq!(msg, r#"{"p":[0,1],"q":5}"#);
+
+        // Hub-side apply tracks it; back to default emits q:0 (not absent).
+        let Some(Frame::Screen(g)) = apply(&Frame::Screen(a.clone()), &msg) else {
+            panic!("applies")
+        };
+        assert_eq!(g.cursor_style, 5);
+        let back = diff_message(&b, &a).expect("style reset is a change");
+        assert_eq!(back, r#"{"p":[0,1],"q":0}"#);
+
+        // Fulls carry it absolutely; default is omitted.
+        assert!(full_message_grid(&b).contains(r#""q":5"#));
+        assert!(!full_message_grid(&a).contains(r#""q""#));
+        let prev = Frame::Banner("x".into());
+        let Some(Frame::Screen(g)) = apply(&prev, &full_message_grid(&b)) else {
+            panic!("full applies")
+        };
+        assert_eq!(g.cursor_style, 5);
     }
 
     #[test]

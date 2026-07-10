@@ -57,6 +57,11 @@ fn paint_screen(prev: Option<&Grid>, g: &Grid, view: (u16, u16)) -> String {
     if full && cropped {
         status_line(&mut out, g, view);
     }
+    // DECSCUSR passes through so the client terminal shows the session's cursor
+    // shape (vim's insert-mode bar); emitted on change, or on full when non-default.
+    if g.cursor_style != prev.map_or(0, |p| p.cursor_style) {
+        let _ = write!(out, "\x1b[{} q", g.cursor_style);
+    }
     cursor_seq(&mut out, g, view, content_rows);
     out
 }

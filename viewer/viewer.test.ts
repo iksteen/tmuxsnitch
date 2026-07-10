@@ -111,6 +111,31 @@ test("renderRow coalesces same-style cells into one positioned run", () => {
   assert.equal(html, '<span class="run" style="left:0ch;width:3ch;">abc</span>');
 });
 
+test("renderRow draws DECSCUSR cursor shapes", () => {
+  const cells = [{ t: "a" }, { t: "b" }];
+  // Default/block styles (0-2): the classic reverse-video cell.
+  assert.equal(
+    renderRow(cells, 0),
+    '<span class="run" style="left:0ch;width:1ch;color:#000000;background:#d0d0d0;">a</span>' +
+      '<span class="run" style="left:1ch;width:1ch;">b</span>',
+  );
+  assert.equal(renderRow(cells, 0, 2), renderRow(cells, 0));
+  // Bar (5/6): no reverse video, an inset left-edge decoration instead.
+  assert.equal(
+    renderRow(cells, 0, 5),
+    '<span class="run" style="left:0ch;width:1ch;box-shadow:inset 0.14em 0 0 0 currentColor;">a</span>' +
+      '<span class="run" style="left:1ch;width:1ch;">b</span>',
+  );
+  // Underline (3/4): bottom-edge decoration.
+  assert.ok(renderRow(cells, 0, 4).includes("inset 0 -0.14em"));
+  // A blank cursor cell must not coalesce its decoration away into the run.
+  const blanks = [{ t: "x" }, {}, { t: "y" }];
+  assert.ok(
+    renderRow(blanks, 1, 6).includes("box-shadow"),
+    "bar cursor visible on a blank cell",
+  );
+});
+
 test("renderRow positions each run absolutely by column", () => {
   // A styled middle cell splits the row into three runs, each at its own column.
   const html = renderRow([{ t: "a" }, { t: "b", b: true }, { t: "c" }], -1);

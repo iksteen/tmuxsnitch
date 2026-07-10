@@ -68,6 +68,7 @@ interface FullMsg {
   w: number;
   h: number;
   p?: Cur; // cursor [row, col]; absent = hidden
+  q?: number; // DECSCUSR cursor style 0-6; absent = 0 (default block)
   i?: ImageRef[]; // inline images placed on the screen; absent = none
 }
 // One inline image (iTerm2/kitty) placed at a cell. `m`/`d` build a data: URL;
@@ -82,21 +83,25 @@ export interface ImageRef {
 }
 // On diff-family messages the cursor is TRI-STATE: absent = unchanged,
 // null = became hidden, [row, col] = moved. A cursor-only move drops `r`,
-// leaving just { p }.
+// leaving just { p }. The style `q` is two-state: absent = unchanged,
+// value = changed-to (0 = back to default).
 interface DiffMsg {
   r?: WireRow[];
   p?: Cur;
+  q?: number;
 }
 // A uniform span: c is the bare [row, left, "…"] tuple — ONE CELL PER CODEPOINT
 // — and the style flattened into the message applies to every cell.
 interface CellMsg extends Style {
   c: [number, number, string];
   p?: Cur;
+  q?: number;
 }
 // A single changed line: l is the bare [row, left, entries, runs?] tuple.
 interface LineMsg {
   l: WireRow;
   p?: Cur;
+  q?: number;
 }
 
 // Materialize text entries + style runs into per-cell objects (the form renderRow
@@ -724,7 +729,10 @@ function redrawCanvasRow(r: number): void {
     const w = cell.w ? 2 : 1;
     const cp = cell.t ? cell.t.codePointAt(0)! : 0;
     if (cp && isCanvasGlyph(cp)) {
-      const isCursor = !!screen.cur && screen.cur[0] === r && screen.cur[1] === c;
+      // Only a block cursor reverses the glyph's ink; underline/bar cursors
+      // ride the DOM span's decoration and leave the colors alone.
+      const isCursor =
+        !!screen.cur && screen.cur[0] === r && screen.cur[1] === c && screen.sty <= 2;
       drawGlyph(r, c, cp, cell, isCursor);
     }
     c += w;
@@ -1012,8 +1020,8 @@ function symbolSpan(
   );
 }
 
-function symbolCell(cell: Cell, isCursor: boolean, col: number, w: number, font: string): string {
-  const boxStyle = cellStyle(cell, isCursor);
+function symbolCell(cell: Cell, isCursor: boolean, col: number, w: number, font: string, deco = ""): string {
+  const boxStyle = cellStyle(cell, isCursor) + deco;
   const t = cell.t ?? " ";
   const cp = t.codePointAt(0) ?? 0x20;
   // Fill glyphs tile the box (stretch); symbol_map glyphs keep intrinsic geometry (meet).
@@ -1024,13 +1032,28 @@ function symbolCell(cell: Cell, isCursor: boolean, col: number, w: number, font:
 
 // ── row rendering (port of render.rs:render_row) ──────────────────────────────
 
-// Render one row's cells to inner HTML. `cursorCol` is the cursor column, or -1.
-// True when a style string paints nothing for a space: no background, no underline.
+// True when a style string paints nothing for a space: no background, no
+// underline, no cursor decoration.
 function inkFree(s: string): boolean {
-  return !s.includes("background") && !s.includes("text-decoration");
+  return !s.includes("background") && !s.includes("text-decoration") && !s.includes("box-shadow");
 }
 
-export function renderRow(cells: Cell[], cursorCol: number): string {
+// The non-block DECSCUSR cursors (3/4 underline, 5/6 bar) draw as an inset
+// box-shadow — no layout impact, currentColor follows the cell's fg. Blink
+// variants render steady.
+// ponytail: no blink — a CSS animation class needs an injected stylesheet;
+// add one if anyone misses it.
+function cursorDeco(sty: number): string {
+  return sty >= 5
+    ? "box-shadow:inset 0.14em 0 0 0 currentColor;"
+    : "box-shadow:inset 0 -0.14em 0 0 currentColor;";
+}
+
+// Render one row's cells to inner HTML. `cursorCol` is the cursor column (or -1),
+// `curSty` the DECSCUSR style: 0-2 render as the classic reverse-video block,
+// 3-6 leave the cell's colors alone and add an underline/bar decoration.
+export function renderRow(cells: Cell[], cursorCol: number, curSty = 0): string {
+  const blocky = curSty <= 2;
   let out = "";
   let col = 0;
   let runStyle: string | null = null;
@@ -1044,6 +1067,8 @@ export function renderRow(cells: Cell[], cursorCol: number): string {
   };
   for (const cell of cells) {
     const isCursor = col === cursorCol;
+    const curBlock = isCursor && blocky;
+    const deco = isCursor && !blocky ? cursorDeco(curSty) : "";
     const w = cell.w ? 2 : 1;
     const cp0 = cell.t ? cell.t.codePointAt(0)! : 0;
     // Canvas paints box/block/legacy geometry, always winning over symbol_map there. The
@@ -1056,7 +1081,7 @@ export function renderRow(cells: Cell[], cursorCol: number): string {
       flushText();
       runStyle = null;
       cols = 0;
-      out += `<span class="run" style="left:${col}ch;width:${w}ch;${cellStyle(cell, isCursor)}color:transparent">${esc(cell.t!)}</span>`;
+      out += `<span class="run" style="left:${col}ch;width:${w}ch;${cellStyle(cell, curBlock)}${deco}color:transparent">${esc(cell.t!)}</span>`;
       col += w;
       continue;
     }
@@ -1069,7 +1094,7 @@ export function renderRow(cells: Cell[], cursorCol: number): string {
       flushText();
       runStyle = null;
       cols = 0;
-      out += `<span class="run" style="left:${col}ch;width:${w}ch;overflow:visible;${cellStyle(cell, isCursor)}">${esc(cell.t!)}</span>`;
+      out += `<span class="run" style="left:${col}ch;width:${w}ch;overflow:visible;${cellStyle(cell, curBlock)}${deco}">${esc(cell.t!)}</span>`;
       col += w;
       continue;
     }
@@ -1080,9 +1105,9 @@ export function renderRow(cells: Cell[], cursorCol: number): string {
       flushText();
       runStyle = null;
       cols = 0;
-      out += symbolCell(cell, isCursor, col, w, font);
+      out += symbolCell(cell, curBlock, col, w, font, deco);
     } else {
-      let style = cellStyle(cell, isCursor);
+      let style = cellStyle(cell, curBlock) + deco;
       // A blank cell with no visible ink (no bg, no underline) renders identically
       // under any fg/weight — let it ride the open run instead of splitting it, as
       // long as that run is equally ink-free (adopting a bg/underline run would
@@ -1120,10 +1145,11 @@ function cursorCol(cur: Cur, row: number): number {
 interface ScreenState {
   cells: Cell[][];
   cur: Cur;
+  sty: number; // DECSCUSR cursor style 0-6
   rowEls: HTMLElement[];
 }
 
-let screen: ScreenState = { cells: [], cur: null, rowEls: [] };
+let screen: ScreenState = { cells: [], cur: null, sty: 0, rowEls: [] };
 let screenEl: HTMLElement;
 
 // Update the screen's cell buffer + cursor from decoded line patches, returning
@@ -1131,14 +1157,22 @@ let screenEl: HTMLElement;
 // cursor is tri-state: undefined = unchanged (leave it, dirty nothing extra),
 // null = hidden, [row, col] = moved. DOM-free, so it's unit-tested.
 export function patchCells(
-  state: { cells: Cell[][]; cur: Cur },
-  dp: { cur: Cur | undefined; rows: { r: number; l: number; cells: Cell[] }[] },
+  state: { cells: Cell[][]; cur: Cur; sty?: number },
+  dp: {
+    cur: Cur | undefined;
+    sty?: number;
+    rows: { r: number; l: number; cells: Cell[] }[];
+  },
 ): Set<number> {
   const dirty = new Set<number>();
   if (dp.cur !== undefined) {
     if (state.cur) dirty.add(state.cur[0]);
     if (dp.cur) dirty.add(dp.cur[0]);
     state.cur = dp.cur;
+  }
+  if (dp.sty !== undefined && dp.sty !== (state.sty ?? 0)) {
+    state.sty = dp.sty;
+    if (state.cur) dirty.add(state.cur[0]); // repaint the cursor's shape
   }
   for (const patch of dp.rows) {
     let row = state.cells[patch.r];
@@ -1261,7 +1295,7 @@ function flushPaint(): void {
       } else {
         const el = screen.rowEls[r];
         if (!el) continue;
-        el.innerHTML = renderRow(screen.cells[r] ?? [], cursorCol(screen.cur, r));
+        el.innerHTML = renderRow(screen.cells[r] ?? [], cursorCol(screen.cur, r), screen.sty);
         redrawCanvasRow(r);
       }
     }
@@ -1277,7 +1311,7 @@ function flushPaint(): void {
 function applyFull(m: FullMsg): void {
   // Update the model now so diffs queued behind this full patch the right cells;
   // the DOM rebuild is deferred to the flush (which reads screen.cells).
-  screen = { cells: m.d.map(decodeBlock), cur: m.p ?? null, rowEls: [] };
+  screen = { cells: m.d.map(decodeBlock), cur: m.p ?? null, sty: m.q ?? 0, rowEls: [] };
   rebuildDims = { w: m.w, h: m.h, i: m.i };
   rebuildBanner = null;
   dirtyRows.clear(); // a full frame supersedes any pending per-row dirt
@@ -1288,7 +1322,7 @@ function paintFull(dims: { w: number; h: number; i?: ImageRef[] }): void {
   const cur = screen.cur;
   let html = `<div class="screen" style="width:${dims.w}ch;height:calc(${dims.h} * var(--lh));">`;
   for (let r = 0; r < screen.cells.length; r++) {
-    html += `<div class="row">${renderRow(screen.cells[r], cursorCol(cur, r))}</div>`;
+    html += `<div class="row">${renderRow(screen.cells[r], cursorCol(cur, r), screen.sty)}</div>`;
   }
   html += "</div>";
   screenEl.innerHTML = html;
@@ -1331,31 +1365,36 @@ function decodeRow([r, l, text, style]: WireRow): { r: number; l: number; cells:
   return { r, l, cells: decodeCells(text, style as StyleRun[] | undefined) };
 }
 
-// The cursor (`m.p`) passes through as-is: undefined = unchanged, null = hidden.
-function applyPatches(cur: Cur | undefined, rows: { r: number; l: number; cells: Cell[] }[]): void {
-  const dirty = patchCells(screen, { cur, rows });
+// The cursor (`m.p`) passes through as-is: undefined = unchanged, null = hidden;
+// same for its style (`m.q`): undefined = unchanged.
+function applyPatches(
+  cur: Cur | undefined,
+  sty: number | undefined,
+  rows: { r: number; l: number; cells: Cell[] }[],
+): void {
+  const dirty = patchCells(screen, { cur, sty, rows });
   for (const r of dirty) dirtyRows.add(r);
   schedulePaint();
 }
 
 function applyDiff(m: DiffMsg): void {
-  applyPatches(m.p, (m.r ?? []).map(decodeRow));
+  applyPatches(m.p, m.q, (m.r ?? []).map(decodeRow));
 }
 
 function applyCell(m: CellMsg): void {
-  const { c: r, p: _p, ...style } = m;
+  const { c: r, p: _p, q: _q, ...style } = m;
   const styled = Object.keys(style).length > 0;
   const cells: Cell[] = [];
   for (const ch of r[2]) cells.push(styled ? { t: ch, ...style } : { t: ch });
-  applyPatches(m.p, [{ r: r[0], l: r[1], cells }]);
+  applyPatches(m.p, m.q, [{ r: r[0], l: r[1], cells }]);
 }
 
 function applyLine(m: LineMsg): void {
-  applyPatches(m.p, [decodeRow(m.l)]);
+  applyPatches(m.p, m.q, [decodeRow(m.l)]);
 }
 
 function applyBanner(m: BannerMsg): void {
-  screen = { cells: [], cur: null, rowEls: [] };
+  screen = { cells: [], cur: null, sty: 0, rowEls: [] };
   rebuildBanner = m.b;
   rebuildDims = null;
   dirtyRows.clear();

@@ -156,6 +156,9 @@ pub struct Grid {
     pub rows: Vec<Vec<StyledCell>>,
     /// Cursor (row, col) if visible.
     pub cursor: Option<(u16, u16)>,
+    /// DECSCUSR cursor style, raw 0-6: 0 default, 1/2 blinking/steady block,
+    /// 3/4 underline, 5/6 bar. Rides the wire as the optional `q` key.
+    pub cursor_style: u8,
     /// Inline images currently placed on the screen (empty for the common case).
     pub images: Vec<ImagePlacement>,
 }
