@@ -172,11 +172,14 @@ telemetry noise to silence deliberately.
    renders all of these locally, so the mirror is visibly wrong in editors
    daily. Gate: only emit wire flags the viewer renders.
 
-6. **DECSCUSR (`CSI Sp q`) cursor shape.** Not tracked; vim's insert-mode beam
-   renders as a block in the mirror. Track shape+blink in `Screen`, ship as a
-   NEW optional wire key (do not change the existing `p` tri-state — old
-   decoders must keep working; additive key, no salt bump), render
-   block/beam/underline in the viewer.
+6. **DECSCUSR (`CSI Sp q`) cursor shape.** ✅ Landed 2026-07-10 as vt100
+   `7de444d` + wire/viewers `649dfdf`. Raw 0-6 tracked on `Screen` (DECSTR/RIS
+   reset it); wire key `q` (absolute on fulls, two-state on diffs, always sent
+   alongside `p` so old decoders parse a style-only change as a cursor no-op —
+   no salt bump); browser renders block as reverse video and underline/bar as
+   inset box-shadow; SSH viewer passes the sequence through. Blink variants
+   render steady (ponytail in `cursorDeco`). Original rationale: not tracked;
+   vim's insert-mode beam rendered as a block in the mirror.
 
 ## Phase 3 — nice to have
 
