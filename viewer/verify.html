@@ -45,6 +45,9 @@ d.push([[pad("dotted Mgjq / dashed Mgjq")], [[0, 11, { u: 4 }], [14, 11, { u: 5 
 d.push([[pad("strikethrough Mgjq")], [[0, 18, { s: 1 }]]]);
 // contiguous bg run (device-pixel seam check: verify.py scans this band)
 d.push([[pad("bg run seam probe")], [[0, 50, { g: 4 }]]]);
+// concealed text (SGR 8): glyphs hidden in BOTH modes — verify.py asserts an
+// ink-free band; the characters still ride the wire (ghost/copy keeps them)
+d.push([[pad("hidden secret Mgjq")], [[0, 18, { o: 1 }]]]);
 for (let i = d.length; i < ROWS; i++) d.push([[pad(`row ${i} Mgjq baseline probe`)]]);
 
 apply({ v: 4 });

@@ -27,6 +27,7 @@ export interface Cell {
   i?: Flag; // italic
   u?: Flag | number; // underline style: 1 single, 2 double, 3 curly, 4 dotted, 5 dashed
   s?: Flag; // strikethrough
+  o?: Flag; // concealed (SGR 8): glyph hidden, text stays in the buffer
   k?: Color; // underline color; absent = follow the text color
   n?: Flag; // inverse
   a?: number; // OSC 8 hyperlink id, resolved through the frame's `y` table
@@ -62,7 +63,7 @@ type WireRow =
 
 // There is no "t" tag: each message type owns one payload key (d/r/c/l/b/v), and
 // apply() dispatches on which is present — `c` FIRST, since the single-cell form
-// flattens its style letters (f,g,b,d,i,u,s,k,n,w) into the envelope. The cursor
+// flattens its style letters (f,g,b,d,i,u,s,o,k,n,w) into the envelope. The cursor
 // is a separate `p` key on every diff-family message.
 interface FullMsg {
   d: Block[];
@@ -258,7 +259,16 @@ export function cellStyle(cell: Cell, isCursor: boolean): string {
     fg = [Math.floor(f[0] / 10) * 6, Math.floor(f[1] / 10) * 6, Math.floor(f[2] / 10) * 6];
   }
   let s = "";
-  if (fg) s += `color:${hex(fg)};`;
+  if (cell.o) {
+    // Conceal (SGR 8): the glyph is hidden, bg and decorations stay — like
+    // the terminals that implement it (xterm/foot/alacritty; kitty ignores
+    // SGR 8, a deviation the vendored parser documents). transparent kills
+    // currentcolor decorations too, so the decoration branch below pins its
+    // color explicitly.
+    s += "color:transparent;";
+  } else if (fg) {
+    s += `color:${hex(fg)};`;
+  }
   if (bg) s += `background:${hex(bg)};`;
   if (cell.b) s += "font-weight:bold;";
   if (cell.i) s += "font-style:italic;";
@@ -276,6 +286,7 @@ export function cellStyle(cell: Cell, isCursor: boolean): string {
     if (us) d += ` ${us}`;
     const k = resolveRgb(cell.k);
     if (k) d += ` ${hex(k)}`;
+    else if (cell.o) d += ` ${hex(fg ?? parseHex(cfg.defFg))}`;
     s += `text-decoration:${d.trim()};`;
   }
   return s;
@@ -858,7 +869,7 @@ function redrawCanvasRow(r: number): void {
   let c = 0;
   for (const cell of row) {
     const w = cell.w ? 2 : 1;
-    const cp = cell.t ? cell.t.codePointAt(0)! : 0;
+    const cp = cell.o ? 0 : cell.t ? cell.t.codePointAt(0)! : 0; // conceal: no glyph
     if (cp && isCanvasGlyph(cp)) {
       // Only a block cursor reverses the glyph's ink; underline/bar cursors
       // ride the DOM span's decoration and leave the colors alone.
@@ -1187,10 +1198,10 @@ function drawRowStorm(r: number): void {
       ctx.fillStyle = defBg;
       ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
     }
-    const cp = cell.t ? cell.t.codePointAt(0)! : 0;
+    const cp = cell.o ? 0 : cell.t ? cell.t.codePointAt(0)! : 0; // conceal: no glyph
     if (cp && isCanvasGlyph(cp) && !(cp >= 0xe000 && symbolFamily(cp))) {
       drawGlyph(r, c, cp, cell, curBlock);
-    } else if (cell.t && cell.t !== " ") {
+    } else if (!cell.o && cell.t && cell.t !== " ") {
       // symbol_map / fill-glyph cells draw with their mapped family — canvas
       // uses the served webfonts once loaded, same faces as the DOM path.
       const fam = svgFont(cell) ?? fontFam;

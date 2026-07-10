@@ -473,3 +473,19 @@ test("ghostText: blank and empty cells become spaces, trailing blanks preserved"
 test("ghostText: multi-codepoint graphemes survive intact", () => {
   assert.equal(ghostText([{ t: "e\u0301" }, { t: "👩‍🚀", w: 1 }] as never), "e\u0301👩‍🚀");
 });
+
+test("cellStyle conceal: glyph transparent, bg stays, decorations keep their ink", () => {
+  // conceal hides the glyph but not the cell — bg fills still paint
+  assert.equal(cellStyle({ o: 1 }, false), "color:transparent;");
+  assert.equal(cellStyle({ o: 1, g: 4 }, false), "color:transparent;background:#0000ee;");
+  // transparent currentcolor would erase decorations — the color is pinned
+  assert.equal(
+    cellStyle({ o: 1, u: 1 }, false),
+    "color:transparent;text-decoration:underline #d0d0d0;",
+  );
+  // an explicit underline color (k) wins as usual
+  assert.equal(
+    cellStyle({ o: 1, u: 1, k: 9 }, false),
+    "color:transparent;text-decoration:underline #ff0000;",
+  );
+});

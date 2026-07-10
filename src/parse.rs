@@ -67,6 +67,7 @@ pub fn grid_from_screen<T>(screen: &vt100::Screen<T>) -> Grid {
                 italic: cell.italic(),
                 underline: cell.underline_style(),
                 strike: cell.strikethrough(),
+                concealed: cell.concealed(),
                 ulcolor: conv_color(cell.ulcolor()),
                 inverse: cell.inverse(),
                 link,

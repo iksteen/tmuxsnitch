@@ -657,6 +657,14 @@ struct CellStyle {
         serialize_with = "flag"
     )]
     strike: bool,
+    /// Conceal (SGR 8): the glyph is hidden; text still rides the wire (the
+    /// buffer keeps it — selection/copy semantics match a real terminal).
+    #[serde(
+        rename = "o",
+        skip_serializing_if = "crate::model::is_false",
+        serialize_with = "flag"
+    )]
+    concealed: bool,
     /// Underline color; absent = follow the text color (CSS default).
     #[serde(rename = "k", skip_serializing_if = "crate::model::is_default_color")]
     ulcolor: Color,
@@ -702,6 +710,7 @@ impl CellStyle {
             (self.dim, "d"),
             (self.italic, "i"),
             (self.strike, "s"),
+            (self.concealed, "o"),
             (self.inverse, "n"),
             (self.wide, "w"),
         ] {
@@ -721,7 +730,7 @@ fn is_plain(c: &StyledCell) -> bool {
         && c.ulcolor == Color::Default
         && c.underline == 0
         && c.link.is_none()
-        && !(c.bold || c.dim || c.italic || c.strike || c.inverse || c.wide)
+        && !(c.bold || c.dim || c.italic || c.strike || c.concealed || c.inverse || c.wide)
 }
 
 fn cell_style(c: &StyledCell) -> CellStyle {
@@ -733,6 +742,7 @@ fn cell_style(c: &StyledCell) -> CellStyle {
         italic: c.italic,
         underline: c.underline,
         strike: c.strike,
+        concealed: c.concealed,
         ulcolor: c.ulcolor,
         inverse: c.inverse,
         link: c.link,
@@ -1358,6 +1368,8 @@ struct CellStyleIn {
     underline: u8,
     #[serde(rename = "s", default, deserialize_with = "truthy")]
     strike: bool,
+    #[serde(rename = "o", default, deserialize_with = "truthy")]
+    concealed: bool,
     #[serde(rename = "k", default)]
     ulcolor: Color,
     #[serde(rename = "n", default, deserialize_with = "truthy")]
@@ -1395,6 +1407,7 @@ fn decode_block(block: CellBlockIn) -> Vec<StyledCell> {
             c.italic = s.italic;
             c.underline = s.underline;
             c.strike = s.strike;
+            c.concealed = s.concealed;
             c.ulcolor = s.ulcolor;
             c.inverse = s.inverse;
             c.link = s.link;
@@ -1976,6 +1989,28 @@ mod tests {
         // An out-of-range style from the future clamps to single, not garbage.
         let s: CellStyleIn = serde_json::from_str(r#"{"u":9}"#).unwrap();
         assert_eq!(s.underline, 1);
+    }
+
+    // Conceal rides `o` (additive — old viewers ignore it and show the text,
+    // exactly the pre-conceal behavior) and the hub-side decode keeps it. The
+    // TEXT still rides the wire: the buffer owns it, only rendering hides it.
+    #[test]
+    fn conceal_rides_the_wire_and_decodes() {
+        let mut g = grid(&["pw"]);
+        g.rows[0][0].concealed = true;
+        let full = full_message_grid(&g);
+        assert!(full.contains(r#"{"o":1}"#), "{full}");
+        assert!(
+            full.contains("pw"),
+            "the concealed glyph still rides: {full}"
+        );
+
+        let prev = Frame::Banner("x".into());
+        let Some(Frame::Screen(out)) = apply(&prev, &full) else {
+            panic!("full applies")
+        };
+        assert_grid_equiv(&out, &g);
+        assert!(out.rows[0][0].concealed && !out.rows[0][1].concealed);
     }
 
     // DECSCUSR rides as `q`: absolute on fulls (absent = default), two-state on

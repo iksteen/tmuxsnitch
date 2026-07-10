@@ -102,8 +102,12 @@ export function cellStyle(cell, isCursor) {
         fg = [Math.floor(f[0] / 10) * 6, Math.floor(f[1] / 10) * 6, Math.floor(f[2] / 10) * 6];
     }
     let s = "";
-    if (fg)
+    if (cell.o) {
+        s += "color:transparent;";
+    }
+    else if (fg) {
         s += `color:${hex(fg)};`;
+    }
     if (bg)
         s += `background:${hex(bg)};`;
     if (cell.b)
@@ -118,6 +122,8 @@ export function cellStyle(cell, isCursor) {
         const k = resolveRgb(cell.k);
         if (k)
             d += ` ${hex(k)}`;
+        else if (cell.o)
+            d += ` ${hex(fg ?? parseHex(cfg.defFg))}`;
         s += `text-decoration:${d.trim()};`;
     }
     return s;
@@ -600,7 +606,7 @@ function redrawCanvasRow(r) {
     let c = 0;
     for (const cell of row) {
         const w = cell.w ? 2 : 1;
-        const cp = cell.t ? cell.t.codePointAt(0) : 0;
+        const cp = cell.o ? 0 : cell.t ? cell.t.codePointAt(0) : 0;
         if (cp && isCanvasGlyph(cp)) {
             const isCursor = !!screen.cur && screen.cur[0] === r && screen.cur[1] === c && screen.sty <= 2;
             drawGlyph(r, c, cp, cell, isCursor);
@@ -853,11 +859,11 @@ function drawRowStorm(r) {
             ctx.fillStyle = defBg;
             ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
         }
-        const cp = cell.t ? cell.t.codePointAt(0) : 0;
+        const cp = cell.o ? 0 : cell.t ? cell.t.codePointAt(0) : 0;
         if (cp && isCanvasGlyph(cp) && !(cp >= 0xe000 && symbolFamily(cp))) {
             drawGlyph(r, c, cp, cell, curBlock);
         }
-        else if (cell.t && cell.t !== " ") {
+        else if (!cell.o && cell.t && cell.t !== " ") {
             const fam = svgFont(cell) ?? fontFam;
             const font = `${cell.i ? "italic " : ""}${cell.b ? "bold " : ""}${fontPx}px ${fam}`;
             if (font !== curFont) {

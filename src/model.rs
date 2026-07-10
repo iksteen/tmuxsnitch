@@ -91,6 +91,8 @@ pub struct StyledCell {
     pub underline: u8,
     /// Strikethrough (SGR 9/29).
     pub strike: bool,
+    /// Conceal (SGR 8/28): the glyph is hidden, the text stays in the buffer.
+    pub concealed: bool,
     /// Underline color (SGR 58/59); `Default` = follow the text color.
     pub ulcolor: Color,
     pub inverse: bool,

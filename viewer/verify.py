@@ -119,6 +119,17 @@ def main():
         med = sorted(cols)[len(cols) // 2]
         seams = sum(1 for v in cols if v < med * 0.5)
         print(f"bg seam check ({label}): {'PASS' if seams == 0 else f'FAIL ({seams} dark cols)'}")
+    # Conceal (SGR 8): row 11 is concealed text — the glyphs must not render
+    # in either mode (the one direction mirror fidelity can leak content).
+    for label, img in (("dom", dom), ("storm", storm)):
+        px = img.load()
+        ink = sum(
+            1
+            for y in range(11 * LH, 12 * LH)
+            for x in range(0, int(18 * 8.4))
+            if sum(px[x, y][:3]) > 60
+        )
+        print(f"conceal check ({label}): {'PASS' if ink == 0 else f'FAIL ({ink} lit px)'}")
     # Decoration continuity at SPACES: rows 5 (underline) and 9 (strike)
     # style their first 18 cells including the spaces between words — the
     # line must run through the space cells (text-decoration doesn't break
