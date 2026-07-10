@@ -319,7 +319,20 @@ at 0 in `Parser::new`.)
     no salt bump. Browser follows via document.title (boot title restored on
     clear); SSH viewer passes OSC 2 through.
 
-14. **Experiment: a pre-rendered cell matrix in the web client.** Today the
+14. **Experiment: a pre-rendered cell matrix in the web client.** ⊘ Run and
+    shelved 2026-07-10 on `exp/cell-matrix` (renderer + bench harness + full
+    findings in the branch's final commit). Outcome: full DOM fidelity
+    achieved, but the success criterion — beat storm's throughput on the
+    cmatrix corpus — was not met: tie at 80×24, storm 1.7× faster at 200×60
+    and 3.3× at 320×100 (headless Firefox, honest column-rain corpus through
+    the production apply() path). Three optimization rounds (span-precise
+    dirt from wire patches, per-cell value-equality skips, canvas-scan
+    avoidance) established the wall is architectural, not JS: rain dirties
+    nearly every row, a dirty row's display list rebuilds wholesale, so the
+    browser pays per retained NODE (~cols×rows) while storm's screen is one
+    canvas item. Node count, not mutation count, is the cost of full-screen
+    animation. A successor experiment would need one-node-per-row text with
+    sparse styled overlays (ghost-style). Original idea: today the
     DOM path rebuilds each dirty row's coalesced spans from scratch, and the
     cmatrix-class escape hatch is storm mode (canvas `fillText`, lower
     fidelity: no symbol_map, no glyph stretch, no links). The experiment: a
