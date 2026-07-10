@@ -7,7 +7,10 @@ FROM rust:1-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends cmake && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
-RUN cargo build --release --locked
+# Hub-only build (roadmap item 13): the image never runs serve/push, so the
+# PTY/image/font stacks stay out. The full CLI shape is kept (the entrypoint
+# stays `shellglass hub …`); the binary just has only the hub subcommand.
+RUN cargo build --release --locked --no-default-features --features hub
 
 # Runtime: slim glibc image; ca-certificates so the hub can validate Let's Encrypt.
 FROM debian:bookworm-slim

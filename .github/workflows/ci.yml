@@ -30,6 +30,16 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace --locked
+      # Feature subsets must keep compiling warning-free (roadmap item 13:
+      # per-mode binaries). Check, not test — the full suite runs above.
+      - name: check feature matrix
+        env:
+          RUSTFLAGS: -D warnings
+        run: |
+          for f in hub serve push ""; do
+            echo "== features: ${f:-none}"
+            cargo check --locked --no-default-features ${f:+--features $f}
+          done
 
   # The browser renderer is TypeScript, compiled to the committed viewer/dist/viewer.js
   # that build.rs bakes in. Type-check it, run its unit tests, and confirm the committed

@@ -9,39 +9,102 @@ version = "0.0.0-dev"
 edition = "2024"
 license = "MIT"
 
+# Modes are cargo features (roadmap item 13): the default build is the full
+# multi-call binary; slim per-mode builds drop whole dependency stacks (a
+# hub-only build has no PTY/fonts/image machinery, a push-only build has no
+# axum). The per-mode [[bin]] targets below are thin mains over the same clap
+# actions in src/cli.rs, so flags and behavior can't drift from the full CLI.
+[features]
+default = ["serve", "push", "hub"]
+serve = ["mirror", "ssh-view", "dep:axum", "dep:tower-http"]
+push = [
+    "mirror",
+    "dep:reqwest",
+    "dep:reqwest-websocket",
+    "dep:futures-util",
+    "dep:tungstenite",
+]
+hub = [
+    "ssh-view",
+    "dep:axum",
+    "dep:axum-server",
+    "dep:tower-http",
+    "dep:rustls-acme",
+    "dep:tungstenite",
+]
+# Internal: the local-mirror stack shared by serve and push (PTY, image
+# interceptor, font discovery, TOML config).
+mirror = [
+    "dep:portable-pty",
+    "dep:signal-hook",
+    "dep:rustix",
+    "dep:fontdb",
+    "dep:toml",
+    "dep:png",
+    "dep:icy_sixel",
+    "dep:imagesize",
+    "dep:flate2",
+    "dep:libc",
+]
+# Internal: the read-only SSH view, shared by serve and hub.
+ssh-view = ["dep:russh"]
+
+[[bin]]
+name = "shellglass-serve"
+path = "src/bin/serve.rs"
+required-features = ["serve"]
+
+[[bin]]
+name = "shellglass-push"
+path = "src/bin/push.rs"
+required-features = ["push"]
+
+[[bin]]
+name = "shellglass-hub"
+path = "src/bin/hub.rs"
+required-features = ["hub"]
+
+[[bin]]
+name = "shellglass-gen-key"
+path = "src/bin/gen_key.rs"
+
+[[bin]]
+name = "shellglass-print-id"
+path = "src/bin/print_id.rs"
+
 [dependencies]
 anyhow = "1.0.103"
 arc-swap = "1"
 argon2 = "0.5"
-axum = { version = "0.8.9", features = ["ws"] }
-axum-server = { version = "0.8", features = ["tls-rustls"] }
+axum = { version = "0.8.9", features = ["ws"], optional = true }
+axum-server = { version = "0.8", features = ["tls-rustls"], optional = true }
 base64 = "0.22.1"
 bytes = "1"
 clap = { version = "4.6.1", features = ["derive", "env"] }
-flate2 = "1"
-fontdb = "0.23"
+flate2 = { version = "1", optional = true }
+fontdb = { version = "0.23", optional = true }
 getrandom = "0.3"
-imagesize = "0.14"
-libc = "0.2"
-portable-pty = "0.9"
-reqwest = { version = "0.13", default-features = false, features = ["stream", "rustls"] }
-rustix = { version = "1", features = ["termios"] }
-russh = "0.62"
-rustls-acme = { version = "0.15", features = ["axum", "tokio"] }
+imagesize = { version = "0.14", optional = true }
+libc = { version = "0.2", optional = true }
+portable-pty = { version = "0.9", optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["stream", "rustls"], optional = true }
+rustix = { version = "1", features = ["termios"], optional = true }
+russh = { version = "0.62", optional = true }
+rustls-acme = { version = "0.15", features = ["axum", "tokio"], optional = true }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
-signal-hook = { version = "0.4", default-features = false, features = ["iterator"] }
+signal-hook = { version = "0.4", default-features = false, features = ["iterator"], optional = true }
 serde_json = "1"
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-stream = { version = "0.1.17", features = ["sync"] }
-tower-http = { version = "0.7", features = ["compression-br", "compression-gzip"] }
-toml = "1.1.2"
+tower-http = { version = "0.7", features = ["compression-br", "compression-gzip"], optional = true }
+toml = { version = "1.1.2", optional = true }
 # Vendored (upstream unmaintained) — see crates/vt100/Cargo.toml for provenance.
 vt100 = { path = "crates/vt100" }
-reqwest-websocket = "0.6.0"
-futures-util = { version = "0.3.32", default-features = false, features = ["sink", "std"] }
-tungstenite = { version = "0.29", default-features = false }
-png = "0.18.1"
-icy_sixel = "0.5"
+reqwest-websocket = { version = "0.6.0", optional = true }
+futures-util = { version = "0.3.32", default-features = false, features = ["sink", "std"], optional = true }
+tungstenite = { version = "0.29", default-features = false, optional = true }
+png = { version = "0.18.1", optional = true }
+icy_sixel = { version = "0.5", optional = true }
 
 [profile.release]
 strip = true

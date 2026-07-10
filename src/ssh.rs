@@ -14,8 +14,10 @@
 //! `Lagged`, and a slow SSH window all collapse to "render the newest frame" — the
 //! source is already 30fps-capped, so no queue or rate limiter is needed.
 
+#[cfg(feature = "hub")]
+use crate::hub;
 use crate::model::Frame;
-use crate::{ansi, diff, hub};
+use crate::{ansi, diff};
 use anyhow::{Context, Result};
 use russh::keys::ssh_key::LineEnding;
 use russh::keys::ssh_key::private::Ed25519Keypair;
@@ -34,13 +36,18 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, watch};
 #[derive(Clone)]
 pub enum Target {
     Single(Arc<diff::Live>),
+    #[cfg(feature = "hub")]
     Hub(hub::HubState),
 }
 
 impl Target {
     fn resolve(&self, user: &str) -> Option<Arc<diff::Live>> {
+        // Without the hub feature `user` picks nothing (single session).
+        #[cfg(not(feature = "hub"))]
+        let _ = user;
         match self {
             Target::Single(live) => Some(Arc::clone(live)),
+            #[cfg(feature = "hub")]
             Target::Hub(hub) => hub.live(user),
         }
     }

@@ -7,7 +7,10 @@ shellglass mirrors an interactive command (run in a PTY, the `script(1)` model) 
 ## Commands
 
 ```sh
-cargo build --release            # binary at ./target/release/shellglass
+cargo build --release            # full binary + per-mode bins at ./target/release/
+                                 # (shellglass, shellglass-{serve,push,hub,gen-key,print-id})
+cargo check --no-default-features --features hub   # modes are cargo features —
+                                 # hub/serve/push subset builds must stay warning-free (CI matrix)
 cargo test --workspace           # unit tests incl. vendored vt100 suite (CI runs with --locked)
 cargo test id_is_deterministic   # a single test by name
 cargo fmt --all --check          # CI gate
@@ -40,7 +43,7 @@ mid-redraw snapshot and a stuck BSU can't freeze the mirror. The command default
 
 The `screen` thread also runs the inline-image side channel (`images.rs`): raw PTY bytes go through an `Interceptor` that pulls out kitty/iTerm2/sixel sequences (vt100 drops them) as `Segment::Image` and feeds everything else to the parser as `Segment::Pass`. A placed image is tracked with **per-cell image tags** — the vendored vt100's `place_image` stamps `(id, row_off, col_off)` into every covered cell, and the tag dies with the cell's contents (set/clear), so vt100's own scroll/reflow/erase manage the image's lifetime exactly like a cell-based sixel terminal erases an image. Each frame `resolve_images` reconstructs the top-left from the most top-left surviving tag (its stored offset makes any survivor exact; a bottom-row survivor yields a negative row → viewer clips) and evicts once no covered cell is left. The cursor is left on the image's last row (where a sixel-scrolling terminal leaves it). Placements ride the frame as `Grid::images`.
 
-**Three serving modes** (all in `main.rs`):
+**Three serving modes** (dispatched in `cli.rs`; every binary — the full multi-call `shellglass` and the per-mode ones in `src/bin/` — wraps the same clap actions there; modes are cargo features):
 - Standalone (`server.rs`) — local axum server: `GET /` page, `GET /events` SSE deltas, `GET /viewer.js` the baked renderer.
 - Client (`client.rs`) — keeps the previously-sent frame and streams `diff.rs` wire messages to a remote hub over one `/push` **WebSocket**: a `RegisterBody` (CSS/fonts/render-config) as the first message, then a full picture on each (re)connect, then only deltas (a resize is a layout change, which `encode_delta` turns into a full). Pings for liveness (a run of unanswered pongs, or a send stalled past a timeout, ⇒ dead ⇒ reconnect — so a black-holed hub is caught in seconds, not the kernel's ~15-min TCP timeout). Re-registers + reconnects on drop.
 - Hub (`hub.rs`, `hub` subcommand) — renders nothing and re-diffs nothing; the `/push` WebSocket runs a `AwaitingRegister → Streaming` state machine (first message = register, rest = wire messages), authorized once at the upgrade. Stores each client's pushed CSS/fonts/render-config, applies each pushed wire message to the session's full matrix (`diff::Live::publish_wire`) and forwards the bytes to viewers verbatim; serves viewers at `/s/<id>`. On SIGTERM it Closes every push WebSocket (see `main`'s graceful path) so pushers reconnect promptly instead of black-holing.

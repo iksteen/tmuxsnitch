@@ -45,16 +45,25 @@
 //! native hook for a future `Last-Event-ID` resume).
 
 use arc_swap::ArcSwap;
+// The SSE endpoint is the one axum-touching corner of this module — HTTP-serving
+// builds only (serve/hub); the push client uses just the encode side.
+#[cfg(any(feature = "serve", feature = "hub"))]
 use axum::response::sse::{Event, KeepAlive, Sse};
+#[cfg(any(feature = "serve", feature = "hub"))]
 use axum::response::{IntoResponse, Response};
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+#[cfg(any(feature = "serve", feature = "hub"))]
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{broadcast, watch};
+#[cfg(any(feature = "serve", feature = "hub"))]
 use tokio_stream::StreamExt;
+#[cfg(any(feature = "serve", feature = "hub"))]
 use tokio_stream::wrappers::BroadcastStream;
+#[cfg(any(feature = "serve", feature = "hub"))]
 use tokio_stream::wrappers::WatchStream;
+#[cfg(any(feature = "serve", feature = "hub"))]
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::model::{Color, Frame, Grid, ImagePlacement, StyledCell};
@@ -70,6 +79,7 @@ pub const PROTO: u32 = 4;
 /// The version-hello event data, sent at the head of every SSE stream: the wire
 /// proto plus the baked viewer.js content tag — the two things that decide
 /// whether a loaded page can keep consuming this stream.
+#[cfg(any(feature = "serve", feature = "hub"))]
 fn hello_message() -> String {
     format!(
         "{{\"v\":{PROTO},\"js\":\"{}\"}}",
@@ -88,9 +98,13 @@ const BACKLOG: usize = 64;
 struct State {
     seq: u64,
     frame: Arc<Frame>,
+    // Only the SSE connect path reads it; non-serving builds still populate
+    // the lock (it's just never asked for).
+    #[cfg_attr(not(any(feature = "serve", feature = "hub")), allow(dead_code))]
     full: OnceLock<Arc<str>>,
 }
 
+#[cfg(any(feature = "serve", feature = "hub"))]
 impl State {
     fn full_msg(&self) -> Arc<str> {
         self.full
@@ -222,6 +236,7 @@ impl Live {
     /// and skip deltas the snapshot already covers (seq ≤ snapshot's). On `Lagged`
     /// (viewer overflowed the backlog) it resyncs with a fresh snapshot, raising the
     /// skip threshold — stale retained deltas are discarded exactly, not replayed.
+    #[cfg(any(feature = "serve", feature = "hub"))]
     pub fn connect(self: &Arc<Self>) -> Response {
         let rx = self.diffs.subscribe();
         let snap = self.state.load_full();

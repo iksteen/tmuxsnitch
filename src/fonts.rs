@@ -8,21 +8,34 @@
 //! consulted is `fc-match`, purely to learn the OS's default family for a CSS
 //! generic (`monospace`, …); it's optional and absent on macOS/Windows.
 
+// Everything except [`CACHE_CONTROL_FONT`] and [`FontFile`] is the discovery
+// machinery — mirror-side only (roadmap item 13): the hub never locates fonts,
+// it just re-serves what clients push.
+#[cfg(feature = "mirror")]
 use crate::config::Config;
+#[cfg(feature = "mirror")]
 use anyhow::{Context, Result, bail};
+#[cfg(feature = "mirror")]
 use base64::Engine;
+#[cfg(feature = "mirror")]
 use base64::engine::general_purpose::STANDARD as B64;
+#[cfg(feature = "mirror")]
 use fontdb::{Database, Family, Query, Stretch, Style, Weight};
+#[cfg(feature = "mirror")]
 use std::ops::RangeInclusive;
+#[cfg(feature = "mirror")]
 use std::path::Path;
+#[cfg(feature = "mirror")]
 use std::sync::OnceLock;
 
 /// Compiled font-override table: codepoint ranges paired with a family name.
 /// First matching range wins, mirroring Kitty's `symbol_map` semantics.
+#[cfg(feature = "mirror")]
 pub struct Resolver {
     entries: Vec<(RangeInclusive<u32>, String)>,
 }
 
+#[cfg(feature = "mirror")]
 impl Resolver {
     pub fn build(config: &Config) -> Result<Resolver> {
         let mut entries = Vec::new();
@@ -45,10 +58,12 @@ impl Resolver {
 }
 
 /// CSS generic families that always resolve without a source.
+#[cfg(feature = "mirror")]
 const GENERICS: [&str; 5] = ["monospace", "serif", "sans-serif", "cursive", "fantasy"];
 
 /// Families referenced by `default_font` / `symbol_map`, deduped in first-seen
 /// order, minus CSS generics (which need no file).
+#[cfg(feature = "mirror")]
 fn referenced_families(config: &Config) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     config
@@ -83,6 +98,7 @@ pub struct FontFile {
 
 /// The process-wide system font database, built once (scanning font dirs is not
 /// cheap). Shared by generic resolution and per-family location.
+#[cfg(feature = "mirror")]
 fn system_db() -> &'static Database {
     static DB: OnceLock<Database> = OnceLock::new();
     DB.get_or_init(|| {
@@ -98,6 +114,7 @@ fn system_db() -> &'static Database {
 /// so the page still renders with browser fallback. Run once at startup by the
 /// process that owns the fonts (standalone or push client); the hub just serves
 /// what the client uploads.
+#[cfg(feature = "mirror")]
 pub fn collect_fonts(config: &Config) -> Vec<FontFile> {
     let db = system_db();
     let mut out = Vec::new();
@@ -151,6 +168,7 @@ pub fn collect_fonts(config: &Config) -> Vec<FontFile> {
 
 /// Read an explicit font file: WOFF/WOFF2 are already single-face web fonts and
 /// pass through; ttf/otf/ttc are normalized to a standalone sfnt (face 0).
+#[cfg(feature = "mirror")]
 fn load_font_file(family: &str, path: &Path) -> Result<FontFile> {
     let raw = std::fs::read(path).with_context(|| format!("reading font {}", path.display()))?;
     let (bytes, mime, format) = match raw.get(0..4) {
@@ -175,6 +193,7 @@ fn load_font_file(family: &str, path: &Path) -> Result<FontFile> {
 /// face id + servable bytes. fontdb matches by family and doesn't substitute, but
 /// double-check the match to be safe. The id lets the caller tell a real bold face
 /// from a `weight`-request that fell back to the regular one.
+#[cfg(feature = "mirror")]
 fn fontdb_locate(
     db: &Database,
     name: &str,
@@ -204,6 +223,7 @@ fn fontdb_locate(
 /// generic stays as the stack's last-resort fallback (appended by `font_stack`);
 /// downstream (`collect_fonts`, `font_stack`) then treats the concrete name like
 /// any other family. Left untouched if nothing suitable is installed.
+#[cfg(feature = "mirror")]
 pub fn resolve_generics(config: &mut Config) {
     let db = system_db();
     for fam in &mut config.default_font {
@@ -220,6 +240,7 @@ pub fn resolve_generics(config: &mut Config) {
 /// default (fontconfig, where present); otherwise — macOS, Windows, or no
 /// fontconfig — fall back to a cross-platform candidate list. fontdb serves the
 /// file either way, and the generic stays as the ultimate CSS fallback regardless.
+#[cfg(feature = "mirror")]
 fn concrete_generic(db: &Database, generic: &str) -> Option<String> {
     if let Some(fam) = fontconfig_default(generic)
         && family_installed(db, &fam)
@@ -263,6 +284,7 @@ fn concrete_generic(db: &Database, generic: &str) -> Option<String> {
 /// The concrete family fontconfig resolves a CSS generic to — i.e. the OS/user
 /// configured default. `None` if `fc-match` isn't present (macOS/Windows). Used
 /// only for the generic→family hint; fontdb still locates and serves the file.
+#[cfg(feature = "mirror")]
 fn fontconfig_default(generic: &str) -> Option<String> {
     let out = std::process::Command::new("fc-match")
         .arg("-f")
@@ -278,6 +300,7 @@ fn fontconfig_default(generic: &str) -> Option<String> {
     (!fam.is_empty()).then(|| fam.to_string())
 }
 
+#[cfg(feature = "mirror")]
 fn family_installed(db: &Database, name: &str) -> bool {
     db.faces().any(|f| {
         f.families
@@ -291,6 +314,7 @@ fn family_installed(db: &Database, name: &str) -> bool {
 /// table + table directory pointing at 4-aligned copies of the face's tables and
 /// recomputes `head.checkSumAdjustment`. Returns the bytes and CSS `format`
 /// keyword; `None` on malformed input (all indexing is bounds-checked).
+#[cfg(feature = "mirror")]
 fn sfnt_face(data: &[u8], index: u32) -> Option<(Vec<u8>, &'static str)> {
     // A TTC starts with 'ttcf' then per-face offsets to each face's offset table.
     let dir = if data.get(0..4)? == b"ttcf" {
@@ -365,14 +389,17 @@ fn sfnt_face(data: &[u8], index: u32) -> Option<(Vec<u8>, &'static str)> {
     Some((out, format))
 }
 
+#[cfg(feature = "mirror")]
 fn read_u16(d: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_be_bytes(d.get(at..at + 2)?.try_into().ok()?))
 }
+#[cfg(feature = "mirror")]
 fn read_u32(d: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_be_bytes(d.get(at..at + 4)?.try_into().ok()?))
 }
 
 /// Sum of the data as big-endian u32 words, zero-padding a trailing partial word.
+#[cfg(feature = "mirror")]
 fn sfnt_checksum(d: &[u8]) -> u32 {
     d.chunks(4).fold(0u32, |acc, c| {
         let mut w = [0u8; 4];
@@ -382,6 +409,7 @@ fn sfnt_checksum(d: &[u8]) -> u32 {
 }
 
 /// sfnt offset-table `searchRange`, `entrySelector`, `rangeShift` for `n` tables.
+#[cfg(feature = "mirror")]
 fn sfnt_search_params(n: usize) -> (u16, u16, u16) {
     let mut es = 0u16;
     let mut p = 1usize;
@@ -394,6 +422,7 @@ fn sfnt_search_params(n: usize) -> (u16, u16, u16) {
     (sr, es, rs)
 }
 
+#[cfg(feature = "mirror")]
 fn mime_for(format: &str) -> &'static str {
     match format {
         "opentype" => "font/otf",
@@ -404,6 +433,7 @@ fn mime_for(format: &str) -> &'static str {
 }
 
 /// Parse `"U+E0A0-U+E0D4"` or a single `"U+F000"` into an inclusive range.
+#[cfg(feature = "mirror")]
 fn parse_range(spec: &str) -> Result<RangeInclusive<u32>> {
     let parse_cp = |s: &str| -> Result<u32> {
         let s = s.trim();
@@ -428,6 +458,7 @@ fn parse_range(spec: &str) -> Result<RangeInclusive<u32>> {
 
 /// Encode located fonts for upload to the hub. The key is the font's index and
 /// MUST match the URL index [`crate::render::font_face_css`] bakes into the CSS.
+#[cfg(feature = "mirror")]
 pub fn font_assets(fonts: &[FontFile]) -> Vec<crate::proto::FontAsset> {
     fonts
         .iter()
@@ -445,7 +476,7 @@ pub(crate) fn css_escape_family(name: &str) -> String {
     name.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "mirror"))]
 // Tests build a Config then tweak a field or two — the mutate-after-default form
 // reads better here than struct-update with ..Default::default().
 #[allow(clippy::field_reassign_with_default)]
