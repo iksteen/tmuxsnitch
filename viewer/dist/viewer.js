@@ -590,7 +590,8 @@ function drawRowStorm(r) {
             drawGlyph(r, c, cp, cell, isCursor);
         }
         else if (cell.t && cell.t !== " ") {
-            const font = `${cell.i ? "italic " : ""}${cell.b ? "bold " : ""}${fontPx}px ${fontFam}`;
+            const fam = svgFont(cell) ?? fontFam;
+            const font = `${cell.i ? "italic " : ""}${cell.b ? "bold " : ""}${fontPx}px ${fam}`;
             if (font !== curFont) {
                 ctx.font = font;
                 curFont = font;

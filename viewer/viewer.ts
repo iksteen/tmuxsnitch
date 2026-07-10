@@ -843,7 +843,11 @@ function drawRowStorm(r: number): void {
     if (cp && isCanvasGlyph(cp) && !(cp >= 0xe000 && symbolFamily(cp))) {
       drawGlyph(r, c, cp, cell, isCursor);
     } else if (cell.t && cell.t !== " ") {
-      const font = `${cell.i ? "italic " : ""}${cell.b ? "bold " : ""}${fontPx}px ${fontFam}`;
+      // symbol_map / fill-glyph cells draw with their mapped family — canvas
+      // uses the served webfonts once loaded, same faces as the DOM path.
+      // (Fill-glyph SVG *stretch* stays approximated; family is correct.)
+      const fam = svgFont(cell) ?? fontFam;
+      const font = `${cell.i ? "italic " : ""}${cell.b ? "bold " : ""}${fontPx}px ${fam}`;
       if (font !== curFont) {
         ctx.font = font;
         curFont = font;
