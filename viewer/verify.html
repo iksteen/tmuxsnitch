@@ -168,11 +168,11 @@ if (MODE === "cursor") {
   document.body.style.background = pass ? "#00ff00" : "#ff0000";
 }
 
-// ?mode=bleed: cross-band ink containment — with a line height TIGHTER than
-// the font's bounding box (14px lh under a 14px font), descenders (gjqy) and
-// a double underline's low bar must stay clipped to their own row band, like
-// the DOM's .run overflow:hidden. Ink in the blank band below = the bleed
-// that repaints by turns (the p/g/y tail jitter). Green/red convention.
+// ?mode=bleed: the terminal box model — with a line height TIGHTER than the
+// font's bounding box (14px lh under a 14px font), the canvas font shrinks to
+// fit the band: descenders (gjqy) and a double underline's low bar stay
+// VISIBLE and INSIDE their own row box (nothing hangs into the row below,
+// nothing is amputated). Green/red convention.
 if (MODE === "bleed") {
   document.getElementById("screen").style.setProperty("--lh", "14px");
   const d5 = [];
@@ -185,14 +185,12 @@ if (MODE === "bleed") {
   const canvas = document.querySelector("#screen canvas");
   const g = canvas.getContext("2d");
   const lh = 14 * devicePixelRatio;
-  const bandInk = (r) => {
-    const px = g.getImageData(0, Math.round(r * lh), canvas.width, Math.round(lh)).data;
-    let t = 0;
-    for (let i = 3; i < px.length; i += 4) t += px[i];
-    return t;
-  };
-  const pass = bandInk(2) > 0 && bandInk(5) > 0 // the rows themselves drew
-    && bandInk(3) === 0 && bandInk(6) === 0; // nothing escaped downward
+  const ink = (px) => { let t = 0; for (let i = 3; i < px.length; i += 4) t += px[i]; return t; };
+  const band = (r) => ink(g.getImageData(0, Math.round(r * lh), canvas.width, Math.round(lh)).data);
+  const bottom = (r) => // the band's last 3 device px: where in-box tails/bars live
+    ink(g.getImageData(0, Math.round((r + 1) * lh) - 3, canvas.width, 3).data);
+  const pass = band(3) === 0 && band(6) === 0 // nothing escapes its box
+    && bottom(2) > 0 && bottom(5) > 0; // tails + low bar visible, in-box
   document.getElementById("screen").style.display = "none";
   document.body.style.background = pass ? "#00ff00" : "#ff0000";
 }

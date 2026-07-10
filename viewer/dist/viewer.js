@@ -192,18 +192,26 @@ function strutMetrics(font) {
         const prev = ctx.font;
         ctx.font = font;
         const tm = ctx.measureText("Mg");
+        const probe = ctx.measureText("ÀÉ|Mgjpqy_()[]");
         m = {
             asc: tm.fontBoundingBoxAscent ?? fontPx * 0.8,
             desc: tm.fontBoundingBoxDescent ?? fontPx * 0.25,
+            iAsc: probe.actualBoundingBoxAscent ?? fontPx * 0.8,
+            iDesc: probe.actualBoundingBoxDescent ?? fontPx * 0.25,
         };
         ctx.font = prev;
         fontMetricsCache.set(font, m);
     }
-    return m ?? { asc: fontPx * 0.8, desc: fontPx * 0.25 };
+    return m ?? { asc: fontPx * 0.8, desc: fontPx * 0.25, iAsc: fontPx * 0.8, iDesc: fontPx * 0.25 };
 }
 function rowBaseline(r) {
     const m = strutMetrics(`${fontPx}px ${fontFam}`);
-    return Math.round(r * cellH * dpr + (cellH * dpr - (m.asc + m.desc)) / 2 + m.asc);
+    const bandH = cellH * dpr;
+    let base = (bandH - (m.asc + m.desc)) / 2 + m.asc;
+    const over = base + m.iDesc - bandH;
+    if (over > Math.max(1, Math.round(dpr)))
+        base = Math.max(bandH - m.iDesc, m.iAsc);
+    return Math.round(r * cellH * dpr + base);
 }
 const inkBoxCache = new Map();
 function inkBox(font, glyph) {
@@ -773,26 +781,29 @@ function drawRowStorm(r) {
     const baseY = rowBaseline(r);
     const defBg = cfg.defBg.toLowerCase();
     const th = Math.max(1, Math.round(fontPx * 0.06));
-    const ulY = baseY + Math.max(th, Math.round(fontPx * 0.065));
+    const ulOff = Math.max(th, Math.round(fontPx * 0.065));
+    const amp = Math.max(1, Math.round(fontPx * 0.045));
+    const ulY = baseY + ulOff;
     const strikeY = baseY - Math.round(fontPx * 0.36);
-    const drawUnderline = (x0, x1, style, color) => {
+    const drawUnderline = (x0, x1, style, color, atY = ulY) => {
         if (!ctx)
             return;
+        const depth = style === 2 ? 3 * th : style === 3 ? amp + th : th;
+        atY = Math.min(atY, y1 - depth);
         ctx.fillStyle = color;
         switch (style) {
             case 2:
-                ctx.fillRect(x0, ulY, x1 - x0, th);
-                ctx.fillRect(x0, ulY + 2 * th, x1 - x0, th);
+                ctx.fillRect(x0, atY, x1 - x0, th);
+                ctx.fillRect(x0, atY + 2 * th, x1 - x0, th);
                 break;
             case 3: {
-                const amp = Math.max(1, Math.round(fontPx * 0.045));
                 const period = Math.max(6, Math.round(fontPx * 0.5));
                 ctx.strokeStyle = color;
                 ctx.lineWidth = th;
                 ctx.beginPath();
                 const step = Math.max(1, Math.round(dpr));
                 for (let x = x0; x <= x1; x += step) {
-                    const y = ulY + Math.sin((x * 2 * Math.PI) / period) * amp;
+                    const y = atY + Math.sin((x * 2 * Math.PI) / period) * amp;
                     if (x === x0)
                         ctx.moveTo(x, y);
                     else
@@ -804,7 +815,7 @@ function drawRowStorm(r) {
             case 4:
                 for (let x = x0 - (x0 % (2 * th)); x < x1; x += 2 * th) {
                     if (x >= x0)
-                        ctx.fillRect(x, ulY, th, th);
+                        ctx.fillRect(x, atY, th, th);
                 }
                 break;
             case 5:
@@ -812,15 +823,15 @@ function drawRowStorm(r) {
                     const lo = Math.max(x, x0);
                     const hi = Math.min(x + 3 * th, x1);
                     if (hi > lo)
-                        ctx.fillRect(lo, ulY, hi - lo, th);
+                        ctx.fillRect(lo, atY, hi - lo, th);
                 }
                 break;
             default:
-                ctx.fillRect(x0, ulY, x1 - x0, th);
+                ctx.fillRect(x0, atY, x1 - x0, th);
         }
     };
-    const blocky = screen.sty <= 2;
     let curFont = "";
+    const blocky = screen.sty <= 2;
     let c = 0;
     for (const cell of row) {
         const w = cell.w ? 2 : 1;

@@ -375,23 +375,29 @@ let fontFam = "monospace";
 // must do the same: one baseline per row, derived from the base font, or text
 // visibly jumps when storm engages. Computed lazily per (font string), reset
 // with the caches on resize/font-load (sizeCanvas bumps fontPx into the key).
-const fontMetricsCache = new Map<string, { asc: number; desc: number }>();
-function strutMetrics(font: string): { asc: number; desc: number } {
+const fontMetricsCache = new Map<string, { asc: number; desc: number; iAsc: number; iDesc: number }>();
+function strutMetrics(font: string): { asc: number; desc: number; iAsc: number; iDesc: number } {
   let m = fontMetricsCache.get(font);
   if (!m && ctx) {
     const prev = ctx.font;
     ctx.font = font;
     const tm = ctx.measureText("Mg");
     // fontBoundingBox* is in device px here (the font is sized in device px).
-    // Fallback ratios approximate common monospace metrics.
+    // Fallback ratios approximate common monospace metrics. iAsc/iDesc are
+    // the REAL ink extremes of a deep/tall probe (actualBoundingBox*):
+    // fontBoundingBox includes headroom no glyph uses, so placement decisions
+    // (rowBaseline's lift) measure actual ink instead.
+    const probe = ctx.measureText("ÀÉ|Mgjpqy_()[]");
     m = {
       asc: tm.fontBoundingBoxAscent ?? fontPx * 0.8,
       desc: tm.fontBoundingBoxDescent ?? fontPx * 0.25,
+      iAsc: probe.actualBoundingBoxAscent ?? fontPx * 0.8,
+      iDesc: probe.actualBoundingBoxDescent ?? fontPx * 0.25,
     };
     ctx.font = prev;
     fontMetricsCache.set(font, m);
   }
-  return m ?? { asc: fontPx * 0.8, desc: fontPx * 0.25 };
+  return m ?? { asc: fontPx * 0.8, desc: fontPx * 0.25, iAsc: fontPx * 0.8, iDesc: fontPx * 0.25 };
 }
 
 // The strut baseline for row r (device px): half-leading above the base
@@ -399,7 +405,21 @@ function strutMetrics(font: string): { asc: number; desc: number } {
 // layout uses to place the line box baseline.
 function rowBaseline(r: number): number {
   const m = strutMetrics(`${fontPx}px ${fontFam}`);
-  return Math.round(r * cellH * dpr + (cellH * dpr - (m.asc + m.desc)) / 2 + m.asc);
+  const bandH = cellH * dpr;
+  // Firefox line-box parity: half-leading above the content box, then ascent.
+  let base = (bandH - (m.asc + m.desc)) / 2 + m.asc;
+  // The terminal box model: ink lives inside the cell. When the centered
+  // baseline would clip REAL descender ink at the band bottom (a font box
+  // taller than the line height — the DOM clips there, unfixed by choice),
+  // lift the baseline just enough for the tails to fit, floored so real
+  // ascender ink keeps fitting; if even real ink is taller than the band,
+  // anchor at the ink ascent and let the bottom clip — kitty's model
+  // (calc_cell_metrics clamps positions into the cell; it never scales the
+  // font). Sub-device-pixel clipping is an invisible AA sliver: keep DOM
+  // parity there.
+  const over = base + m.iDesc - bandH;
+  if (over > Math.max(1, Math.round(dpr))) base = Math.max(bandH - m.iDesc, m.iAsc);
+  return Math.round(r * cellH * dpr + base);
 }
 
 // Ink boxes for fill-glyph stretching, cached per (font, glyph).
@@ -1082,27 +1102,32 @@ function drawRowStorm(r: number): void {
   // Decoration metrics, sized like the DOM's text-decoration: thickness ~6%
   // of the em, underline just below the baseline, strike through the x-height.
   const th = Math.max(1, Math.round(fontPx * 0.06));
-  const ulY = baseY + Math.max(th, Math.round(fontPx * 0.065));
+  const ulOff = Math.max(th, Math.round(fontPx * 0.065));
+  const amp = Math.max(1, Math.round(fontPx * 0.045));
+  const ulY = baseY + ulOff;
   const strikeY = baseY - Math.round(fontPx * 0.36);
   // Underline in the cell's style (kitty numbering), honoring SGR 58 color.
-  const drawUnderline = (x0: number, x1: number, style: number, color: string) => {
+  const drawUnderline = (x0: number, x1: number, style: number, color: string, atY = ulY) => {
     if (!ctx) return;
+    // in-cell clamp: the deepest ink of each style stays inside the band,
+    // like kitty clamping the font's underline position into the cell
+    const depth = style === 2 ? 3 * th : style === 3 ? amp + th : th;
+    atY = Math.min(atY, y1 - depth);
     ctx.fillStyle = color;
     switch (style) {
       case 2: // double
-        ctx.fillRect(x0, ulY, x1 - x0, th);
-        ctx.fillRect(x0, ulY + 2 * th, x1 - x0, th);
+        ctx.fillRect(x0, atY, x1 - x0, th);
+        ctx.fillRect(x0, atY + 2 * th, x1 - x0, th);
         break;
       case 3: {
         // curly: sampled sine, phase from absolute x so adjacent cells join
-        const amp = Math.max(1, Math.round(fontPx * 0.045));
         const period = Math.max(6, Math.round(fontPx * 0.5));
         ctx.strokeStyle = color;
         ctx.lineWidth = th;
         ctx.beginPath();
         const step = Math.max(1, Math.round(dpr));
         for (let x = x0; x <= x1; x += step) {
-          const y = ulY + Math.sin((x * 2 * Math.PI) / period) * amp;
+          const y = atY + Math.sin((x * 2 * Math.PI) / period) * amp;
           if (x === x0) ctx.moveTo(x, y);
           else ctx.lineTo(x, y);
         }
@@ -1111,24 +1136,24 @@ function drawRowStorm(r: number): void {
       }
       case 4: // dotted: th-square dots, one per 2th, phase-locked to x
         for (let x = x0 - (x0 % (2 * th)); x < x1; x += 2 * th) {
-          if (x >= x0) ctx.fillRect(x, ulY, th, th);
+          if (x >= x0) ctx.fillRect(x, atY, th, th);
         }
         break;
       case 5: // dashed: 3th on, 2th off, phase-locked to x
         for (let x = x0 - (x0 % (5 * th)); x < x1; x += 5 * th) {
           const lo = Math.max(x, x0);
           const hi = Math.min(x + 3 * th, x1);
-          if (hi > lo) ctx.fillRect(lo, ulY, hi - lo, th);
+          if (hi > lo) ctx.fillRect(lo, atY, hi - lo, th);
         }
         break;
       default: // single
-        ctx.fillRect(x0, ulY, x1 - x0, th);
+        ctx.fillRect(x0, atY, x1 - x0, th);
     }
   };
+  let curFont = "";
   // Block cursors reverse the cell (DOM parity); underline/bar cursors draw
   // their shape and leave the colors alone.
   const blocky = screen.sty <= 2;
-  let curFont = "";
   let c = 0;
   for (const cell of row) {
     const w = cell.w ? 2 : 1;

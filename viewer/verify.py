@@ -66,6 +66,10 @@ def main():
         srv.shutdown()
     dom, storm = Image.open(a).convert("RGB"), Image.open(b).convert("RGB")
     print(f"{'row':>3} {'dom-y':>7} {'storm-y':>8} {'shift':>6} {'ink dom':>9} {'ink storm':>10}")
+    # Row 6 (double underline): the canvas clamps both bars fully inside the
+    # cell box (kitty's model); the DOM clips its lower bar at the .run edge.
+    # Intended divergence — report it, keep it out of the gate.
+    CLAMPED = {6}
     worst = 0.0
     for r in range(ROWS):
         cd, id_ = band_profile(dom, r)
@@ -73,8 +77,10 @@ def main():
         if cd < 0 or cs < 0:
             continue
         shift = cs - cd
-        worst = max(worst, abs(shift))
-        print(f"{r:>3} {cd:>7.2f} {cs:>8.2f} {shift:>+6.2f} {id_:>9.0f} {is_:>10.0f}")
+        if r not in CLAMPED:
+            worst = max(worst, abs(shift))
+        tag = "  (in-box clamp, ungated)" if r in CLAMPED else ""
+        print(f"{r:>3} {cd:>7.2f} {cs:>8.2f} {shift:>+6.2f} {id_:>9.0f} {is_:>10.0f}{tag}")
     print(f"worst vertical shift: {worst:.2f}px")
     # Same parity under the template's CSS-zoom model (the local zoom): the
     # canvas derives fontPx across the zoomed/local coordinate-space split.
