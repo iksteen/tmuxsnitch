@@ -222,9 +222,14 @@ split differently from round 2: two real gaps, two noise kinds.
    and single-cell updates (typing). Measure before/after; don't complicate the
    publish path for a win the numbers don't show.
 
-9. **OSC 10/11 set form: default foreground/background color.** *(the one
-   real gap in the 2026-07-10 telemetry batch — see phase 1.6 for the noise
-   half)*. `OSC 10;<color>` / `OSC 11;<color>` (plus the `OSC 110`/`111`
+9. **OSC 10/11 set form: default foreground/background color.** ✅ Landed
+   2026-07-10 as vt100 `888b956` + wire/viewers `6e2b120`. Both XParseColor
+   shapes parsed (unparseable values keep reporting); wire key `e` on full
+   frames (additive, a change forces a full like images, no salt bump);
+   browser mutates cfg.defFg/defBg + inline #screen style; SSH viewer passes
+   the OSC through. Original rationale: *(the one real gap in the 2026-07-10
+   telemetry batch — see phase 1.6 for the noise half)*.
+   `OSC 10;<color>` / `OSC 11;<color>` (plus the `OSC 110`/`111`
    resets) change the terminal's default fg/bg; kitty applies them live, so
    after a theme switcher or an `OSC 11`-emitting TUI runs, the local screen
    repaints and the mirror silently keeps its configured colors — visible
