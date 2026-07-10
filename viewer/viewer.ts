@@ -69,6 +69,7 @@ interface FullMsg {
   h: number;
   p?: Cur; // cursor [row, col]; absent = hidden
   q?: number; // DECSCUSR cursor style 0-6; absent = 0 (default block)
+  e?: [Color, Color]; // OSC 10/11 default fg/bg overrides; absent = none
   i?: ImageRef[]; // inline images placed on the screen; absent = none
 }
 // One inline image (iTerm2/kitty) placed at a cell. `m`/`d` build a data: URL;
@@ -150,8 +151,26 @@ type RGB = [number, number, number];
 // ── config ──────────────────────────────────────────────────────────────────
 
 let cfg: Cfg;
+// The *configured* defaults, kept so OSC 10/11 overrides (the full frame's `e`
+// key) can be applied by mutating cfg.defFg/defBg — every consumer (reverse/dim
+// math, storm fills, canvas line colors) reads cfg live — and reverted on reset.
+let baseFg = "";
+let baseBg = "";
 export function setConfig(c: Cfg): void {
   cfg = c;
+  baseFg = c.defFg;
+  baseBg = c.defBg;
+}
+
+// Apply a full frame's default-color overrides ([fg, bg], null = configured
+// default; an absent `e` means no overrides). Returns the CSS to put on the
+// screen element ("" = revert to the head CSS).
+export function applyDefaults(e: [Color, Color] | undefined): { fg: string; bg: string } {
+  const fg = resolveRgb(e?.[0]);
+  const bg = resolveRgb(e?.[1]);
+  cfg.defFg = fg ? hex(fg) : baseFg;
+  cfg.defBg = bg ? hex(bg) : baseBg;
+  return { fg: fg ? cfg.defFg : "", bg: bg ? cfg.defBg : "" };
 }
 
 // The wire-protocol version + viewer.js tag this page booted with
@@ -1312,13 +1331,23 @@ function applyFull(m: FullMsg): void {
   // Update the model now so diffs queued behind this full patch the right cells;
   // the DOM rebuild is deferred to the flush (which reads screen.cells).
   screen = { cells: m.d.map(decodeBlock), cur: m.p ?? null, sty: m.q ?? 0, rowEls: [] };
+  // Default-color overrides apply now (cfg feeds every style computation);
+  // the element CSS lands with the rebuild below.
+  defaultsCss = applyDefaults(m.e);
   rebuildDims = { w: m.w, h: m.h, i: m.i };
   rebuildBanner = null;
   dirtyRows.clear(); // a full frame supersedes any pending per-row dirt
   schedulePaint();
 }
 
+// The screen element's inline color/background override ("" = the head CSS).
+let defaultsCss = { fg: "", bg: "" };
+
 function paintFull(dims: { w: number; h: number; i?: ImageRef[] }): void {
+  // OSC 10/11 overrides: inline style beats the config-derived head CSS;
+  // clearing it reverts.
+  screenEl.style.color = defaultsCss.fg;
+  screenEl.style.backgroundColor = defaultsCss.bg;
   const cur = screen.cur;
   let html = `<div class="screen" style="width:${dims.w}ch;height:calc(${dims.h} * var(--lh));">`;
   for (let r = 0; r < screen.cells.length; r++) {

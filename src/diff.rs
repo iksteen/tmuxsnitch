@@ -286,8 +286,13 @@ pub fn encode_delta(cur: &Frame, next: &Frame) -> Option<Arc<str>> {
         (_, Frame::Banner(html)) => banner_message(html),
         // An image add/remove/move rides only in the full frame, so any change to
         // the image set forces a full (cheap: images are rare and the set is
-        // usually empty ⇒ this compares two empty vecs).
-        (Frame::Screen(a), Frame::Screen(b)) if same_layout(a, b) && a.images == b.images => {
+        // usually empty ⇒ this compares two empty vecs). Same for the OSC 10/11
+        // default-color overrides (`e`, likewise full-frame-only and rare).
+        (Frame::Screen(a), Frame::Screen(b))
+            if same_layout(a, b)
+                && a.images == b.images
+                && a.default_colors == b.default_colors =>
+        {
             diff_message(a, b)?
         }
         (_, Frame::Screen(b)) => full_message_grid(b),
@@ -324,6 +329,9 @@ enum WireMsg<'a> {
         cur: Option<(u16, u16)>,
         /// DECSCUSR style, absolute: the `q` key, omitted when 0 (default).
         sty: u8,
+        /// OSC 10/11 default fg/bg overrides: the `e` key `[fg, bg]`
+        /// (`null` = configured default), omitted when both are default.
+        defaults: (Color, Color),
         rows: Vec<CellBlock<'a>>,
         /// Inline images (empty for the common text-only case ⇒ `i` key omitted).
         images: &'a [ImagePlacement],
@@ -371,6 +379,7 @@ impl Serialize for WireMsg<'_> {
                 h,
                 cur,
                 sty,
+                defaults,
                 rows,
                 images,
             } => {
@@ -382,6 +391,9 @@ impl Serialize for WireMsg<'_> {
                 }
                 if *sty != 0 {
                     m.serialize_entry("q", sty)?;
+                }
+                if *defaults != (Color::Default, Color::Default) {
+                    m.serialize_entry("e", &[defaults.0, defaults.1])?;
                 }
                 if !images.is_empty() {
                     m.serialize_entry("i", images)?;
@@ -743,6 +755,7 @@ fn full_message_grid(g: &Grid) -> String {
         h: g.rows.len(),
         cur: g.cursor,
         sty: g.cursor_style,
+        defaults: g.default_colors,
         rows: g.rows.iter().map(|r| cell_block(r.iter())).collect(),
         images: &g.images,
     };
@@ -866,6 +879,7 @@ enum WireMsgIn {
         // The row count is implied by `d`; the wire's `h` is for the viewer.
         cur: Option<(u16, u16)>,
         sty: u8,
+        defaults: (Color, Color),
         rows: Vec<CellBlockIn>,
         images: Vec<ImagePlacement>,
     },
@@ -956,6 +970,13 @@ impl<'de> Deserialize<'de> for WireMsgIn {
                 w: from_val(w)?,
                 cur,
                 sty: sty()?.unwrap_or(0), // full is absolute: absent = default
+                defaults: match obj.get("e") {
+                    Some(e) => {
+                        let [f, b]: [Color; 2] = from_val(e)?;
+                        (f, b)
+                    }
+                    None => (Color::Default, Color::Default),
+                },
                 rows: from_val(rows)?,
                 images: match obj.get("i") {
                     Some(i) => from_val(i)?,
@@ -1282,6 +1303,7 @@ fn apply_wire(prev: &Frame, msg: WireMsgIn) -> Option<Frame> {
             w,
             cur,
             sty,
+            defaults,
             rows,
             images,
         } => {
@@ -1290,6 +1312,7 @@ fn apply_wire(prev: &Frame, msg: WireMsgIn) -> Option<Frame> {
                 rows: rows.into_iter().map(decode_block).collect(),
                 cursor: cur,
                 cursor_style: sty,
+                default_colors: defaults,
                 images,
             }));
         }
@@ -1376,6 +1399,7 @@ mod tests {
             rows: rows.iter().map(|r| r.chars().map(cell).collect()).collect(),
             cursor: None,
             cursor_style: 0,
+            default_colors: (Color::Default, Color::Default),
             images: Vec::new(),
         }
     }
@@ -1772,6 +1796,32 @@ mod tests {
             panic!("full applies")
         };
         assert_eq!(g.cursor_style, 5);
+    }
+
+    // OSC 10/11 default-color overrides ride the full frame as `e` (omitted
+    // when both default); any change forces a full, and the hub decode
+    // reconstructs them for late-join snapshots.
+    #[test]
+    fn default_colors_ride_full_frames_as_e() {
+        let a = grid(&["hi"]);
+        let mut b = a.clone();
+        b.default_colors = (Color::Default, Color::Rgb(0x30, 0x0a, 0x24));
+        let msg = encode_delta(&Frame::Screen(a.clone()), &Frame::Screen(b.clone()))
+            .expect("color change is a change");
+        assert!(msg.starts_with("{\"d\":"), "override change forces a full");
+        assert!(msg.contains(r#""e":[null,[48,10,36]]"#), "{msg}");
+        assert!(
+            !full_message_grid(&a).contains(r#""e""#),
+            "no override ⇒ no key"
+        );
+
+        let Some(Frame::Screen(g)) = apply(&Frame::Screen(a.clone()), &msg) else {
+            panic!("full applies")
+        };
+        assert_eq!(g.default_colors, b.default_colors);
+        // Resetting back to defaults is also a change (a full with no `e`).
+        let msg = encode_delta(&Frame::Screen(b), &Frame::Screen(a)).expect("reset is a change");
+        assert!(msg.starts_with("{\"d\":") && !msg.contains(r#""e""#));
     }
 
     #[test]

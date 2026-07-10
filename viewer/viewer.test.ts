@@ -6,6 +6,7 @@ import {
   palette,
   resolveRgb,
   cellStyle,
+  applyDefaults,
   isFillGlyph,
   isCanvasGlyph,
   glyphOps,
@@ -80,6 +81,16 @@ test("cellStyle dim matches the Rust floor formula, italic/underline emit", () =
     cellStyle({ i: true, u: true }, false),
     "font-style:italic;text-decoration:underline;",
   );
+});
+
+test("applyDefaults overrides the config defaults and reverts", () => {
+  // Override the bg only: inverse on a default cell now swaps in the new bg.
+  const css = applyDefaults([null, [0x30, 0x0a, 0x24]]);
+  assert.deepEqual(css, { fg: "", bg: "#300a24" });
+  assert.equal(cellStyle({ n: true }, false), "color:#300a24;background:#d0d0d0;");
+  // An absent `e` (the next full frame without overrides) reverts everything.
+  assert.deepEqual(applyDefaults(undefined), { fg: "", bg: "" });
+  assert.equal(cellStyle({ n: true }, false), "color:#000000;background:#d0d0d0;");
 });
 
 test("cellStyle renders modern SGR: underline styles, strike, underline color", () => {

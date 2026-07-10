@@ -862,20 +862,21 @@ mod tests {
 
     // The five kinds from the first real exit report (roadmap phase 1.6):
     // queries and string syntax are deliberate parser no-ops and must stay out
-    // of the report; the OSC 10/11 *set* form is a real gap and must land in
-    // it (as must an XTWINOPS op outside the known-harmless set — with its
-    // params in the kind, so the exit line names the op).
+    // of the report — as is the OSC 10/11 *set* form now that item 9 mirrors
+    // it. An XTWINOPS op outside the known-harmless set still reports, with
+    // its params in the kind so the exit line names the op; so does an
+    // unparseable OSC color value.
     #[test]
     fn seqlog_silent_on_query_noise_loud_on_real_gaps() {
         let (seqlog, seen) = SeqLog::new();
         let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, seqlog);
         parser.process(b"\x1b[c\x1b[>c\x1b[14t\x1b[18t\x1b[22;0t\x1b[23;0t");
-        parser.process(b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\");
+        parser.process(b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b]11;#300a24\x1b\\");
         assert!(
             seen.lock().unwrap().is_empty(),
-            "query noise must be silent"
+            "query noise and the mirrored set form must be silent"
         );
-        parser.process(b"\x1b]11;#300a24\x1b\\\x1b[9;1t");
+        parser.process(b"\x1b]11;papayawhip\x1b\\\x1b[9;1t");
         assert_eq!(
             seen.lock().unwrap().iter().cloned().collect::<Vec<_>>(),
             vec!["CSI 9 1 t".to_string(), "OSC 11".to_string()]

@@ -75,6 +75,14 @@ pub fn grid_from_screen(screen: &vt100::Screen) -> Grid {
         rows: grid_rows,
         cursor,
         cursor_style: screen.cursor_style(),
+        default_colors: (
+            screen
+                .default_fg()
+                .map_or(Color::Default, |(r, g, b)| Color::Rgb(r, g, b)),
+            screen
+                .default_bg()
+                .map_or(Color::Default, |(r, g, b)| Color::Rgb(r, g, b)),
+        ),
         // Images are tracked outside vt100 (it drops the sequences); the PTY backend
         // fills this in after extraction. Text-only extraction leaves it empty.
         images: Vec::new(),

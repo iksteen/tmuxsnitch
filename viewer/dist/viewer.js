@@ -20,8 +20,19 @@ export function decodeBlock(block) {
     return decodeCells(block[0] ?? [], block[1]);
 }
 let cfg;
+let baseFg = "";
+let baseBg = "";
 export function setConfig(c) {
     cfg = c;
+    baseFg = c.defFg;
+    baseBg = c.defBg;
+}
+export function applyDefaults(e) {
+    const fg = resolveRgb(e?.[0]);
+    const bg = resolveRgb(e?.[1]);
+    cfg.defFg = fg ? hex(fg) : baseFg;
+    cfg.defBg = bg ? hex(bg) : baseBg;
+    return { fg: fg ? cfg.defFg : "", bg: bg ? cfg.defBg : "" };
 }
 let proto;
 let jsTag;
@@ -918,12 +929,16 @@ function flushPaint() {
 }
 function applyFull(m) {
     screen = { cells: m.d.map(decodeBlock), cur: m.p ?? null, sty: m.q ?? 0, rowEls: [] };
+    defaultsCss = applyDefaults(m.e);
     rebuildDims = { w: m.w, h: m.h, i: m.i };
     rebuildBanner = null;
     dirtyRows.clear();
     schedulePaint();
 }
+let defaultsCss = { fg: "", bg: "" };
 function paintFull(dims) {
+    screenEl.style.color = defaultsCss.fg;
+    screenEl.style.backgroundColor = defaultsCss.bg;
     const cur = screen.cur;
     let html = `<div class="screen" style="width:${dims.w}ch;height:calc(${dims.h} * var(--lh));">`;
     for (let r = 0; r < screen.cells.length; r++) {

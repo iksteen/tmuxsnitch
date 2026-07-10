@@ -62,6 +62,26 @@ fn paint_screen(prev: Option<&Grid>, g: &Grid, view: (u16, u16)) -> String {
     if g.cursor_style != prev.map_or(0, |p| p.cursor_style) {
         let _ = write!(out, "\x1b[{} q", g.cursor_style);
     }
+    // OSC 10/11 default-color overrides pass through too (reset: 110/111).
+    let prev_defaults = prev.map_or((Color::Default, Color::Default), |p| p.default_colors);
+    for (i, (now, before)) in [
+        (g.default_colors.0, prev_defaults.0),
+        (g.default_colors.1, prev_defaults.1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if now != before {
+            match now {
+                Color::Rgb(r, g, b) => {
+                    let _ = write!(out, "\x1b]{};#{r:02x}{g:02x}{b:02x}\x1b\\", 10 + i);
+                }
+                _ => {
+                    let _ = write!(out, "\x1b]{}\x1b\\", 110 + i);
+                }
+            }
+        }
+    }
     cursor_seq(&mut out, g, view, content_rows);
     out
 }

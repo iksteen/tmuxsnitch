@@ -159,6 +159,10 @@ pub struct Grid {
     /// DECSCUSR cursor style, raw 0-6: 0 default, 1/2 blinking/steady block,
     /// 3/4 underline, 5/6 bar. Rides the wire as the optional `q` key.
     pub cursor_style: u8,
+    /// OSC 10/11 default fg/bg overrides; `Color::Default` = the configured
+    /// default. Ride the wire as the optional full-frame `e` key (a change
+    /// forces a full frame, like images).
+    pub default_colors: (Color, Color),
     /// Inline images currently placed on the screen (empty for the common case).
     pub images: Vec<ImagePlacement>,
 }
