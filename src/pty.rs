@@ -428,16 +428,16 @@ impl SeqLog {
     }
 }
 
-/// One short descriptor per CSI shape. Mode set/reset (`h`/`l`) and SGR (`m`)
-/// gaps are per-parameter, so their params join the key; for everything else
-/// the intermediates + final byte are the kind.
+/// One short descriptor per CSI shape. Mode set/reset (`h`/`l`), SGR (`m`),
+/// and XTWINOPS (`t`) gaps are per-parameter, so their params join the key;
+/// for everything else the intermediates + final byte are the kind.
 fn csi_kind(i1: Option<u8>, i2: Option<u8>, params: &[&[u16]], c: char) -> String {
     let mut s = String::from("CSI");
     for i in [i1, i2].into_iter().flatten() {
         s.push(' ');
         s.push(char::from(i));
     }
-    if matches!(c, 'h' | 'l' | 'm') {
+    if matches!(c, 'h' | 'l' | 'm' | 't') {
         for p in params {
             s.push(' ');
             let sub: Vec<String> = p.iter().map(u16::to_string).collect();
@@ -857,6 +857,28 @@ mod tests {
         assert_eq!(
             seen.iter().cloned().collect::<Vec<_>>(),
             vec!["CSI \" q".to_string(), "CSI ? 1234 h".to_string()]
+        );
+    }
+
+    // The five kinds from the first real exit report (roadmap phase 1.6):
+    // queries and string syntax are deliberate parser no-ops and must stay out
+    // of the report; the OSC 10/11 *set* form is a real gap and must land in
+    // it (as must an XTWINOPS op outside the known-harmless set — with its
+    // params in the kind, so the exit line names the op).
+    #[test]
+    fn seqlog_silent_on_query_noise_loud_on_real_gaps() {
+        let (seqlog, seen) = SeqLog::new();
+        let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, seqlog);
+        parser.process(b"\x1b[c\x1b[>c\x1b[14t\x1b[18t\x1b[22;0t\x1b[23;0t");
+        parser.process(b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\");
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "query noise must be silent"
+        );
+        parser.process(b"\x1b]11;#300a24\x1b\\\x1b[9;1t");
+        assert_eq!(
+            seen.lock().unwrap().iter().cloned().collect::<Vec<_>>(),
+            vec!["CSI 9 1 t".to_string(), "OSC 11".to_string()]
         );
     }
 
