@@ -158,7 +158,12 @@ telemetry noise to silence deliberately.
      deleting the old one; they encode the erase-semantics contract.
 
 5. **Modern SGR: undercurl, strikethrough, double underline, underline color.**
-   The `sgr` match handles underline as exact `[4]`, so `4:3` (undercurl —
+   ✅ Landed 2026-07-10 as vt100 `96d1630` + wire/viewer `c3d9d02` (also
+   dotted/dashed 4:4/4:5, the 58 colon/colorspace form, and the SSH viewer).
+   Wire: `u` carries the kitty style number (1 doubles as the legacy flag —
+   old decoders degrade to single underline), `s`/`k` are new optional keys;
+   no salt bump. Original rationale: the `sgr` match handled underline as
+   exact `[4]`, so `4:3` (undercurl —
    helix and neovim diagnostics emit it) falls through and the underline is
    lost entirely; strikethrough (9/29), double underline (21), and underline
    color (58/59) are absent. Cross-layer: vendored `attrs.rs` storage → wire
