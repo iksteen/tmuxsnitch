@@ -404,13 +404,14 @@ function strutMetrics(font: string): { asc: number; desc: number; iAsc: number; 
   return m ?? { asc: fontPx * 0.8, desc: fontPx * 0.25, iAsc: fontPx * 0.8, iDesc: fontPx * 0.25 };
 }
 
-// The strut baseline for row r (device px): half-leading above the base
-// font's content box, then its ascent — the same arithmetic CSS inline
-// layout uses to place the line box baseline.
+// The baseline for row r (device px), by the terminal's box model. With the
+// metric-derived line height (lh = ascender − descender + gap) the centered
+// seat below IS kitty's ascender anchor — half-leading is ~zero; the lift
+// only engages under an explicit tighter line_height override.
 function rowBaseline(r: number): number {
   const m = strutMetrics(`${fontPx}px ${fontFam}`);
   const bandH = cellH * dpr;
-  // Firefox line-box parity: half-leading above the content box, then ascent.
+  // half-leading above the content box, then ascent
   let base = (bandH - (m.asc + m.desc)) / 2 + m.asc;
   // The terminal box model: ink lives inside the cell. When the centered
   // baseline would clip ANY real descender ink at the band bottom (a font
@@ -1156,8 +1157,8 @@ function drawRowStorm(r: number): void {
     }
   };
   let curFont = "";
-  // Block cursors reverse the cell (DOM parity); underline/bar cursors draw
-  // their shape and leave the colors alone.
+  // Block cursors reverse the cell, like a terminal's; underline/bar cursors
+  // draw their shape and leave the colors alone.
   const blocky = screen.sty <= 2;
   let c = 0;
   for (const cell of row) {
@@ -1220,9 +1221,10 @@ function drawRowStorm(r: number): void {
         ctx.fillText(cell.t, x0, baseY, x1 - x0);
       }
     }
-    // Decorations, DOM-parity: underline in the cell's style and SGR 58
-    // color, strikethrough through the x-height. Cell-level, not inside the
-    // text branch — text-decoration doesn't break at spaces (or box glyphs).
+    // Decorations: underline in the cell's style and SGR 58 color,
+    // strikethrough through the x-height. Cell-level, not inside the text
+    // branch — a terminal decorates the cell, not the glyph, so spaces and
+    // box glyphs carry their line too.
     if (cell.u || cell.s) {
       const fg = hex(cellFg(cell, curBlock));
       if (cell.u) {
