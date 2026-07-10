@@ -85,7 +85,7 @@ phase 2.
    image sequence. With the timeout, worst case degrades to today's behavior.
    No wire/viewer/salt impact for either item.
 
-## Phase 1.6 — telemetry fallout, round 2
+## Phase 1.6 — telemetry fallout, round 2 ✅ (landed 2026-07-10: vt100 `c21661d`, telemetry `6698ebb`)
 
 A real-workload exit report (2026-07-10) flagged five kinds: `CSI c`, `CSI t`,
 `ESC \`, `OSC 10`, `OSC 11`. Verified against the vendored source: four of the
