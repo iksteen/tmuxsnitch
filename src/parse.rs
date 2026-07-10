@@ -109,6 +109,18 @@ mod tests {
     }
 
     #[test]
+    fn modern_sgr_extracts() {
+        // Undercurl with a colored underline, then strikethrough.
+        let g = grid_from_capture("\x1b[4:3;58;5;196mA\x1b[0m\x1b[9mB", 10, 1);
+        let row = &g.rows[0];
+        assert_eq!(row[0].underline, 3);
+        assert_eq!(row[0].ulcolor, Color::Idx(196));
+        assert!(!row[0].strike);
+        assert_eq!(row[1].underline, 0);
+        assert!(row[1].strike);
+    }
+
+    #[test]
     fn wide_char_collapses_continuation() {
         // A CJK ideograph occupies two columns; we keep one wide cell.
         let g = grid_from_capture("世x", 10, 1);
