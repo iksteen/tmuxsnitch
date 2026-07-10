@@ -251,6 +251,23 @@ split differently from round 2: two real gaps, two noise kinds.
    emit what the viewer renders, and keep the *query* forms in phase 1.6's
    no-op arms — they must not set anything.
 
+13. **Split binaries: the full CLI plus per-mode executables.** Today one
+    binary carries every mode; a hub deployment ships the PTY backend, image
+    interceptor, font machinery and SSH viewer it never runs (and their
+    dependency tree), while a push-only dev box ships the hub. Offer slim
+    per-mode binaries — `hub`, `push`, `serve`, and the `gen-key`/`print-id`
+    key utilities — alongside the full multi-call binary. Mechanically:
+    cargo features gating the mode modules + one `[[bin]]` target per mode
+    (each a thin `main` over the same clap actions, so flags/behavior can't
+    drift from the full binary), CI building the matrix, and the release
+    workflow deciding which artifacts to publish (the Docker hub image is the
+    obvious first customer — it only needs `hub`). Watch the bake-in split:
+    `viewer.js` + the page template belong to everything that serves viewers
+    (serve *and* hub — the hub serves the page and re-serves pushed render
+    configs), while the `fonts.rs` discovery machinery (fontdb/fc-match) is
+    client-side only — asset baking must follow the features, not the binary
+    names.
+
 Dropped from this phase (2026-07-10, deliberate): **scrollback**. The mirror
 shows the live screen — a glance over the operator's shoulder — and history is
 out of scope by design: the diff protocol is screen-shaped, hub memory stays
@@ -284,6 +301,26 @@ at 0 in `Parser::new`.)
     envelope keys into cell objects and `t` would overwrite cell *text* — so
     no salt bump. Browser follows via document.title (boot title restored on
     clear); SSH viewer passes OSC 2 through.
+
+14. **Experiment: a pre-rendered cell matrix in the web client.** Today the
+    DOM path rebuilds each dirty row's coalesced spans from scratch, and the
+    cmatrix-class escape hatch is storm mode (canvas `fillText`, lower
+    fidelity: no symbol_map, no glyph stretch, no links). The experiment: a
+    fixed matrix of pre-created cell elements (one node per column, mutated
+    in place — textContent/class swaps, never innerHTML) so a full-screen
+    update touches no layout/structure, only paint. The hard parts are
+    exactly the things the run-coalescing path exists for: double-wide
+    characters (a wide glyph must occupy two matrix slots — hide the
+    continuation node and let the glyph overflow, or merge slots on demand),
+    over-wide fallback glyphs (❯), combining marks, and per-cell style
+    without style-attribute churn (class atlas? CSS custom properties?).
+    Success criterion: beats storm mode's throughput *at DOM-path fidelity*
+    (symbol_map + stretch + links intact) on the cmatrix corpus, measured via
+    the `#sg-stats` shaper numbers — otherwise shelve it on an `exp/` branch
+    with findings, like `exp/procedural-glyph-geometry`. If it wins outright,
+    it can replace both the coalescing renderer *and* storm mode; a partial
+    win (faster but fidelity gaps) keeps it as a third mode, which is
+    probably not worth carrying.
 
 ## Sequencing note
 
