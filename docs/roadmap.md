@@ -409,11 +409,15 @@ own CRT effect.
 
 ### B. Canvas as a first-class switchable renderer (each blocks offering it)
 
-1. **Underline styles + color.** In `drawRowStorm`, branch on `cell.u`:
-   2 = two bars, 4/5 = fillRect segments on a fixed period, 3 = two-arc wave
-   (cache a per-color offscreen pattern), color = `resolveRgb(cell.k) ?? fg`.
-2. **DECSCUSR shapes.** When `screen.sty >= 3`, skip the reverse-video block;
-   draw a bottom bar (3/4) or left bar (5/6) fillRect in the cell's fg.
+1. ✅ **Underline styles + color** (landed 2026-07-10, `canvas-track-a`):
+   `drawUnderline` in `drawRowStorm` branches on `cell.u` (2 double bars,
+   3 sampled-sine curly, 4 dotted / 5 dashed phase-locked to absolute x),
+   color `resolveRgb(cell.k) ?? fg`; strike through the x-height. Verified
+   via `verify.py`: decoration rows at ≤0.02px (dotted/dashed 0.11px —
+   Firefox dot geometry differs, accepted).
+2. ✅ **DECSCUSR shapes** (landed 2026-07-10, `canvas-track-a`): block
+   reverse only when `screen.sty <= 2`; 3/4 bottom bar, 5/6 left bar,
+   0.14em in the un-reversed fg. Verified: bar-cursor row at 0.00px.
 3. **OSC 8 interaction layer.** `click`/`mousemove` handlers on `#screen`:
    map event x/y ÷ cellW/H to a cell, look up `cell.a` → `linkHref`; hover =
    `cursor:pointer` + drawn underline on that link's cells; click =
@@ -425,8 +429,9 @@ own CRT effect.
 5. **Font + DPR lifecycle.** `document.fonts` `loadingdone` → re-measure +
    `redrawCanvasAll()`; listen for `devicePixelRatio` changes (matchMedia
    `resolution`) → resize canvas + full redraw.
-6. **Over-wide fallback glyphs.** Drop the `fillText` maxWidth clamp for
-   `glyphOverflowsCell` cells (DOM lets ❯ overflow; canvas must too).
+6. ✅ **Over-wide fallback glyphs** (landed 2026-07-10, `canvas-track-a`):
+   `drawRowStorm` drops the `fillText` maxWidth clamp for
+   `glyphOverflowsCell` cells (DOM lets ❯ overflow; canvas now does too).
 7. **Per-mode CRT.** The one localStorage toggle drives whichever effect
    matches the active renderer: DOM keeps the text-shadow CRT as-is; canvas
    gets its own post-pass (scanlines + bloom drawn over the composed frame

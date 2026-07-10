@@ -21,7 +21,7 @@ benchInit(document.getElementById("screen"));
 
 // One static frame: text in several styles (baseline check rows) and a row of
 // fill glyphs (stretch/coverage check). 60x12.
-const COLS = 60, ROWS = 12;
+const COLS = 60, ROWS = 16;
 const pad = (s) => s + " ".repeat(Math.max(0, COLS - s.length));
 const d = [];
 d.push([[pad("plain text row Mgjq 0123456789 the quick brown fox")]]);
@@ -31,10 +31,14 @@ d.push([[pad("inverse Mgjq")], [[0, 12, { n: 1 }]]]);
 // fill glyphs: eighth-blocks + shades (stretch targets)
 d.push([[pad("▁▂▃▄▅▆▇█ ░▒▓ ▏▎▍▌▋▊▉")]]);
 d.push([[pad("underline row Mgjq")], [[0, 18, { u: 1 }]]]);
+d.push([[pad("double underline Mgjq")], [[0, 21, { u: 2 }]]]);
+d.push([[pad("curly colored Mgjq")], [[0, 18, { u: 3, k: 1 }]]]);
+d.push([[pad("dotted Mgjq / dashed Mgjq")], [[0, 11, { u: 4 }], [14, 11, { u: 5 }]]]);
+d.push([[pad("strikethrough Mgjq")], [[0, 18, { s: 1 }]]]);
 for (let i = d.length; i < ROWS; i++) d.push([[pad(`row ${i} Mgjq baseline probe`)]]);
 
 apply({ v: 4 });
-apply({ d, w: COLS, h: ROWS });
+apply({ d, w: COLS, h: ROWS, p: [10, 4], q: 5 }); // bar cursor on row 10
 benchFlush(); // synchronous paint — safe to screenshot at onload
 
 if (MODE === "storm") {

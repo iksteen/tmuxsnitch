@@ -882,16 +882,65 @@ function drawRowStorm(r: number): void {
   // arithmetic, so toggling storm produces no vertical shift.
   ctx.textBaseline = "alphabetic";
   const baseY = rowBaseline(r);
-  const ul = Math.max(1, Math.round(dpr));
   const defBg = cfg.defBg.toLowerCase();
+  // Decoration metrics, sized like the DOM's text-decoration: thickness ~6%
+  // of the em, underline just below the baseline, strike through the x-height.
+  const th = Math.max(1, Math.round(fontPx * 0.06));
+  const ulY = baseY + Math.max(th, Math.round(fontPx * 0.065));
+  const strikeY = baseY - Math.round(fontPx * 0.36);
+  // Underline in the cell's style (kitty numbering), honoring SGR 58 color.
+  const drawUnderline = (x0: number, x1: number, style: number, color: string) => {
+    if (!ctx) return;
+    ctx.fillStyle = color;
+    switch (style) {
+      case 2: // double
+        ctx.fillRect(x0, ulY, x1 - x0, th);
+        ctx.fillRect(x0, ulY + 2 * th, x1 - x0, th);
+        break;
+      case 3: {
+        // curly: sampled sine, phase from absolute x so adjacent cells join
+        const amp = Math.max(1, Math.round(fontPx * 0.045));
+        const period = Math.max(6, Math.round(fontPx * 0.5));
+        ctx.strokeStyle = color;
+        ctx.lineWidth = th;
+        ctx.beginPath();
+        const step = Math.max(1, Math.round(dpr));
+        for (let x = x0; x <= x1; x += step) {
+          const y = ulY + Math.sin((x * 2 * Math.PI) / period) * amp;
+          if (x === x0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+        break;
+      }
+      case 4: // dotted: th-square dots, one per 2th, phase-locked to x
+        for (let x = x0 - (x0 % (2 * th)); x < x1; x += 2 * th) {
+          if (x >= x0) ctx.fillRect(x, ulY, th, th);
+        }
+        break;
+      case 5: // dashed: 3th on, 2th off, phase-locked to x
+        for (let x = x0 - (x0 % (5 * th)); x < x1; x += 5 * th) {
+          const lo = Math.max(x, x0);
+          const hi = Math.min(x + 3 * th, x1);
+          if (hi > lo) ctx.fillRect(lo, ulY, hi - lo, th);
+        }
+        break;
+      default: // single
+        ctx.fillRect(x0, ulY, x1 - x0, th);
+    }
+  };
+  // Block cursors reverse the cell (DOM parity); underline/bar cursors draw
+  // their shape and leave the colors alone.
+  const blocky = screen.sty <= 2;
   let curFont = "";
   let c = 0;
   for (const cell of row) {
     const w = cell.w ? 2 : 1;
     const isCursor = !!screen.cur && screen.cur[0] === r && screen.cur[1] === c;
+    const curBlock = isCursor && blocky;
     const x0 = Math.round(c * cellW * dpr);
     const x1 = Math.round((c + w) * cellW * dpr);
-    const bg = cellBgRgb(cell, isCursor);
+    const bg = cellBgRgb(cell, curBlock);
     // Skip fills that match the default bg (apps often set it explicitly — ncurses
     // color pairs): #screen already shows that color, and an opaque fill here would
     // blanket the selection highlight painting in the ghost layer below.
@@ -901,7 +950,7 @@ function drawRowStorm(r: number): void {
     }
     const cp = cell.t ? cell.t.codePointAt(0)! : 0;
     if (cp && isCanvasGlyph(cp) && !(cp >= 0xe000 && symbolFamily(cp))) {
-      drawGlyph(r, c, cp, cell, isCursor);
+      drawGlyph(r, c, cp, cell, curBlock);
     } else if (cell.t && cell.t !== " ") {
       // symbol_map / fill-glyph cells draw with their mapped family — canvas
       // uses the served webfonts once loaded, same faces as the DOM path.
@@ -911,7 +960,8 @@ function drawRowStorm(r: number): void {
         ctx.font = font;
         curFont = font;
       }
-      ctx.fillStyle = hex(cellFg(cell, isCursor));
+      const fg = hex(cellFg(cell, curBlock));
+      ctx.fillStyle = fg;
       const ink = isFillGlyph(cp) ? inkBox(font, cell.t) : null;
       if (ink !== null) {
         // Fill glyphs tile the cell like the DOM's stretched SVG: map the
@@ -924,13 +974,29 @@ function drawRowStorm(r: number): void {
         ctx.scale(sx, sy);
         ctx.fillText(cell.t, 0, 0);
         ctx.restore();
+      } else if (cp && glyphOverflowsCell(cell.t, w) && !symbolFamily(cp)) {
+        // Over-wide fallback glyphs overflow their cell, like the DOM's
+        // own-cell quarantine with overflow:visible — no maxWidth squeeze.
+        ctx.fillText(cell.t, x0, baseY);
       } else {
         ctx.fillText(cell.t, x0, baseY, x1 - x0);
       }
-      // Storm is the low-fidelity escape hatch: any underline style draws as a
-      // plain bar (and ignores `k`); strikethrough gets a mid-height bar.
-      if (cell.u) ctx.fillRect(x0, y1 - ul, x1 - x0, ul);
-      if (cell.s) ctx.fillRect(x0, Math.round((y0 + y1) / 2), x1 - x0, ul);
+      // Decorations, DOM-parity: underline in the cell's style and SGR 58
+      // color, strikethrough through the x-height.
+      if (cell.u) {
+        const ulColor = resolveRgb(cell.k);
+        drawUnderline(x0, x1, typeof cell.u === "number" ? cell.u : 1, ulColor ? hex(ulColor) : fg);
+        ctx.fillStyle = fg; // drawUnderline may have changed it
+      }
+      if (cell.s) ctx.fillRect(x0, strikeY, x1 - x0, th);
+    }
+    if (isCursor && !blocky) {
+      // DECSCUSR underline (3/4) or bar (5/6) cursor, 0.14em like the DOM's
+      // inset box-shadow, in the cell's un-reversed fg.
+      const cw = Math.max(1, Math.round(fontPx * 0.14));
+      ctx.fillStyle = hex(cellFg(cell, false));
+      if (screen.sty >= 5) ctx.fillRect(x0, y0, cw, y1 - y0);
+      else ctx.fillRect(x0, y1 - cw, x1 - x0, cw);
     }
     c += w;
   }

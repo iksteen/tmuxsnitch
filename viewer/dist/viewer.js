@@ -614,23 +614,71 @@ function drawRowStorm(r) {
         return;
     ctx.textBaseline = "alphabetic";
     const baseY = rowBaseline(r);
-    const ul = Math.max(1, Math.round(dpr));
     const defBg = cfg.defBg.toLowerCase();
+    const th = Math.max(1, Math.round(fontPx * 0.06));
+    const ulY = baseY + Math.max(th, Math.round(fontPx * 0.065));
+    const strikeY = baseY - Math.round(fontPx * 0.36);
+    const drawUnderline = (x0, x1, style, color) => {
+        if (!ctx)
+            return;
+        ctx.fillStyle = color;
+        switch (style) {
+            case 2:
+                ctx.fillRect(x0, ulY, x1 - x0, th);
+                ctx.fillRect(x0, ulY + 2 * th, x1 - x0, th);
+                break;
+            case 3: {
+                const amp = Math.max(1, Math.round(fontPx * 0.045));
+                const period = Math.max(6, Math.round(fontPx * 0.5));
+                ctx.strokeStyle = color;
+                ctx.lineWidth = th;
+                ctx.beginPath();
+                const step = Math.max(1, Math.round(dpr));
+                for (let x = x0; x <= x1; x += step) {
+                    const y = ulY + Math.sin((x * 2 * Math.PI) / period) * amp;
+                    if (x === x0)
+                        ctx.moveTo(x, y);
+                    else
+                        ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+                break;
+            }
+            case 4:
+                for (let x = x0 - (x0 % (2 * th)); x < x1; x += 2 * th) {
+                    if (x >= x0)
+                        ctx.fillRect(x, ulY, th, th);
+                }
+                break;
+            case 5:
+                for (let x = x0 - (x0 % (5 * th)); x < x1; x += 5 * th) {
+                    const lo = Math.max(x, x0);
+                    const hi = Math.min(x + 3 * th, x1);
+                    if (hi > lo)
+                        ctx.fillRect(lo, ulY, hi - lo, th);
+                }
+                break;
+            default:
+                ctx.fillRect(x0, ulY, x1 - x0, th);
+        }
+    };
+    const blocky = screen.sty <= 2;
     let curFont = "";
     let c = 0;
     for (const cell of row) {
         const w = cell.w ? 2 : 1;
         const isCursor = !!screen.cur && screen.cur[0] === r && screen.cur[1] === c;
+        const curBlock = isCursor && blocky;
         const x0 = Math.round(c * cellW * dpr);
         const x1 = Math.round((c + w) * cellW * dpr);
-        const bg = cellBgRgb(cell, isCursor);
+        const bg = cellBgRgb(cell, curBlock);
         if (bg && hex(bg) !== defBg) {
             ctx.fillStyle = hex(bg);
             ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
         }
         const cp = cell.t ? cell.t.codePointAt(0) : 0;
         if (cp && isCanvasGlyph(cp) && !(cp >= 0xe000 && symbolFamily(cp))) {
-            drawGlyph(r, c, cp, cell, isCursor);
+            drawGlyph(r, c, cp, cell, curBlock);
         }
         else if (cell.t && cell.t !== " ") {
             const fam = svgFont(cell) ?? fontFam;
@@ -639,7 +687,8 @@ function drawRowStorm(r) {
                 ctx.font = font;
                 curFont = font;
             }
-            ctx.fillStyle = hex(cellFg(cell, isCursor));
+            const fg = hex(cellFg(cell, curBlock));
+            ctx.fillStyle = fg;
             const ink = isFillGlyph(cp) ? inkBox(font, cell.t) : null;
             if (ink !== null) {
                 const sx = (x1 - x0) / (ink.l + ink.r);
@@ -650,13 +699,27 @@ function drawRowStorm(r) {
                 ctx.fillText(cell.t, 0, 0);
                 ctx.restore();
             }
+            else if (cp && glyphOverflowsCell(cell.t, w) && !symbolFamily(cp)) {
+                ctx.fillText(cell.t, x0, baseY);
+            }
             else {
                 ctx.fillText(cell.t, x0, baseY, x1 - x0);
             }
-            if (cell.u)
-                ctx.fillRect(x0, y1 - ul, x1 - x0, ul);
+            if (cell.u) {
+                const ulColor = resolveRgb(cell.k);
+                drawUnderline(x0, x1, typeof cell.u === "number" ? cell.u : 1, ulColor ? hex(ulColor) : fg);
+                ctx.fillStyle = fg;
+            }
             if (cell.s)
-                ctx.fillRect(x0, Math.round((y0 + y1) / 2), x1 - x0, ul);
+                ctx.fillRect(x0, strikeY, x1 - x0, th);
+        }
+        if (isCursor && !blocky) {
+            const cw = Math.max(1, Math.round(fontPx * 0.14));
+            ctx.fillStyle = hex(cellFg(cell, false));
+            if (screen.sty >= 5)
+                ctx.fillRect(x0, y0, cw, y1 - y0);
+            else
+                ctx.fillRect(x0, y1 - cw, x1 - x0, cw);
         }
         c += w;
     }
