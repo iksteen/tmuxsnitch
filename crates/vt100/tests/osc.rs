@@ -85,7 +85,7 @@ fn unknown_osc() {
 
 // shellglass: OSC 10/11 *queries* (vim background detection) are answered by
 // the embedding terminal and must be silent; the *set* form really changes
-// the local screen and must keep reporting until mirrored (roadmap item 13).
+// the local screen and must keep reporting until mirrored (roadmap item 9).
 #[test]
 fn default_color_queries_silent_set_form_reports() {
     #[derive(Default)]

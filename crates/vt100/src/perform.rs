@@ -306,7 +306,7 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             // shellglass: default fg/bg *queries* (vim/neovim background
             // detection) — the embedding terminal answers; nothing to render.
             // The set form (a color value) must stay unhandled until it is
-            // mirrored (roadmap item 13): it really changes the local screen.
+            // mirrored (roadmap item 9): it really changes the local screen.
             [b"10" | b"11", b"?"] => {}
             [b"52", ty, data] => {
                 match (

@@ -92,7 +92,7 @@ A real-workload exit report (2026-07-10) flagged five kinds: `CSI c`, `CSI t`,
 five have **no rendering effect** — they are queries, whose replies are the
 *real* terminal's job (it sees the teed output and answers into our stdin→PTY
 bridge), or pure string syntax. Only the OSC 10/11 *set* form can change what
-the screen looks like — that's item 13 in phase 3; everything else is
+the screen looks like — that's item 9 in phase 3; everything else is
 telemetry noise to silence deliberately.
 
 1. **No-op arms for non-visual sequences, so telemetry stays high-signal.**
@@ -111,7 +111,7 @@ telemetry noise to silence deliberately.
      mirror has no title feature — item 12 must un-ignore 22/23 if it lands.
    - `OSC 10;?` / `OSC 11;?` (default-color *queries*) — vim/neovim background
      detection; answered by the tee. The **set** form must NOT be silenced:
-     it really changes the local screen, and must keep reporting until item 13
+     it really changes the local screen, and must keep reporting until item 9
      mirrors it.
    While there: record `CSI t`'s params in the telemetry kind (join them like
    `h`/`l`/`m` in `csi_kind`) so a future unknown op is diagnosable straight
@@ -199,27 +199,27 @@ telemetry noise to silence deliberately.
    and single-cell updates (typing). Measure before/after; don't complicate the
    publish path for a win the numbers don't show.
 
-9. **Scrollback.** The README's "not yet" item; not a fight — the vendored
-   crate already has a scrollback buffer (`Parser::new`'s third arg, currently
-   0) with `set_scrollback` for viewport positioning. The real work is product
-   design: wire semantics for history (the diff protocol is screen-shaped),
-   viewer UX (scroll = viewport offset messages?), and memory bounds per
-   session on the hub. Write a design note before code; this one can balloon.
+9. **OSC 10/11 set form: default foreground/background color.** *(the one
+   real gap in the 2026-07-10 telemetry batch — see phase 1.6 for the noise
+   half)*. `OSC 10;<color>` / `OSC 11;<color>` (plus the `OSC 110`/`111`
+   resets) change the terminal's default fg/bg; kitty applies them live, so
+   after a theme switcher or an `OSC 11`-emitting TUI runs, the local screen
+   repaints and the mirror silently keeps its configured colors — visible
+   divergence on every default-colored cell. Cross-layer, the item-5 pattern:
+   the vendored `Screen` stores the two overrides (parse at least `#RRGGBB`
+   and `rgb:RR/GG/BB`; unparseable values stay unhandled so telemetry keeps
+   flagging them), the wire ships them as an additive full-frame key (old
+   viewers ignore it → no salt bump), and the viewer maps them onto the
+   default-color CSS it already derives from the render config. Gate: only
+   emit what the viewer renders, and keep the *query* forms in phase 1.6's
+   no-op arms — they must not set anything.
 
-13. **OSC 10/11 set form: default foreground/background color.** *(the one
-    real gap in the 2026-07-10 telemetry batch — see phase 1.6 for the noise
-    half)*. `OSC 10;<color>` / `OSC 11;<color>` (plus the `OSC 110`/`111`
-    resets) change the terminal's default fg/bg; kitty applies them live, so
-    after a theme switcher or an `OSC 11`-emitting TUI runs, the local screen
-    repaints and the mirror silently keeps its configured colors — visible
-    divergence on every default-colored cell. Cross-layer, the item-5 pattern:
-    the vendored `Screen` stores the two overrides (parse at least `#RRGGBB`
-    and `rgb:RR/GG/BB`; unparseable values stay unhandled so telemetry keeps
-    flagging them), the wire ships them as an additive full-frame key (old
-    viewers ignore it → no salt bump), and the viewer maps them onto the
-    default-color CSS it already derives from the render config. Gate: only
-    emit what the viewer renders, and keep the *query* forms in phase 1.6's
-    no-op arms — they must not set anything.
+Dropped from this phase (2026-07-10, deliberate): **scrollback**. The mirror
+shows the live screen — a glance over the operator's shoulder — and history is
+out of scope by design: the diff protocol is screen-shaped, hub memory stays
+bounded, and the operator's own terminal already has scrollback. Don't revive
+without a product-level rethink. (The vendored crate's scrollback buffer stays
+at 0 in `Parser::new`.)
 
 ## Phase 4 — maybe one day
 

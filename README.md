@@ -323,8 +323,9 @@ Mirror an interactive command in a PTY (the `script(1)` model, one screen) with 
 rendering, inline images (kitty graphics / iTerm2 / sixel, gated on what the terminal
 renders), standalone + client/hub push, an optional read-only SSH view (`--ssh-bind`),
 viewer templating (built-in page with a CRT toggle, or a custom template), and optional
-hub TLS (own cert or ACME/Let's Encrypt). Not yet: scrollback, multiple sessions/panes in
-one view.
+hub TLS (own cert or ACME/Let's Encrypt). Not yet: multiple sessions/panes in one view.
+Not planned: scrollback — the mirror shows the live screen, like a glance over the
+operator's shoulder; your own terminal already has history.
 
 ## License
 
