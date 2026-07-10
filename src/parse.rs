@@ -20,8 +20,10 @@ pub fn grid_from_capture(capture: &str, cols: u16, rows: u16) -> Grid {
 }
 
 /// Extract a parser-agnostic [`Grid`] from a live vt100 screen (the long-lived
-/// PTY-fed screen at render time; also used by the tests below).
-pub fn grid_from_screen(screen: &vt100::Screen) -> Grid {
+/// PTY-fed screen at render time; also used by the tests below). Generic over
+/// the screen's cell-data slot — extraction reads only the rendered state;
+/// the PTY backend resolves its image tags separately (`resolve_images`).
+pub fn grid_from_screen<T>(screen: &vt100::Screen<T>) -> Grid {
     let (srows, scols) = screen.size();
 
     let mut grid_rows: Vec<Vec<StyledCell>> = Vec::with_capacity(srows as usize);

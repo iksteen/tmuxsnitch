@@ -343,8 +343,10 @@ at 0 in `Parser::new`.)
 
 Items 4 and 7 both hang per-cell metadata off the vendored grid, and both are
 landed. They ended up as two *deliberately different* shapes: images are a
-region stamped over cells from outside the print path (`ImageCell` on `Cell`,
-placed by `Screen::place_image`), while links are SGR-like state that flows
-through the print path (`link` on `Attrs`, resolved through a bounded
-URI-deduped `Screen` table). A future per-cell tag should pick whichever shape
-matches how the state arrives.
+region stamped over cells from outside the print path (the generic `Cell<T>`
+data slot, stamped by `Screen::place_data` — the tag type itself lives in
+shellglass, keeping the crate consumer-agnostic and extractable), while links
+are SGR-like state that flows through the print path (`link` on `Attrs`,
+resolved through a bounded URI-deduped `Screen` table — a standard terminal
+feature, so it stays native). A future per-cell tag should pick whichever
+shape matches how the state arrives.

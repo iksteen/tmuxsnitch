@@ -24,6 +24,21 @@ use tokio::sync::watch;
 /// Frame cap: coalesce bursts of PTY output into at most ~30 renders per second.
 const MIN_FRAME: Duration = Duration::from_millis(33);
 
+/// One cell's share of an inline-image placement, stored in the vendored
+/// vt100's generic per-cell data slot (`Cell<T>`): the placement id plus this
+/// cell's offset within the image, so any surviving cell reconstructs the
+/// placement's top-left exactly — scrolling, line edits, and erasure need no
+/// extra tracking (the slot dies with the cell's contents).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ImgCell {
+    id: std::num::NonZeroU32,
+    row_off: u16,
+    col_off: u16,
+}
+
+/// The session parser: [`SeqLog`] telemetry callbacks + [`ImgCell`] cell data.
+type SgParser = vt100::Parser<SeqLog, ImgCell>;
+
 /// Reset every input mode an app could have switched on, for the hub-outage pause:
 /// normal keypad (`ESC >`), normal cursor keys, bracketed paste off, and all xterm
 /// mouse-reporting modes + encodings off. Turning off a mode that isn't on is a
@@ -222,7 +237,7 @@ fn screen_thread(
     msg_rx: mpsc::Receiver<Msg>,
     frame_tx: watch::Sender<Arc<Frame>>,
     raw: RawMode,
-    mut parser: vt100::Parser<SeqLog>,
+    mut parser: SgParser,
     seq_seen: SeqSeen,
     cell: (u16, u16),
     intercept: (bool, bool, bool),
@@ -233,7 +248,7 @@ fn screen_thread(
     let mut dirty = false;
     // Inline images live outside vt100's byte stream (it drops the sequences).
     // The interceptor pulls them out; each is placed at the cursor by stamping
-    // per-cell image tags into the parser grid (`place_image`), which then ride
+    // per-cell image tags into the parser grid (`place_data`), which then ride
     // vt100's own scrolling/eviction/reflow — each frame we just read the
     // surviving tags back (see `resolve_images`), no scroll heuristics.
     let mut interceptor = Interceptor::with(intercept.0, intercept.1, intercept.2);
@@ -281,7 +296,7 @@ fn screen_thread(
                             let (cols, rows) =
                                 cells.map_or((None, None), |(c, r)| (Some(c), Some(r)));
                             // Track the image by stamping per-cell tags into the parser
-                            // grid (`place_image`): vt100's own scroll/erase/reflow then
+                            // grid (`place_data`): vt100's own scroll/erase/reflow then
                             // manage the image's lifetime cell by cell, exactly mirroring
                             // a cell-based sixel terminal's erase semantics — text written
                             // over an image cell erases that cell's share of the image.
@@ -300,10 +315,14 @@ fn screen_thread(
                             image_seq = image_seq
                                 .checked_add(1)
                                 .unwrap_or(std::num::NonZeroU32::MIN);
-                            parser.screen_mut().place_image(
-                                id,
+                            parser.screen_mut().place_data(
                                 cols.unwrap_or(1),
                                 rows.unwrap_or(1),
+                                |row_off, col_off| ImgCell {
+                                    id,
+                                    row_off,
+                                    col_off,
+                                },
                             );
                             images.push(Placed {
                                 id,
@@ -372,8 +391,8 @@ fn screen_thread(
     }
 }
 
-fn new_parser(rows: u16, cols: u16) -> vt100::Parser<SeqLog> {
-    vt100::Parser::new_with_callbacks(rows, cols, 0, SeqLog::new().0)
+fn new_parser(rows: u16, cols: u16) -> SgParser {
+    SgParser::new_with_callbacks(rows, cols, 0, SeqLog::new().0)
 }
 
 /// The parser's blind spots, recorded for the exit report. vt100 silently drops
@@ -449,17 +468,24 @@ fn csi_kind(i1: Option<u8>, i2: Option<u8>, params: &[&[u16]], c: char) -> Strin
     s
 }
 
-impl vt100::Callbacks for SeqLog {
-    fn unhandled_char(&mut self, _: &mut vt100::Screen, c: char) {
+// Generic over the cell-data type: telemetry never touches cells.
+impl<T> vt100::Callbacks<T> for SeqLog {
+    fn unhandled_char(&mut self, _: &mut vt100::Screen<T>, c: char) {
         // U+FFFD is decode noise from binary output, not a sequence gap.
         if c != '\u{fffd}' {
             self.record(format!("CHAR U+{:04X}", u32::from(c)));
         }
     }
-    fn unhandled_control(&mut self, _: &mut vt100::Screen, b: u8) {
+    fn unhandled_control(&mut self, _: &mut vt100::Screen<T>, b: u8) {
         self.record(format!("CTRL 0x{b:02x}"));
     }
-    fn unhandled_escape(&mut self, _: &mut vt100::Screen, i1: Option<u8>, i2: Option<u8>, b: u8) {
+    fn unhandled_escape(
+        &mut self,
+        _: &mut vt100::Screen<T>,
+        i1: Option<u8>,
+        i2: Option<u8>,
+        b: u8,
+    ) {
         let mut s = String::from("ESC");
         for i in [i1, i2].into_iter().flatten() {
             s.push(' ');
@@ -471,7 +497,7 @@ impl vt100::Callbacks for SeqLog {
     }
     fn unhandled_csi(
         &mut self,
-        _: &mut vt100::Screen,
+        _: &mut vt100::Screen<T>,
         i1: Option<u8>,
         i2: Option<u8>,
         params: &[&[u16]],
@@ -479,7 +505,7 @@ impl vt100::Callbacks for SeqLog {
     ) {
         self.record(csi_kind(i1, i2, params, c));
     }
-    fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
+    fn unhandled_osc(&mut self, _: &mut vt100::Screen<T>, params: &[&[u8]]) {
         let selector = params
             .first()
             .map(|p| String::from_utf8_lossy(p).into_owned())
@@ -526,11 +552,11 @@ impl SyncGate {
 
     /// Should the pending publish be held? Call only when a publish is
     /// otherwise due — the call consumes the ESU-seen edge.
-    fn hold(&mut self, screen: &vt100::Screen) -> bool {
+    fn hold<T>(&mut self, screen: &vt100::Screen<T>) -> bool {
         self.hold_within(screen, Self::MAX_HOLD)
     }
 
-    fn hold_within(&mut self, screen: &vt100::Screen, max_hold: Duration) -> bool {
+    fn hold_within<T>(&mut self, screen: &vt100::Screen<T>, max_hold: Duration) -> bool {
         let starts = screen.synchronized_update_starts();
         if starts != self.starts {
             self.starts = starts;
@@ -559,7 +585,8 @@ fn report_unmirrored(seen: &SeqSeen) {
 }
 
 /// An inline image plus the tag id its covered cells carry in the parser grid
-/// (see `place_image` in the vendored vt100). The tagged cells ride vt100's own
+/// (stored in the vendored vt100's per-cell data slot, `place_data`). The
+/// tagged cells ride vt100's own
 /// scrolling, eviction, and reflow, so the parser tracks the image's fate per
 /// cell; `resolve_images` reads the survivors back each frame.
 struct Placed {
@@ -570,7 +597,7 @@ struct Placed {
 /// Snapshot the PTY screen as a [`Frame`], resolving each tracked image's tagged
 /// cells to its current position and dropping images with no covered cell left
 /// (scrolled off the top, cleared, or overwritten).
-fn frame_from(parser: &vt100::Parser<SeqLog>, images: &mut Vec<Placed>) -> Arc<Frame> {
+fn frame_from(parser: &SgParser, images: &mut Vec<Placed>) -> Arc<Frame> {
     let mut grid = crate::parse::grid_from_screen(parser.screen());
     grid.images = resolve_images(parser.screen(), images);
     Arc::new(Frame::Screen(grid))
@@ -583,7 +610,10 @@ fn frame_from(parser: &vt100::Parser<SeqLog>, images: &mut Vec<Placed>) -> Arc<F
 /// the viewer clips it). Drop images with no surviving cell — fully scrolled off,
 /// cleared, or wholly overwritten, which is exactly when the terminal no longer
 /// shows any part of them either.
-fn resolve_images(screen: &vt100::Screen, images: &mut Vec<Placed>) -> Vec<ImagePlacement> {
+fn resolve_images(
+    screen: &vt100::Screen<ImgCell>,
+    images: &mut Vec<Placed>,
+) -> Vec<ImagePlacement> {
     if !images.is_empty() {
         // One pass over the grid (not one per image, and skipped entirely in the
         // imageless common case): the minimal-offset survivor per tracked image,
@@ -592,13 +622,13 @@ fn resolve_images(screen: &vt100::Screen, images: &mut Vec<Placed>) -> Vec<Image
         let (srows, scols) = screen.size();
         for r in 0..srows {
             for c in 0..scols {
-                let Some(icell) = screen.cell(r, c).and_then(vt100::Cell::image_cell) else {
+                let Some(&icell) = screen.cell(r, c).and_then(vt100::Cell::data) else {
                     continue;
                 };
-                let Some(i) = images.iter().position(|p| p.id == icell.id()) else {
+                let Some(i) = images.iter().position(|p| p.id == icell.id) else {
                     continue;
                 };
-                let off = (icell.row_off(), icell.col_off());
+                let off = (icell.row_off, icell.col_off);
                 if best[i].is_none_or(|(dr, dc, _, _)| off < (dr, dc)) {
                     best[i] = Some((off.0, off.1, r, c));
                 }
@@ -845,7 +875,7 @@ mod tests {
     #[test]
     fn seqlog_records_unhandled_kinds_once() {
         let (seqlog, seen) = SeqLog::new();
-        let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, seqlog);
+        let mut parser = SgParser::new_with_callbacks(24, 80, 0, seqlog);
         // DECSCA (CSI " q), a made-up DEC private mode, and a handled sequence
         // (CUP) that must NOT be recorded — twice over to check dedup. (The
         // original specimens here, DECSTR and mode 2026, got implemented off
@@ -869,7 +899,7 @@ mod tests {
     #[test]
     fn seqlog_silent_on_query_noise_loud_on_real_gaps() {
         let (seqlog, seen) = SeqLog::new();
-        let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, seqlog);
+        let mut parser = SgParser::new_with_callbacks(24, 80, 0, seqlog);
         parser.process(b"\x1b[c\x1b[>c\x1b[14t\x1b[18t\x1b[22;0t\x1b[23;0t");
         parser.process(b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b]11;#300a24\x1b\\");
         assert!(
@@ -890,7 +920,7 @@ mod tests {
     #[test]
     fn seqlog_silent_on_round3_kinds() {
         let (seqlog, seen) = SeqLog::new();
-        let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, seqlog);
+        let mut parser = SgParser::new_with_callbacks(24, 80, 0, seqlog);
         parser.process(b"\x1b[4h\x1b[4l\x1b[?7h\x1b[?7l\x1b[?12h\x1b[?12l");
         parser.process(b"\x1b(B\x1b)B");
         assert!(seen.lock().unwrap().is_empty(), "round-3 kinds are handled");
@@ -966,10 +996,16 @@ mod tests {
 
     /// Place a `w`×`h` image at the parser's cursor, exactly as the screen
     /// thread does: stamp the cell tags and record the placement.
-    fn place(parser: &mut vt100::Parser<SeqLog>, w: u16, h: u16) -> Vec<Placed> {
+    fn place(parser: &mut SgParser, w: u16, h: u16) -> Vec<Placed> {
         let (row, col) = parser.screen().cursor_position();
         let id = std::num::NonZeroU32::MIN;
-        parser.screen_mut().place_image(id, w, h);
+        parser
+            .screen_mut()
+            .place_data(w, h, |row_off, col_off| ImgCell {
+                id,
+                row_off,
+                col_off,
+            });
         vec![Placed {
             id,
             img: ImagePlacement {
