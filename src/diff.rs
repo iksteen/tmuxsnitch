@@ -1521,6 +1521,85 @@ mod tests {
         }
     }
 
+    /// Frame-cost meter, inert without SG_FRAMECOST=1 — the measure-first gate
+    /// for roadmap item 8 (damage tracking). Times the two per-frame costs the
+    /// item targets — `grid_from_screen` (extraction) and `encode_delta`
+    /// (comparison) — across screen sizes and workloads, in µs/frame.
+    /// Run: SG_FRAMECOST=1 cargo test --release zz_measure_frame_cost -- --nocapture
+    #[test]
+    fn zz_measure_frame_cost() {
+        if std::env::var("SG_FRAMECOST").unwrap_or_default().is_empty() {
+            return;
+        }
+        println!(
+            "{:<10} {:<12} | {:>12} {:>12} | {:>10}",
+            "size", "workload", "extract µs", "encode µs", "wire B/frm"
+        );
+        for &(rows, cols) in &[(24u16, 80u16), (50, 200), (100, 320)] {
+            for workload in ["typing", "scroll", "churn"] {
+                let mut parser = vt100::Parser::new(rows, cols, 0);
+                // Fill the screen so extraction/compare see realistic content.
+                for r in 0..rows {
+                    parser.process(
+                        format!("\x1b[{};1H{}", r + 1, "x".repeat(usize::from(cols) - 1))
+                            .as_bytes(),
+                    );
+                }
+                parser.process(format!("\x1b[{rows};1H\x1b[K$ ").as_bytes());
+                let mut prev = Frame::Screen(crate::parse::grid_from_screen(parser.screen()));
+                let frames = 300u32;
+                let (mut extract_ns, mut encode_ns, mut bytes) = (0u128, 0u128, 0usize);
+                for i in 0..frames {
+                    match workload {
+                        // One echoed keystroke per frame at the prompt.
+                        "typing" => parser.process(if i % 8 == 7 {
+                            b"\x1b[K$ " as &[u8]
+                        } else {
+                            b"a"
+                        }),
+                        // One appended log line per frame (scrolls the screen).
+                        "scroll" => parser.process(
+                            format!("\r\n[{i:06}] some log line with detail {i}").as_bytes(),
+                        ),
+                        // Every row rewritten per frame (cmatrix-class).
+                        "churn" => {
+                            for r in 0..rows {
+                                parser.process(
+                                    format!(
+                                        "\x1b[{};1H{:>width$}",
+                                        r + 1,
+                                        i + u32::from(r),
+                                        width = usize::from(cols) - 1
+                                    )
+                                    .as_bytes(),
+                                );
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                    let t0 = std::time::Instant::now();
+                    let g = crate::parse::grid_from_screen(parser.screen());
+                    let t1 = std::time::Instant::now();
+                    let next = Frame::Screen(g);
+                    let msg = encode_delta(&prev, &next);
+                    let t2 = std::time::Instant::now();
+                    extract_ns += t1.duration_since(t0).as_nanos();
+                    encode_ns += t2.duration_since(t1).as_nanos();
+                    bytes += msg.map_or(0, |m| m.len());
+                    prev = next;
+                }
+                println!(
+                    "{:<10} {:<12} | {:>12.1} {:>12.1} | {:>10}",
+                    format!("{cols}x{rows}"),
+                    workload,
+                    extract_ns as f64 / 1000.0 / f64::from(frames),
+                    encode_ns as f64 / 1000.0 / f64::from(frames),
+                    bytes / frames as usize,
+                );
+            }
+        }
+    }
+
     /// Wire-cost meter, inert without SG_CORPUS. Replays real terminal recordings
     /// through vt100 with the production 33ms frame coalescing and reports the
     /// exact encoded bytes of the diff stream plus a final full snapshot — the
