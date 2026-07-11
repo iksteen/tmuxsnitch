@@ -426,10 +426,11 @@ pub fn gen_key(api: bool) -> Result<()> {
     getrandom::fill(&mut bytes)
         .map_err(|e| anyhow::anyhow!("reading OS randomness for the new key: {e}"))?;
     let key = base64::Engine::encode(&URL_SAFE_NO_PAD, bytes);
-    println!("key: {key}");
     if api {
+        println!("key:    {key}");
         println!("api-id: {}", proto::api_id(&key));
     } else {
+        println!("key: {key}");
         println!("id:  {}", proto::session_id(&key));
     }
     Ok(())
