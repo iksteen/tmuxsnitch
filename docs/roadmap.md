@@ -526,7 +526,61 @@ own CRT effect.
    rebuilds teleport). Verified: `verify.py` `?mode=cursor` self-check
    (suppression + mid-travel position + landing, driven synchronously via
    `benchCursorStep`).
-4. ⊘ **WebGL subpixel text.** Researched and rejected 2026-07-11. The
+### D. Text fidelity (canvas mode)
+
+Context, from the 2026-07-11 WebGL research: canvas `fillText` already uses
+the platform's hinted rasterizer, pixel-identical to DOM text (measured), so
+antialiasing is a dead end — the remaining fidelity is in shaping, grid
+geometry, and decoration behavior. Ground truth stays kitty. Non-goals:
+WebGL/subpixel (⊘ item below), SDF atlases (softer than the platform
+rasterizer at terminal sizes).
+
+1. **Run-shaped text: ligatures, kerning, joined scripts.** In
+   `drawRowStorm`, coalesce contiguous same-style text cells (same resolved
+   font + fg, no geometric/fill/overwide/cursor cells) into ONE
+   `fillText(run, x0, baseY)` — the browser shapes whole runs (FiraCode
+   `=>`, Arabic joining) exactly as the DOM path's coalesced spans do.
+   Grid guard: `measureText(run).width` must equal `n·cellW·dpr` within
+   ~0.5px (terminal ligature fonts design multi-cell glyphs to span their
+   cells); on mismatch, split the run and fall back to per-cell fillText.
+   Ghost text stays per-cell characters (copy semantics unchanged — kitty
+   also copies the raw text under a ligature). Verify: rig row with
+   `=> -> != ===` under a served ligature font (@font-face in verify.html),
+   asserting the canvas ink differs from forced per-cell rendering AND the
+   run's advance matches the grid; re-run `bench.py` (rain's per-cell
+   styles fall back, typing/editor should coalesce).
+2. **Integer device-pixel cell grid (stem evenness).** Kitty sizes the
+   cell in whole device pixels; our `cellW` is fractional (1ch ≈ 8.43px at
+   14px), so per-cell `Math.round` edges make cells alternate 8/9 device px
+   and glyph spacing jitters ±0.5px — visible as uneven stems in columns a
+   terminal renders evenly. MEASURE first: a rig histogram of inter-stem
+   spacing on a `MMMM…` row at dpr 1 and zoom 1.25; if the jitter is real,
+   let the canvas own the grid — `cellW_dev = round(cellW·dpr)` for ALL
+   canvas x math, and size `.screen` FROM it (`width: cols·cellW_dev/dpr`
+   px instead of `ch`) so ghost text, selection hit-testing and the fit
+   script stay in agreement. Verify: the histogram collapses to one bucket;
+   full parity rig unchanged.
+3. **Underline skip-ink (kitty's exclusion zones).** `drawUnderline` draws
+   straight through descenders; kitty carves exclusion zones
+   (`calculate_underline_exclusion_zones` in kitty/fonts.c) and Firefox's
+   DOM does `text-decoration-skip-ink` — both leave gaps around g/j/p tails.
+   For underlined text cells in `drawRowStorm`, consult the `inkBox` cache:
+   when a glyph's ink descends past `ulY − th`, split the straight-underline
+   fillRect into segments skipping the glyph's horizontal ink extent
+   (`ink.l..ink.r` ± ~1px). Match kitty on which styles skip (check its
+   source: straight vs curly/dotted/dashed) before implementing. Verify:
+   extend the decoration-continuity rig check to assert canvas gap positions
+   at descenders line up with the DOM's skip-ink gaps.
+4. **Pinch-zoom sharpness.** The visual viewport scales the canvas raster
+   with no event our ResizeObserver/dpr-media hooks see — but
+   `visualViewport` fires `resize` on pinch. Listen next to `watchZoom`,
+   fold `visualViewport.scale` (capped ~3× to bound backing-store memory)
+   into `sizeCanvas`'s dpr term, and repaint — a pinched-in mirror
+   re-rasterizes crisp instead of blurring. Verify: unit-test the scale
+   math via a bench hook; visual check on a touch device (headless can't
+   pinch).
+
+5. ⊘ **WebGL subpixel text.** Researched and rejected 2026-07-11. The
    hypothesis was that WebGL subpixel rendering (astiopin/webgl_fonts —
    SDF atlas, pseudo-hinting via x-height snapping, per-channel coverage
    through a `CONSTANT_COLOR/ONE_MINUS_SRC_COLOR` blend trick) could close
