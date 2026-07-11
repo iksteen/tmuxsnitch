@@ -26,8 +26,8 @@ use crate::render;
 use anyhow::{Context, Result, bail};
 use axum::Router;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
-use axum::extract::{ConnectInfo, Path, State};
-use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::http::header::{ACCESS_CONTROL_ALLOW_ORIGIN, CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
@@ -599,6 +599,7 @@ pub fn app(state: HubState) -> Router {
         // authorized once at the upgrade.
         .route("/push", get(ws_push))
         .route("/viewer.js", get(viewer_js).layer(compress.clone()))
+        .route("/embed.js", get(embed_js).layer(compress.clone()))
         .route("/favicon.svg", get(favicon).layer(compress.clone()))
         .route("/s/{slug}", get(view).layer(compress.clone()))
         .route("/s/{slug}/events", get(events))
@@ -1041,7 +1042,16 @@ async fn font(State(st): State<HubState>, Path((slug, key)): Path<(String, Strin
     }
 }
 
-async fn view(State(st): State<HubState>, Path(slug): Path<String>) -> Response {
+async fn view(
+    State(st): State<HubState>,
+    Path(slug): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    // `?embed`: the chrome-less fit-to-frame page (what an <iframe> shows).
+    // Always the built-in embed template — a pusher's custom template never
+    // applies, so an embed's look is predictable for host pages; the pushed
+    // CSS/fonts/render config still do (correctness, not chrome).
+    let embed = params.contains_key("embed");
     let id = st.id_of_view(&slug);
     let map = st.sessions.lock().unwrap();
     let Some(s) = id.and_then(|id| map.get(&id)) else {
@@ -1066,7 +1076,11 @@ async fn view(State(st): State<HubState>, Path(slug): Path<String>) -> Response 
         return (
             [(CACHE_CONTROL, "no-cache")],
             Html(render::page(
-                render::DEFAULT_TEMPLATE,
+                if embed {
+                    render::EMBED_TEMPLATE
+                } else {
+                    render::DEFAULT_TEMPLATE
+                },
                 &render::default_head_css(),
                 &script,
             )),
@@ -1075,7 +1089,9 @@ async fn view(State(st): State<HubState>, Path(slug): Path<String>) -> Response 
     }
     let script = render::sse_script(&format!("/s/{slug}/events"), &s.render_cfg);
     // Empty template = an older client that didn't push one; use the built-in.
-    let template = if s.template.is_empty() {
+    let template = if embed {
+        render::EMBED_TEMPLATE
+    } else if s.template.is_empty() {
         render::DEFAULT_TEMPLATE
     } else {
         &s.template
@@ -1106,6 +1122,23 @@ async fn viewer_js() -> Response {
             (CACHE_CONTROL, "public, max-age=31536000, immutable"),
         ],
         render::VIEWER_JS,
+    )
+        .into_response()
+}
+
+/// The stable embedding shim (see `render::EMBED_JS`). Cached for a day, not
+/// immutable: host pages reference it un-fingerprinted, and it must be able
+/// to pick up a fix within a deploy cycle. The documented snippet is a classic
+/// script (no CORS involved); ACAO * keeps a `type="module"` load — which
+/// fetches with CORS — working for hosts that prefer the element form.
+async fn embed_js() -> Response {
+    (
+        [
+            (CONTENT_TYPE, "application/javascript"),
+            (CACHE_CONTROL, "public, max-age=86400"),
+            (ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        ],
+        render::EMBED_JS,
     )
         .into_response()
 }
@@ -1676,6 +1709,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        // ?embed serves the chrome-less embed template (fit-to-frame page, no
+        // nav) — for the placeholder too, keeping the reload-on-online observer.
+        let res = router
+            .clone()
+            .oneshot(Request::get("/s/demo?embed").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 1 << 22)
+            .await
+            .unwrap();
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("sg-offline"), "embed template served");
+        assert!(!html.contains("<nav"), "embed page has no chrome");
+        assert!(
+            html.contains("attributeFilter"),
+            "embedded placeholder still reloads when the operator arrives"
+        );
+        // Unknown slugs 404 with ?embed too.
+        let res = router
+            .clone()
+            .oneshot(Request::get("/s/nope?embed").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        // The embedding shim is served (the snippet host pages reference) —
+        // with ACAO *, or a cross-origin `type="module"` load is CORS-blocked.
+        let res = router
+            .clone()
+            .oneshot(Request::get("/embed.js").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("*"),
+            "embed.js must be loadable as a cross-origin module"
+        );
 
         // The pusher registers: the view now serves the pushed page, and the
         // placeholder observer is gone.

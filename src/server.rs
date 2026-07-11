@@ -8,11 +8,12 @@ use crate::fonts::{CACHE_CONTROL_FONT, FontFile};
 use crate::render;
 use crate::{diff, fonts};
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+use axum::http::header::{ACCESS_CONTROL_ALLOW_ORIGIN, CACHE_CONTROL, CONTENT_TYPE};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tower_http::compression::CompressionLayer;
 
@@ -39,6 +40,7 @@ pub fn app(state: AppState) -> Router {
         .route("/", get(index).layer(compress.clone()))
         .route("/events", get(events))
         .route("/viewer.js", get(viewer_js).layer(compress.clone()))
+        .route("/embed.js", get(embed_js).layer(compress.clone()))
         .route("/favicon.svg", get(favicon).layer(compress.clone()))
         .route("/fonts/{key}", get(font).layer(compress))
         .with_state(state)
@@ -70,6 +72,23 @@ async fn viewer_js() -> Response {
         .into_response()
 }
 
+/// The stable embedding shim (see `render::EMBED_JS`). Cached for a day, not
+/// immutable: host pages reference it un-fingerprinted, and it must be able
+/// to pick up a fix within a deploy cycle. The documented snippet is a classic
+/// script (no CORS involved); ACAO * keeps a `type="module"` load — which
+/// fetches with CORS — working for hosts that prefer the element form.
+async fn embed_js() -> Response {
+    (
+        [
+            (CONTENT_TYPE, "application/javascript"),
+            (CACHE_CONTROL, "public, max-age=86400"),
+            (ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        ],
+        render::EMBED_JS,
+    )
+        .into_response()
+}
+
 async fn favicon() -> Response {
     (
         [
@@ -81,16 +100,26 @@ async fn favicon() -> Response {
         .into_response()
 }
 
-async fn index(State(state): State<AppState>) -> Response {
+async fn index(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
     // The screen starts empty; the renderer paints it from the full frame that
     // heads the SSE stream, one round-trip after load (same as hub-served pages).
     let cfg = render::render_config_json(&state.config, &state.resolver);
+    // `?embed`: the chrome-less fit-to-frame page (what an <iframe> shows) —
+    // the built-in embed template instead of the configured one.
+    let template = if params.contains_key("embed") {
+        render::EMBED_TEMPLATE
+    } else {
+        &state.template
+    };
     // no-cache: the auto-reload path depends on a reload fetching fresh HTML
     // (it carries the fingerprinted /viewer.js?v=… URL and the version pair).
     (
         [(CACHE_CONTROL, "no-cache")],
         Html(render::render_page(
-            &state.template,
+            template,
             &state.font_css,
             &state.config,
             &cfg,

@@ -1,0 +1,57 @@
+<!doctype html>
+<!-- shellglass embed page (`?embed`): no chrome — just the terminal, scaled to
+     fill the frame it was given. This is what an <iframe> (or the
+     <shellglass-view> element from /embed.js) shows. Same three tokens as any
+     viewer template: {{style}} {{screen}} {{script}}. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>shellglass</title>
+{{style}}
+<style>
+html, body { height:100%; }
+body { display:flex; align-items:center; justify-content:center;
+       overflow:hidden; background:#000; }
+#screen { width:fit-content; }
+/* Offline takeover: viewer.ts publishes body[data-offline="hub"|"operator"]
+   (absent = live) — a frozen embed should say so, not just stand still. */
+.sg-offline { position:fixed; inset:0; display:none; align-items:center;
+  justify-content:center; background:rgba(0,0,0,.72); color:#d0d0d0;
+  font:600 13px/1.4 system-ui,sans-serif; letter-spacing:.18em;
+  text-transform:uppercase; }
+body[data-offline] .sg-offline { display:flex; }
+.sg-offline span { display:none; }
+body[data-offline="hub"] .off-hub { display:inline; }
+body[data-offline="operator"] .off-op { display:inline; }
+</style>
+</head>
+<body>
+{{screen}}
+<div class="sg-offline" aria-hidden="true"><span class="off-hub">offline</span><span class="off-op">operator offline</span></div>
+{{script}}
+<script>
+// Fit the terminal to the frame: CSS `zoom` (layout-affecting, so the flex
+// centering sees the scaled box), growing as well as shrinking — an embed
+// fills the box the host page gave it. The canvas re-rasterizes on "sg-zoom"
+// (see watchZoom in the viewer), so scaled text stays crisp. Re-fits when the
+// grid resizes (a new frame size moves #screen's box) or the frame does.
+(() => {
+  const scr = document.getElementById('screen');
+  const fit = () => {
+    const box = scr.firstElementChild;
+    if (!box) return;
+    scr.style.zoom = 1;
+    const b = box.getBoundingClientRect();
+    if (!b.width || !b.height) return;
+    const z = Math.min(innerWidth / b.width, innerHeight / b.height);
+    // a hair under the exact fit so sub-pixel rounding can't overflow the box
+    scr.style.zoom = z * 0.999;
+    window.dispatchEvent(new Event('sg-zoom'));
+  };
+  new ResizeObserver(fit).observe(scr);
+  addEventListener('resize', fit);
+})();
+</script>
+</body>
+</html>

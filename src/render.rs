@@ -70,6 +70,18 @@ const DEFAULT_BG: (u8, u8, u8) = (0x00, 0x00, 0x00);
 /// (the scripts that boot it). Override via `--config`'s `template`.
 pub const DEFAULT_TEMPLATE: &str = include_str!("template.html");
 
+/// Built-in embed template (`?embed` on any view route): no chrome, terminal
+/// scaled to fill the frame. Always used for embeds — a pusher's custom
+/// template never applies, so an embed's look is predictable for host pages.
+pub const EMBED_TEMPLATE: &str = include_str!("template_embed.html");
+
+/// The stable embedding shim served at `/embed.js`: a classic script that
+/// replaces its own `<script data-src="…">` tag with an iframe onto the
+/// `?embed` page (and defines `<shellglass-view src="…">` for markup-side
+/// use). Deliberately version-agnostic — everything live happens inside the
+/// frame.
+pub const EMBED_JS: &str = include_str!("embed.js");
+
 /// Everything that goes inside `<style>`: the served-font `@font-face` rules plus
 /// the config-derived base CSS. Computed by whoever owns the config (the standalone
 /// server or a push client); the hub just stores and re-emits it, so it renders
@@ -270,6 +282,27 @@ mod tests {
         assert!(html.contains("<div id=\"screen\"></div>"), "{html}");
         // The script block is injected raw (it carries its own <script> tags).
         assert!(html.contains("<script>JS</script>"), "{html}");
+    }
+
+    #[test]
+    fn embed_assets_hold_their_contract() {
+        // The embed template is a full viewer template (all three tokens),
+        // carries the offline takeover, and dispatches sg-zoom so the canvas
+        // re-rasterizes on fit changes.
+        for tok in ["{{style}}", "{{screen}}", "{{script}}"] {
+            assert!(EMBED_TEMPLATE.contains(tok), "embed template missing {tok}");
+        }
+        assert!(EMBED_TEMPLATE.contains("data-offline"), "offline takeover");
+        assert!(EMBED_TEMPLATE.contains("sg-zoom"), "canvas re-raster hook");
+        // embed.js is the STABLE public API: the one-liner's data-src, the
+        // element name and its src attribute must never change, and both
+        // forms must point at the ?embed page. currentScript = classic-script
+        // self-insertion (modules would break it AND need CORS).
+        assert!(EMBED_JS.contains("document.currentScript"));
+        assert!(EMBED_JS.contains("dataset.src"));
+        assert!(EMBED_JS.contains("customElements.define(\"shellglass-view\""));
+        assert!(EMBED_JS.contains("getAttribute(\"src\")"));
+        assert!(EMBED_JS.contains("searchParams.set(\"embed\""));
     }
 
     #[test]

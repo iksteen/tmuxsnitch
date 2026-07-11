@@ -297,6 +297,39 @@ Everything around those tokens is yours — nav, wrapper, footer, extra `<style>
 Only `{{screen}}`'s `#screen` id is load-bearing (the updater targets it). In hub
 mode the client pushes its template to the hub, so custom pages work off-box too.
 
+## Embedding in another page
+
+One line, where the terminal should appear:
+
+```html
+<script src="https://hub.example.com/embed.js"
+        data-src="https://hub.example.com/s/demo"></script>
+```
+
+The script replaces itself with an iframe showing just the terminal, scaled to
+fill its box — `100%` wide, `24em` tall by default. Size it with a `style`
+attribute on the script tag (it's carried onto the iframe) or by styling
+`.shellglass-view` in your CSS. Two equivalent forms for other tastes: the
+script also defines a custom element (handy for dynamic insertion, where
+`document.currentScript` doesn't exist), and the raw iframe works without any
+script — the embed page is any view URL plus `?embed`:
+
+```html
+<shellglass-view src="https://hub.example.com/s/demo"></shellglass-view>
+<!-- or -->
+<iframe src="https://hub.example.com/s/demo?embed"
+        style="border:0;width:100%;height:24em"></iframe>
+```
+
+The terminal grows or shrinks to fit, and re-fits when the session's grid or
+the box resizes. All three snippets are **stable**: the `?embed` URL shape,
+`data-src`, and the element's `src` attribute are the whole contract —
+reconnects, upgrades, and the operator-offline state all happen inside the
+frame. Works with standalone `serve` too (`http://host:8080/?embed`). An embed
+always uses the built-in embed look; a custom `template` doesn't apply to it
+(the session's fonts and colors do). Embedding a session is exactly as public
+as its view URL — see the security notes below.
+
 ## Security notes
 
 - The **secret** is a bearer capability. Anyone who has it can push to that
