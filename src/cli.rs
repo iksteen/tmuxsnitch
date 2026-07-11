@@ -53,6 +53,85 @@ impl Cli {
             Action::Push(args) => args.run().await,
             #[cfg(feature = "hub")]
             Action::Hub(args) => args.run().await,
+            #[cfg(feature = "sessions")]
+            Action::Sessions(args) => args.run().await,
+        }
+    }
+}
+
+/// `shellglass sessions` — the hub-control client (see [`crate::apictl`]).
+#[cfg(feature = "sessions")]
+#[derive(clap::Args, Debug)]
+pub struct SessionsArgs {
+    /// Hub base URL (e.g. `https://hub.example.com`).
+    #[arg(long)]
+    hub: String,
+
+    /// Management-API key (or the `SHELLGLASS_API_KEY` env var). Its API id
+    /// (`print-id --key K --api`) must be on the hub's `--api-allow`.
+    /// (`allow_hyphen_values`: a secret may start with `-`.)
+    #[arg(
+        long,
+        env = "SHELLGLASS_API_KEY",
+        hide_env_values = true,
+        allow_hyphen_values = true
+    )]
+    key: String,
+
+    #[command(subcommand)]
+    cmd: SessionsCmd,
+}
+
+/// The management operations. Removal names its namespace explicitly
+/// (`--id` XOR `--slug`) for the same reason the API has two delete routes:
+/// an un-aliased slug IS the session id, so a guessing form could delete the
+/// wrong thing.
+#[cfg(feature = "sessions")]
+#[derive(clap::Subcommand, Debug)]
+enum SessionsCmd {
+    /// List registered sessions (slug, live/offline, session id).
+    List,
+    /// Register a session by its public session id (from `print-id`, never a
+    /// key), optionally aliased to a view-URL slug.
+    Add {
+        /// The session id (64 hex chars).
+        id: String,
+        /// Public view slug (`/s/<slug>`); defaults to the id.
+        #[arg(long)]
+        slug: Option<String>,
+    },
+    /// Remove a session — by exactly one of `--id` or `--slug`.
+    #[command(group(clap::ArgGroup::new("target").required(true).multiple(false)))]
+    Remove {
+        /// Remove by SESSION ID.
+        #[arg(long, group = "target")]
+        id: Option<String>,
+        /// Remove by VIEW SLUG.
+        #[arg(long, group = "target")]
+        slug: Option<String>,
+    },
+}
+
+#[cfg(feature = "sessions")]
+impl SessionsArgs {
+    /// Run the hub-control client (the `sessions` action).
+    ///
+    /// # Errors
+    /// Connection/auth failures and API rejections, with the API's own error
+    /// message where it provides one.
+    pub async fn run(self) -> Result<()> {
+        match &self.cmd {
+            SessionsCmd::List => crate::apictl::list(&self.hub, &self.key).await,
+            SessionsCmd::Add { id, slug } => {
+                crate::apictl::add(&self.hub, &self.key, id, slug.as_deref()).await
+            }
+            SessionsCmd::Remove { id: Some(id), .. } => {
+                crate::apictl::remove_by_id(&self.hub, &self.key, id).await
+            }
+            SessionsCmd::Remove {
+                slug: Some(slug), ..
+            } => crate::apictl::remove_by_slug(&self.hub, &self.key, slug).await,
+            SessionsCmd::Remove { .. } => unreachable!("clap group requires --id or --slug"),
         }
     }
 }
@@ -90,6 +169,10 @@ enum Action {
     /// Run as a hub: receive pushes from clients and re-serve their sessions.
     #[cfg(feature = "hub")]
     Hub(HubArgs),
+
+    /// Manage a hub's sessions over its management API: list, add, remove.
+    #[cfg(feature = "sessions")]
+    Sessions(SessionsArgs),
 }
 
 /// Args for `serve` (and the `shellglass-serve` binary).

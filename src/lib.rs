@@ -7,6 +7,8 @@
 
 #[cfg(feature = "ssh-view")]
 pub mod ansi;
+#[cfg(feature = "sessions")]
+pub mod apictl;
 pub mod cli;
 #[cfg(feature = "push")]
 pub mod client;

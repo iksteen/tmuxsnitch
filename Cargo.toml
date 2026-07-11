@@ -18,8 +18,11 @@ license = "MIT"
 # axum). The per-mode [[bin]] targets below are thin mains over the same clap
 # actions in src/cli.rs, so flags and behavior can't drift from the full CLI.
 [features]
-default = ["serve", "push", "hub"]
+default = ["serve", "push", "hub", "sessions"]
 serve = ["mirror", "ssh-view", "dep:axum", "dep:tower-http"]
+# `sessions` — the hub-control CLI (list/add/remove over the management API).
+# Only needs an HTTP client; independent of the mirror stack.
+sessions = ["dep:reqwest"]
 push = [
     "mirror",
     "dep:reqwest",
@@ -67,6 +70,11 @@ required-features = ["push"]
 name = "shellglass-hub"
 path = "src/bin/hub.rs"
 required-features = ["hub"]
+
+[[bin]]
+name = "shellglass-sessions"
+path = "src/bin/sessions.rs"
+required-features = ["sessions"]
 
 [[bin]]
 name = "shellglass-gen-key"
