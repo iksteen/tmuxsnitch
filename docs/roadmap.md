@@ -438,6 +438,55 @@ at 0 in `Parser::new`.)
     win (faster but fidelity gaps) keeps it as a third mode, which is
     probably not worth carrying.
 
+## Hub management API
+
+An external tool manages the hub's session registry at runtime: add a
+session (by its public id, with an optional slug) and remove one — with
+removal-by-id and removal-by-slug as SEPARATE routes, because an un-aliased
+slug IS the id, so one ambiguous route could delete the wrong thing. API
+callers authenticate with the same key→argon2id-id mechanism sessions use,
+under a DIFFERENT salt: domain separation, so a leaked session key is not an
+API credential and vice versa.
+
+1. **API identity: a second salt domain.** `proto.rs`: refactor the argon2id
+   derivation to take the salt as a parameter; add
+   `API_SALT = b"shellglass/api-id/v1"` and `pub fn api_id(key)`. The
+   session salt is untouched (new *endpoints* need no bump — an old client
+   hits a loud 404, per the salt policy). `gen-key`/`print-id` gain `--api`
+   to mint/print in the API domain. Tests: determinism, and
+   `api_id(k) != session_id(k)` for the same key.
+2. **Runtime-mutable registry.** `hub.rs`: `AllowConfig` becomes the seed of
+   an `RwLock`-wrapped registry (`by_id`, `by_view`, plus a per-session kill
+   handle for the live `/push` WebSocket — the SIGTERM graceful path already
+   holds close handles; store them per session). `authorize` and the viewer
+   route lookups take read locks; the uniqueness/validation rules move from
+   `parse_allow`'s startup errors into insert results. Tests: existing hub
+   tests unchanged; add/remove racing authorize.
+3. **Endpoints, under `/api`** (the whole namespace 404s unless at least one
+   `--api-allow <api-id>` is configured — API off by default):
+   - `POST /api/sessions` `{"id": <64-hex>, "slug"?: <url-safe>}` → 201;
+     409 on id/slug collision; 400 malformed (same validation as
+     `parse_allow`). Takes the public session id, never a key — the hub
+     keeps never seeing secrets.
+   - `DELETE /api/sessions/by-id/{id}` and
+     `DELETE /api/sessions/by-slug/{slug}` — explicit by design (see
+     intro); 204 on removal, 404 unknown. Removal kicks the live pusher
+     (WS Close, reusing the shutdown machinery), drops the stored
+     CSS/fonts/render-config/matrix, ends viewer SSE streams; the view
+     route 404s afterward.
+   - `GET /api/sessions` → `[{id, slug, live}]` for external
+     reconciliation.
+   Auth: `Authorization: Bearer <key>` → `api_id(key)` membership in the
+   `--api-allow` set, behind the same argon2 semaphore and fail2ban-style
+   rejection logging as push auth. Verify: router integration tests
+   (add → push authorized; delete-by-slug ≠ delete-by-id; wrong-domain key
+   rejected; no `--api-allow` → 404) plus a curl e2e against a dev hub.
+4. **Semantics + docs.** Runtime-added sessions are EPHEMERAL — a hub
+   restart forgets them and the managing tool re-adds (it is the source of
+   truth; a persistence file is explicitly out of scope). Document the API,
+   `--api-allow`, and `gen-key --api` in the README hub section and flag
+   table.
+
 ## Canvas fidelity track
 
 Context: item-14 experiments — DOM is optimization-exhausted, canvas is ~5×
