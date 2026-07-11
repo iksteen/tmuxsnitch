@@ -754,17 +754,45 @@ function crtOn() {
     }
     return crtBox !== null && crtBox.checked;
 }
-function redrawCanvasRow(r) {
-    if (!ctx || !canvasEl)
-        return;
-    const y0 = Math.round(r * cellH * dpr);
-    const y1 = Math.round((r + 1) * cellH * dpr);
-    ctx.clearRect(0, y0, canvasEl.width, y1 - y0);
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, y0, canvasEl.width, y1 - y0);
-    ctx.clip();
-    const imgSpans = [];
+function rowMetrics(g, r) {
+    const baseY = rowBaseline(r);
+    const defBg = cfg.defBg.toLowerCase();
+    const th = Math.max(1, Math.round(fontPx * 0.06));
+    const ulOff = Math.max(th, Math.round(fontPx * 0.065));
+    return {
+        g,
+        r,
+        y0: Math.round(r * cellH * dpr),
+        y1: Math.round((r + 1) * cellH * dpr),
+        baseY,
+        blocky: screen.sty <= 2,
+        defBg,
+        defBgRgb: parseHex(defBg),
+        th,
+        amp: Math.max(1, Math.round(fontPx * 0.045)),
+        ulY: baseY + ulOff,
+        strikeY: baseY - Math.round(fontPx * 0.36),
+        imgSpans: [],
+        font: "",
+        run: null,
+        hasBlink: false,
+    };
+}
+function setFont(p, font) {
+    if (font !== p.font) {
+        p.g.font = font;
+        p.font = font;
+    }
+}
+function drawBoosted(g, k, draw) {
+    draw();
+    if (k > 0) {
+        g.globalAlpha = k;
+        draw();
+        g.globalAlpha = 1;
+    }
+}
+function drawRowImages(p) {
     for (const { ref, el } of screenImages) {
         const natW = el.naturalWidth;
         const natH = el.naturalHeight;
@@ -775,244 +803,235 @@ function redrawCanvasRow(r) {
             : dpr;
         const ix = ref.c * cellW * dpr;
         const iy = ref.r * cellH * dpr;
-        const top = Math.max(y0, iy);
-        const bot = Math.min(y1, iy + natH * sc);
+        const top = Math.max(p.y0, iy);
+        const bot = Math.min(p.y1, iy + natH * sc);
         if (bot <= top)
             continue;
-        ctx.drawImage(el, 0, (top - iy) / sc, natW, (bot - top) / sc, ix, top, natW * sc, bot - top);
-        imgSpans.push([ix, ix + natW * sc]);
+        p.g.drawImage(el, 0, (top - iy) / sc, natW, (bot - top) / sc, ix, top, natW * sc, bot - top);
+        p.imgSpans.push([ix, ix + natW * sc]);
     }
+}
+function drawCellBg(p, cell, bg, x0, x1) {
+    if (bg && hex(bg) !== p.defBg) {
+        p.g.fillStyle = hex(bg);
+        p.g.fillRect(x0, p.y0, x1 - x0, p.y1 - p.y0);
+    }
+    else if (p.imgSpans.length &&
+        ((cell.t && cell.t !== " ") || bg) &&
+        p.imgSpans.some(([a, b]) => x0 < b && x1 > a)) {
+        p.g.fillStyle = p.defBg;
+        p.g.fillRect(x0, p.y0, x1 - x0, p.y1 - p.y0);
+    }
+}
+function flushRun(p) {
+    const b = p.run;
+    if (b === null)
+        return;
+    p.run = null;
+    const g = p.g;
+    setFont(p, b.font);
+    g.fillStyle = b.fg;
+    const expected = b.xEnd - b.x0;
+    const gridSafe = b.cells.length > 1 &&
+        Math.abs(g.measureText(b.text).width - expected) <= Math.max(dpr, expected * 0.005);
+    drawBoosted(g, b.k, () => {
+        if (gridSafe) {
+            g.fillText(b.text, b.x0, p.baseY);
+        }
+        else {
+            for (const cc of b.cells)
+                g.fillText(cc.t, cc.x0, p.baseY, cc.x1 - cc.x0);
+        }
+    });
+}
+function drawCellText(p, cell, cp, curBlock, bg, x0, x1, w) {
+    const mapped = svgFont(cell);
+    const fam = mapped ?? fontFam;
+    const font = `${cell.i ? "italic " : ""}${cell.b ? "bold " : ""}${fontPx}px ${fam}`;
+    const fgRgb = cellFg(cell, curBlock);
+    const fg = hex(fgRgb);
+    const k = weightBoost(fgRgb, bg ?? p.defBgRgb);
+    const ink = isFillGlyph(cp) ? inkBox(font, cell.t) : null;
+    const overflow = ink === null && glyphOverflowsCell(cell.t, w) && !symbolFamily(cp);
+    if (ink !== null || overflow || mapped !== null || !runsOn) {
+        flushRun(p);
+        const g = p.g;
+        setFont(p, font);
+        g.fillStyle = fg;
+        drawBoosted(g, k, () => {
+            if (ink !== null) {
+                const sx = (x1 - x0) / (ink.l + ink.r);
+                const sy = (p.y1 - p.y0) / (ink.a + ink.d);
+                g.save();
+                g.translate(x0 + ink.l * sx, p.y0 + ink.a * sy);
+                g.scale(sx, sy);
+                g.fillText(cell.t, 0, 0);
+                g.restore();
+            }
+            else if (overflow) {
+                g.fillText(cell.t, x0, p.baseY);
+            }
+            else {
+                g.fillText(cell.t, x0, p.baseY, x1 - x0);
+            }
+        });
+    }
+    else {
+        if (p.run !== null &&
+            (p.run.font !== font || p.run.fg !== fg || p.run.k !== k || p.run.xEnd !== x0)) {
+            flushRun(p);
+        }
+        if (p.run === null)
+            p.run = { cells: [], text: "", x0, xEnd: x0, font, fg, k };
+        p.run.cells.push({ t: cell.t, x0, x1 });
+        p.run.text += cell.t;
+        p.run.xEnd = x1;
+    }
+}
+function drawUnderline(p, x0, x1, style, color, atY = p.ulY, gap = null) {
+    const g = p.g;
+    const th = p.th;
+    const depth = style === 2 ? 3 * th : style === 3 ? p.amp + th : th;
+    atY = Math.min(atY, p.y1 - depth);
+    g.fillStyle = color;
+    const segs = gap !== null && gap[0] < x1 && gap[1] > x0
+        ? [
+            [x0, Math.max(x0, gap[0])],
+            [Math.min(x1, gap[1]), x1],
+        ].filter(([a, b]) => b > a)
+        : [[x0, x1]];
+    for (const [s0, s1] of segs) {
+        switch (style) {
+            case 2:
+                g.fillRect(s0, atY, s1 - s0, th);
+                g.fillRect(s0, atY + 2 * th, s1 - s0, th);
+                break;
+            case 3: {
+                const period = Math.max(6, Math.round(fontPx * 0.5));
+                g.strokeStyle = color;
+                g.lineWidth = th;
+                g.beginPath();
+                const step = Math.max(1, Math.round(dpr));
+                for (let x = s0; x <= s1; x += step) {
+                    const y = atY + Math.sin((x * 2 * Math.PI) / period) * p.amp;
+                    if (x === s0)
+                        g.moveTo(x, y);
+                    else
+                        g.lineTo(x, y);
+                }
+                g.stroke();
+                break;
+            }
+            case 4:
+                for (let x = s0 - (s0 % (2 * th)); x < s1; x += 2 * th) {
+                    if (x >= s0)
+                        g.fillRect(x, atY, th, th);
+                }
+                break;
+            case 5:
+                for (let x = s0 - (s0 % (5 * th)); x < s1; x += 5 * th) {
+                    const lo = Math.max(x, s0);
+                    const hi = Math.min(x + 3 * th, s1);
+                    if (hi > lo)
+                        g.fillRect(lo, atY, hi - lo, th);
+                }
+                break;
+            default:
+                g.fillRect(s0, atY, s1 - s0, th);
+        }
+    }
+}
+function drawCellDecorations(p, cell, curBlock, hidden, x0, x1) {
+    if (!cell.u && !cell.s)
+        return;
+    const fg = hex(cellFg(cell, curBlock));
+    if (cell.u) {
+        const style = typeof cell.u === "number" ? cell.u : 1;
+        let gap = null;
+        if (style !== 3 && !hidden && cell.t && cell.t !== " ") {
+            const fam = svgFont(cell) ?? fontFam;
+            const font = `${cell.i ? "italic " : ""}${cell.b ? "bold " : ""}${fontPx}px ${fam}`;
+            const depth = style === 2 ? 3 * p.th : p.th;
+            const atY = Math.min(p.ulY, p.y1 - depth);
+            const span = descSpan(font, cell.t, atY - p.baseY, depth);
+            if (span !== null) {
+                gap = [x0 + span[0] - p.th, x0 + span[1] + p.th];
+            }
+        }
+        const ulColor = resolveRgb(cell.k);
+        drawUnderline(p, x0, x1, style, ulColor ? hex(ulColor) : fg, p.ulY, gap);
+    }
+    if (cell.s) {
+        p.g.fillStyle = fg;
+        p.g.fillRect(x0, p.strikeY, x1 - x0, p.th);
+    }
+}
+function drawRowBloom(p, canvas) {
+    const g = p.g;
+    g.save();
+    g.globalCompositeOperation = "lighter";
+    g.globalAlpha = 0.4;
+    g.filter = `blur(${1.5 * dpr}px)`;
+    g.drawImage(canvas, 0, p.y0, canvas.width, p.y1 - p.y0, 0, p.y0, canvas.width, p.y1 - p.y0);
+    g.restore();
+}
+function redrawCanvasRow(r) {
+    if (!ctx || !canvasEl)
+        return;
+    const p = rowMetrics(ctx, r);
+    ctx.clearRect(0, p.y0, canvasEl.width, p.y1 - p.y0);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, p.y0, canvasEl.width, p.y1 - p.y0);
+    ctx.clip();
+    drawRowImages(p);
     const row = screen.cells[r];
     if (!row) {
         ctx.restore();
         return;
     }
     ctx.textBaseline = "alphabetic";
-    const baseY = rowBaseline(r);
-    const defBg = cfg.defBg.toLowerCase();
-    const defBgRgb = parseHex(defBg);
-    const th = Math.max(1, Math.round(fontPx * 0.06));
-    const ulOff = Math.max(th, Math.round(fontPx * 0.065));
-    const amp = Math.max(1, Math.round(fontPx * 0.045));
-    const ulY = baseY + ulOff;
-    const strikeY = baseY - Math.round(fontPx * 0.36);
-    const drawUnderline = (x0, x1, style, color, atY = ulY, gap = null) => {
-        if (!ctx)
-            return;
-        const depth = style === 2 ? 3 * th : style === 3 ? amp + th : th;
-        atY = Math.min(atY, y1 - depth);
-        ctx.fillStyle = color;
-        const segs = gap !== null && gap[0] < x1 && gap[1] > x0
-            ? [
-                [x0, Math.max(x0, gap[0])],
-                [Math.min(x1, gap[1]), x1],
-            ].filter(([a, b]) => b > a)
-            : [[x0, x1]];
-        for (const [s0, s1] of segs) {
-            switch (style) {
-                case 2:
-                    ctx.fillRect(s0, atY, s1 - s0, th);
-                    ctx.fillRect(s0, atY + 2 * th, s1 - s0, th);
-                    break;
-                case 3: {
-                    const period = Math.max(6, Math.round(fontPx * 0.5));
-                    ctx.strokeStyle = color;
-                    ctx.lineWidth = th;
-                    ctx.beginPath();
-                    const step = Math.max(1, Math.round(dpr));
-                    for (let x = s0; x <= s1; x += step) {
-                        const y = atY + Math.sin((x * 2 * Math.PI) / period) * amp;
-                        if (x === s0)
-                            ctx.moveTo(x, y);
-                        else
-                            ctx.lineTo(x, y);
-                    }
-                    ctx.stroke();
-                    break;
-                }
-                case 4:
-                    for (let x = s0 - (s0 % (2 * th)); x < s1; x += 2 * th) {
-                        if (x >= s0)
-                            ctx.fillRect(x, atY, th, th);
-                    }
-                    break;
-                case 5:
-                    for (let x = s0 - (s0 % (5 * th)); x < s1; x += 5 * th) {
-                        const lo = Math.max(x, s0);
-                        const hi = Math.min(x + 3 * th, s1);
-                        if (hi > lo)
-                            ctx.fillRect(lo, atY, hi - lo, th);
-                    }
-                    break;
-                default:
-                    ctx.fillRect(s0, atY, s1 - s0, th);
-            }
-        }
-    };
-    let curFont = "";
-    const blocky = screen.sty <= 2;
-    let runBuf = null;
-    const flushRun = () => {
-        if (!ctx || runBuf === null)
-            return;
-        const b = runBuf;
-        runBuf = null;
-        if (b.font !== curFont) {
-            ctx.font = b.font;
-            curFont = b.font;
-        }
-        ctx.fillStyle = b.fg;
-        const expected = b.xEnd - b.x0;
-        const gridSafe = b.cells.length > 1 &&
-            Math.abs(ctx.measureText(b.text).width - expected) <= Math.max(dpr, expected * 0.005);
-        const drawText = () => {
-            if (!ctx)
-                return;
-            if (gridSafe) {
-                ctx.fillText(b.text, b.x0, baseY);
-            }
-            else {
-                for (const cc of b.cells)
-                    ctx.fillText(cc.t, cc.x0, baseY, cc.x1 - cc.x0);
-            }
-        };
-        drawText();
-        if (b.k > 0) {
-            ctx.globalAlpha = b.k;
-            drawText();
-            ctx.globalAlpha = 1;
-        }
-    };
-    let hasBlink = false;
     let c = 0;
     for (const cell of row) {
         const w = cell.w ? 2 : 1;
         const isCursor = curAnim === null && !!screen.cur && screen.cur[0] === r && screen.cur[1] === c;
-        const curBlock = isCursor && blocky;
+        const curBlock = isCursor && p.blocky;
         const x0 = Math.round(c * cellW * dpr);
         const x1 = Math.round((c + w) * cellW * dpr);
         const bg = cellBgRgb(cell, curBlock);
-        if (bg && hex(bg) !== defBg) {
-            ctx.fillStyle = hex(bg);
-            ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
-        }
-        else if (imgSpans.length &&
-            ((cell.t && cell.t !== " ") || bg) &&
-            imgSpans.some(([a, b]) => x0 < b && x1 > a)) {
-            ctx.fillStyle = defBg;
-            ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
-        }
+        drawCellBg(p, cell, bg, x0, x1);
         if (cell.x)
-            hasBlink = true;
+            p.hasBlink = true;
         const hidden = !!cell.o || (!!cell.x && blinkPhase);
         const cp = hidden ? 0 : cell.t ? cell.t.codePointAt(0) : 0;
         if (cp && isCanvasGlyph(cp) && !(cp >= 0xe000 && symbolFamily(cp))) {
-            flushRun();
+            flushRun(p);
             drawGlyph(r, c, cp, cell, curBlock);
         }
         else if (!hidden && cell.t && cell.t !== " ") {
-            const mapped = svgFont(cell);
-            const fam = mapped ?? fontFam;
-            const font = `${cell.i ? "italic " : ""}${cell.b ? "bold " : ""}${fontPx}px ${fam}`;
-            const fgRgb = cellFg(cell, curBlock);
-            const fg = hex(fgRgb);
-            const k = weightBoost(fgRgb, bg ?? defBgRgb);
-            const ink = isFillGlyph(cp) ? inkBox(font, cell.t) : null;
-            const overflow = ink === null && glyphOverflowsCell(cell.t, w) && !symbolFamily(cp);
-            if (ink !== null || overflow || mapped !== null || !runsOn) {
-                flushRun();
-                if (font !== curFont) {
-                    ctx.font = font;
-                    curFont = font;
-                }
-                ctx.fillStyle = fg;
-                const drawText = () => {
-                    if (!ctx)
-                        return;
-                    if (ink !== null) {
-                        const sx = (x1 - x0) / (ink.l + ink.r);
-                        const sy = (y1 - y0) / (ink.a + ink.d);
-                        ctx.save();
-                        ctx.translate(x0 + ink.l * sx, y0 + ink.a * sy);
-                        ctx.scale(sx, sy);
-                        ctx.fillText(cell.t, 0, 0);
-                        ctx.restore();
-                    }
-                    else if (overflow) {
-                        ctx.fillText(cell.t, x0, baseY);
-                    }
-                    else {
-                        ctx.fillText(cell.t, x0, baseY, x1 - x0);
-                    }
-                };
-                drawText();
-                if (k > 0) {
-                    ctx.globalAlpha = k;
-                    drawText();
-                    ctx.globalAlpha = 1;
-                }
-            }
-            else {
-                if (runBuf !== null &&
-                    (runBuf.font !== font || runBuf.fg !== fg || runBuf.k !== k || runBuf.xEnd !== x0)) {
-                    flushRun();
-                }
-                if (runBuf === null)
-                    runBuf = { cells: [], text: "", x0, xEnd: x0, font, fg, k };
-                runBuf.cells.push({ t: cell.t, x0, x1 });
-                runBuf.text += cell.t;
-                runBuf.xEnd = x1;
-            }
+            drawCellText(p, cell, cp, curBlock, bg, x0, x1, w);
         }
         else {
-            flushRun();
+            flushRun(p);
         }
-        if (cell.u || cell.s) {
-            const fg = hex(cellFg(cell, curBlock));
-            if (cell.u) {
-                const style = typeof cell.u === "number" ? cell.u : 1;
-                let gap = null;
-                if (style !== 3 && !hidden && cell.t && cell.t !== " ") {
-                    const fam = svgFont(cell) ?? fontFam;
-                    const font = `${cell.i ? "italic " : ""}${cell.b ? "bold " : ""}${fontPx}px ${fam}`;
-                    const depth = style === 2 ? 3 * th : th;
-                    const atY = Math.min(ulY, y1 - depth);
-                    const span = descSpan(font, cell.t, atY - baseY, depth);
-                    if (span !== null) {
-                        gap = [x0 + span[0] - th, x0 + span[1] + th];
-                    }
-                }
-                const ulColor = resolveRgb(cell.k);
-                drawUnderline(x0, x1, style, ulColor ? hex(ulColor) : fg, ulY, gap);
-            }
-            if (cell.s) {
-                ctx.fillStyle = fg;
-                ctx.fillRect(x0, strikeY, x1 - x0, th);
-            }
-        }
+        drawCellDecorations(p, cell, curBlock, hidden, x0, x1);
         if (r === hoverRow && cell.a !== undefined && cell.a === hoverA && !cell.u) {
-            drawUnderline(x0, x1, 1, hex(cellFg(cell, curBlock)));
+            drawUnderline(p, x0, x1, 1, hex(cellFg(cell, curBlock)));
         }
-        if (isCursor && !blocky) {
+        if (isCursor && !p.blocky) {
             const cw = Math.max(1, Math.round(fontPx * 0.14));
             ctx.fillStyle = hex(cellFg(cell, false));
             if (screen.sty >= 5)
-                ctx.fillRect(x0, y0, cw, y1 - y0);
+                ctx.fillRect(x0, p.y0, cw, p.y1 - p.y0);
             else
-                ctx.fillRect(x0, y1 - cw, x1 - x0, cw);
+                ctx.fillRect(x0, p.y1 - cw, x1 - x0, cw);
         }
         c += w;
     }
-    flushRun();
-    noteBlinkRow(r, hasBlink);
-    if (crtOn()) {
-        ctx.save();
-        ctx.globalCompositeOperation = "lighter";
-        ctx.globalAlpha = 0.4;
-        ctx.filter = `blur(${1.5 * dpr}px)`;
-        ctx.drawImage(canvasEl, 0, y0, canvasEl.width, y1 - y0, 0, y0, canvasEl.width, y1 - y0);
-        ctx.restore();
-    }
+    flushRun(p);
+    noteBlinkRow(r, p.hasBlink);
+    if (crtOn())
+        drawRowBloom(p, canvasEl);
     ctx.restore();
 }
 export function linkHref(links, id) {

@@ -1101,30 +1101,97 @@ function crtOn(): boolean {
   return crtBox !== null && crtBox.checked;
 }
 
-// Redraw one row's band of the canvas from screen.cells: clear to transparent
-// (the ghost text below is invisible, #screen supplies the backdrop, and a
-// selection highlight must show through), image slices, per-cell backgrounds,
-// then ink — crisp geometry for canvas glyphs, fillText for everything else
-// (maxWidth pins a glyph into its cell box). Self-contained: all ink is
-// clipped to the band, so a per-row redraw never disturbs neighbours.
-function redrawCanvasRow(r: number): void {
-  if (!ctx || !canvasEl) return;
-  const y0 = Math.round(r * cellH * dpr);
-  const y1 = Math.round((r + 1) * cellH * dpr);
-  ctx.clearRect(0, y0, canvasEl.width, y1 - y0);
-  // Clip all ink to the band — the cell-box model: a row owns its box.
-  // Without it, fonts whose bounding box is taller than the line height
-  // (Nerd Fonts, typically) paint descenders and low-riding decorations
-  // into the NEXT row's band, where the next repaint of either row wipes
-  // or restores them by turns — visible jitter on p/g/y tails and double
-  // underlines. Horizontal overflow (over-wide glyphs) stays free.
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(0, y0, canvasEl.width, y1 - y0);
-  ctx.clip();
-  // Image slices for this band, under the glyphs. Contain-fit anchored
-  // top-left (same math as the <img> overlay), one uniform scale s.
-  const imgSpans: [number, number][] = [];
+// ── the row painter ───────────────────────────────────────────────────────────
+//
+// redrawCanvasRow at the bottom orchestrates; each phase is a function taking
+// the per-row context below. Draw order is load-bearing: images, then per cell
+// bg → ink → decorations (the shaped-text run DEFERS its ink until the run
+// breaks, so a run's glyphs may land after later cells' bgs/decorations — by
+// design, the run never overlaps those cells horizontally).
+
+// Per-row paint context: geometry, metrics, and pending paint state.
+interface RowPaint {
+  g: CanvasRenderingContext2D;
+  r: number;
+  y0: number;
+  y1: number;
+  baseY: number; // the row's strut baseline (rowBaseline)
+  blocky: boolean; // DECSCUSR 0-2: the cursor reverses its cell's colors
+  defBg: string; // lowercased hex of the default bg
+  defBgRgb: RGB;
+  // Decoration metrics, CSS-text-decoration-sized: thickness ~6% of the em,
+  // underline just below the baseline, strike through the x-height.
+  th: number;
+  amp: number; // curly-underline amplitude
+  ulY: number;
+  strikeY: number;
+  imgSpans: [number, number][]; // x-extents of image slices drawn in this band
+  font: string; // ctx.font cache — change fonts through setFont only
+  run: TextRun | null; // the pending shaped-text run (D.2)
+  hasBlink: boolean;
+}
+
+// Run-shaped text (D.2): the pending same-style run. Flushed as one fillText
+// when the grid guard holds — a terminal ligature font designs its multi-cell
+// glyphs to span exactly their cells, so the shaped width must equal the grid
+// width; a proportional fallback that would break the grid falls back to
+// per-cell draws with the maxWidth clamp.
+interface TextRun {
+  cells: { t: string; x0: number; x1: number }[];
+  text: string;
+  x0: number;
+  xEnd: number;
+  font: string;
+  fg: string;
+  k: number;
+}
+
+function rowMetrics(g: CanvasRenderingContext2D, r: number): RowPaint {
+  const baseY = rowBaseline(r);
+  const defBg = cfg.defBg.toLowerCase();
+  const th = Math.max(1, Math.round(fontPx * 0.06));
+  const ulOff = Math.max(th, Math.round(fontPx * 0.065));
+  return {
+    g,
+    r,
+    y0: Math.round(r * cellH * dpr),
+    y1: Math.round((r + 1) * cellH * dpr),
+    baseY,
+    blocky: screen.sty <= 2,
+    defBg,
+    defBgRgb: parseHex(defBg),
+    th,
+    amp: Math.max(1, Math.round(fontPx * 0.045)),
+    ulY: baseY + ulOff,
+    strikeY: baseY - Math.round(fontPx * 0.36),
+    imgSpans: [],
+    font: "",
+    run: null,
+    hasBlink: false,
+  };
+}
+
+function setFont(p: RowPaint, font: string): void {
+  if (font !== p.font) {
+    p.g.font = font;
+    p.font = font;
+  }
+}
+
+// kitty-parity composition (D.1): draw, then re-composite the same ink at
+// alpha k to boost AA midtones — see weightBoost. k = 0 draws plainly.
+function drawBoosted(g: CanvasRenderingContext2D, k: number, draw: () => void): void {
+  draw();
+  if (k > 0) {
+    g.globalAlpha = k;
+    draw();
+    g.globalAlpha = 1;
+  }
+}
+
+// Image slices for this band, under the glyphs. Contain-fit anchored
+// top-left (same math as the hidden <img>'s layout rule), one uniform scale.
+function drawRowImages(p: RowPaint): void {
   for (const { ref, el } of screenImages) {
     const natW = el.naturalWidth;
     const natH = el.naturalHeight;
@@ -1135,12 +1202,266 @@ function redrawCanvasRow(r: number): void {
         : dpr; // no cell box: natural CSS-pixel size
     const ix = ref.c * cellW * dpr;
     const iy = ref.r * cellH * dpr;
-    const top = Math.max(y0, iy);
-    const bot = Math.min(y1, iy + natH * sc);
+    const top = Math.max(p.y0, iy);
+    const bot = Math.min(p.y1, iy + natH * sc);
     if (bot <= top) continue;
-    ctx.drawImage(el, 0, (top - iy) / sc, natW, (bot - top) / sc, ix, top, natW * sc, bot - top);
-    imgSpans.push([ix, ix + natW * sc]);
+    p.g.drawImage(el, 0, (top - iy) / sc, natW, (bot - top) / sc, ix, top, natW * sc, bot - top);
+    p.imgSpans.push([ix, ix + natW * sc]);
   }
+}
+
+// The cell's background fill, or the default-bg fill of a written cell that
+// sits over an image.
+function drawCellBg(p: RowPaint, cell: Cell, bg: RGB | null, x0: number, x1: number): void {
+  // Skip fills that match the default bg (apps often set it explicitly — ncurses
+  // color pairs): #screen already shows that color, and an opaque fill here would
+  // blanket the selection highlight painting in the ghost layer below.
+  if (bg && hex(bg) !== p.defBg) {
+    p.g.fillStyle = hex(bg);
+    p.g.fillRect(x0, p.y0, x1 - x0, p.y1 - p.y0);
+  } else if (
+    p.imgSpans.length &&
+    ((cell.t && cell.t !== " ") || bg) &&
+    p.imgSpans.some(([a, b]) => x0 < b && x1 > a)
+  ) {
+    // A written cell over an image paints its bg like a real cell terminal
+    // (the default-bg skip above is only a selection-highlight courtesy).
+    // Untouched blank cells keep showing the image — the wire doesn't say
+    // written-blank vs never-touched, so blanks stay transparent.
+    p.g.fillStyle = p.defBg;
+    p.g.fillRect(x0, p.y0, x1 - x0, p.y1 - p.y0);
+  }
+}
+
+function flushRun(p: RowPaint): void {
+  const b = p.run;
+  if (b === null) return;
+  p.run = null;
+  const g = p.g;
+  setFont(p, b.font);
+  g.fillStyle = b.fg;
+  const expected = b.xEnd - b.x0;
+  // single cells can't shape — skip the measure, keep the old clamp path
+  const gridSafe =
+    b.cells.length > 1 &&
+    Math.abs(g.measureText(b.text).width - expected) <= Math.max(dpr, expected * 0.005);
+  drawBoosted(g, b.k, () => {
+    if (gridSafe) {
+      g.fillText(b.text, b.x0, p.baseY);
+    } else {
+      for (const cc of b.cells) g.fillText(cc.t, cc.x0, p.baseY, cc.x1 - cc.x0);
+    }
+  });
+}
+
+// A text cell's ink: fit-to-cell fill glyphs, over-wide fallback glyphs and
+// symbol_map cells draw per cell immediately; everything else accumulates
+// into the shaped run (flushed on a style/position break).
+function drawCellText(
+  p: RowPaint,
+  cell: Cell,
+  cp: number,
+  curBlock: boolean,
+  bg: RGB | null,
+  x0: number,
+  x1: number,
+  w: number,
+): void {
+  // symbol_map / fill-glyph cells draw with their mapped family — the
+  // served webfonts, once loaded, exactly as the page's CSS stack resolves.
+  const mapped = svgFont(cell);
+  const fam = mapped ?? fontFam;
+  const font = `${cell.i ? "italic " : ""}${cell.b ? "bold " : ""}${fontPx}px ${fam}`;
+  const fgRgb = cellFg(cell, curBlock);
+  const fg = hex(fgRgb);
+  const k = weightBoost(fgRgb, bg ?? p.defBgRgb);
+  const ink = isFillGlyph(cp) ? inkBox(font, cell.t!) : null;
+  const overflow = ink === null && glyphOverflowsCell(cell.t!, w) && !symbolFamily(cp);
+  if (ink !== null || overflow || mapped !== null || !runsOn) {
+    // fit-to-cell / overflow / symbol_map cells keep their per-cell
+    // geometry — shaping across them makes no sense
+    flushRun(p);
+    const g = p.g;
+    setFont(p, font);
+    g.fillStyle = fg;
+    drawBoosted(g, k, () => {
+      if (ink !== null) {
+        // Fill glyphs tile the cell: map the glyph's ink box onto the exact
+        // cell rect, so separators and block fills leave no hairline gaps.
+        const sx = (x1 - x0) / (ink.l + ink.r);
+        const sy = (p.y1 - p.y0) / (ink.a + ink.d);
+        g.save();
+        g.translate(x0 + ink.l * sx, p.y0 + ink.a * sy);
+        g.scale(sx, sy);
+        g.fillText(cell.t!, 0, 0);
+        g.restore();
+      } else if (overflow) {
+        // Over-wide fallback glyphs overflow their cell visibly (the
+        // neighbour is near-always blank) — no maxWidth squeeze, which
+        // would distort the glyph into 1ch.
+        g.fillText(cell.t!, x0, p.baseY);
+      } else {
+        g.fillText(cell.t!, x0, p.baseY, x1 - x0);
+      }
+    });
+  } else {
+    // Run-shaped text (D.2): contiguous same-style cells accumulate and
+    // draw as ONE fillText so the browser's shaper forms ligatures and
+    // joins scripts — per-cell draws can't.
+    if (
+      p.run !== null &&
+      (p.run.font !== font || p.run.fg !== fg || p.run.k !== k || p.run.xEnd !== x0)
+    ) {
+      flushRun(p);
+    }
+    if (p.run === null) p.run = { cells: [], text: "", x0, xEnd: x0, font, fg, k };
+    p.run.cells.push({ t: cell.t!, x0, x1 });
+    p.run.text += cell.t!;
+    p.run.xEnd = x1;
+  }
+}
+
+// Underline in the cell's style (kitty numbering), honoring SGR 58 color.
+// `gap` (device px, absolute) parts the line around descender ink — the
+// exclusion zone from descSpan. Curly keeps drawing through: it is a
+// stroked path, and kitty's own curl sits low enough that its exclusion
+// rarely triggers; segmenting a sine is not worth the fidelity delta.
+function drawUnderline(
+  p: RowPaint,
+  x0: number,
+  x1: number,
+  style: number,
+  color: string,
+  atY = p.ulY,
+  gap: [number, number] | null = null,
+): void {
+  const g = p.g;
+  const th = p.th;
+  // in-cell clamp: the deepest ink of each style stays inside the band,
+  // like kitty clamping the font's underline position into the cell
+  const depth = style === 2 ? 3 * th : style === 3 ? p.amp + th : th;
+  atY = Math.min(atY, p.y1 - depth);
+  g.fillStyle = color;
+  // the un-excluded segments of [x0, x1]
+  const segs: [number, number][] =
+    gap !== null && gap[0] < x1 && gap[1] > x0
+      ? ([
+          [x0, Math.max(x0, gap[0])],
+          [Math.min(x1, gap[1]), x1],
+        ].filter(([a, b]) => b > a) as [number, number][])
+      : [[x0, x1]];
+  for (const [s0, s1] of segs) {
+    switch (style) {
+      case 2: // double
+        g.fillRect(s0, atY, s1 - s0, th);
+        g.fillRect(s0, atY + 2 * th, s1 - s0, th);
+        break;
+      case 3: {
+        // curly: sampled sine, phase from absolute x so adjacent cells join
+        const period = Math.max(6, Math.round(fontPx * 0.5));
+        g.strokeStyle = color;
+        g.lineWidth = th;
+        g.beginPath();
+        const step = Math.max(1, Math.round(dpr));
+        for (let x = s0; x <= s1; x += step) {
+          const y = atY + Math.sin((x * 2 * Math.PI) / period) * p.amp;
+          if (x === s0) g.moveTo(x, y);
+          else g.lineTo(x, y);
+        }
+        g.stroke();
+        break;
+      }
+      case 4: // dotted: th-square dots, one per 2th, phase-locked to x
+        for (let x = s0 - (s0 % (2 * th)); x < s1; x += 2 * th) {
+          if (x >= s0) g.fillRect(x, atY, th, th);
+        }
+        break;
+      case 5: // dashed: 3th on, 2th off, phase-locked to x
+        for (let x = s0 - (s0 % (5 * th)); x < s1; x += 5 * th) {
+          const lo = Math.max(x, s0);
+          const hi = Math.min(x + 3 * th, s1);
+          if (hi > lo) g.fillRect(lo, atY, hi - lo, th);
+        }
+        break;
+      default: // single
+        g.fillRect(s0, atY, s1 - s0, th);
+    }
+  }
+}
+
+// Decorations: underline in the cell's style and SGR 58 color, strikethrough
+// through the x-height. Cell-level, not glyph-level — a terminal decorates
+// the cell, so spaces and box glyphs carry their line too.
+function drawCellDecorations(
+  p: RowPaint,
+  cell: Cell,
+  curBlock: boolean,
+  hidden: boolean,
+  x0: number,
+  x1: number,
+): void {
+  if (!cell.u && !cell.s) return;
+  const fg = hex(cellFg(cell, curBlock));
+  if (cell.u) {
+    const style = typeof cell.u === "number" ? cell.u : 1;
+    // Underline exclusion (D.4): part the line around descender ink,
+    // kitty-style. Only for VISIBLE glyphs (a concealed cell keeps its
+    // line whole) and non-curly styles (see drawUnderline).
+    let gap: [number, number] | null = null;
+    if (style !== 3 && !hidden && cell.t && cell.t !== " ") {
+      const fam = svgFont(cell) ?? fontFam;
+      const font = `${cell.i ? "italic " : ""}${cell.b ? "bold " : ""}${fontPx}px ${fam}`;
+      const depth = style === 2 ? 3 * p.th : p.th;
+      const atY = Math.min(p.ulY, p.y1 - depth);
+      const span = descSpan(font, cell.t, atY - p.baseY, depth);
+      if (span !== null) {
+        // pad by one underline thickness, kitty's default exclusion
+        gap = [x0 + span[0] - p.th, x0 + span[1] + p.th];
+      }
+    }
+    const ulColor = resolveRgb(cell.k);
+    drawUnderline(p, x0, x1, style, ulColor ? hex(ulColor) : fg, p.ulY, gap);
+  }
+  if (cell.s) {
+    p.g.fillStyle = fg;
+    p.g.fillRect(x0, p.strikeY, x1 - x0, p.th);
+  }
+}
+
+// Phosphor bloom (CRT toggle): blurred lighter self-composite of the row
+// band, glowing in the ink's own color. Per-row, not per-flush over the full
+// canvas — undirtied rows must not be re-brightened every flush.
+function drawRowBloom(p: RowPaint, canvas: HTMLCanvasElement): void {
+  const g = p.g;
+  g.save();
+  g.globalCompositeOperation = "lighter";
+  g.globalAlpha = 0.4;
+  g.filter = `blur(${1.5 * dpr}px)`;
+  g.drawImage(canvas, 0, p.y0, canvas.width, p.y1 - p.y0, 0, p.y0, canvas.width, p.y1 - p.y0);
+  g.restore();
+}
+
+// Redraw one row's band of the canvas from screen.cells: clear to transparent
+// (the ghost text below is invisible, #screen supplies the backdrop, and a
+// selection highlight must show through), image slices, then per cell:
+// background, ink (crisp geometry for canvas glyphs, fillText for everything
+// else), decorations, hover affordance, cursor shape. Self-contained: all ink
+// is clipped to the band, so a per-row redraw never disturbs neighbours.
+function redrawCanvasRow(r: number): void {
+  if (!ctx || !canvasEl) return;
+  const p = rowMetrics(ctx, r);
+  ctx.clearRect(0, p.y0, canvasEl.width, p.y1 - p.y0);
+  // Clip all ink to the band — the cell-box model: a row owns its box.
+  // Without it, fonts whose bounding box is taller than the line height
+  // (Nerd Fonts, typically) paint descenders and low-riding decorations
+  // into the NEXT row's band, where the next repaint of either row wipes
+  // or restores them by turns — visible jitter on p/g/y tails and double
+  // underlines. Horizontal overflow (over-wide glyphs) stays free.
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, p.y0, canvasEl.width, p.y1 - p.y0);
+  ctx.clip();
+  drawRowImages(p);
   const row = screen.cells[r];
   if (!row) {
     ctx.restore();
@@ -1149,288 +1470,47 @@ function redrawCanvasRow(r: number): void {
   // Alphabetic at the row's strut baseline — the DOM line box's own
   // arithmetic, so canvas text sits exactly where the ghost text would.
   ctx.textBaseline = "alphabetic";
-  const baseY = rowBaseline(r);
-  const defBg = cfg.defBg.toLowerCase();
-  const defBgRgb = parseHex(defBg);
-  // Decoration metrics, CSS-text-decoration-sized: thickness ~6% of the em,
-  // underline just below the baseline, strike through the x-height.
-  const th = Math.max(1, Math.round(fontPx * 0.06));
-  const ulOff = Math.max(th, Math.round(fontPx * 0.065));
-  const amp = Math.max(1, Math.round(fontPx * 0.045));
-  const ulY = baseY + ulOff;
-  const strikeY = baseY - Math.round(fontPx * 0.36);
-  // Underline in the cell's style (kitty numbering), honoring SGR 58 color.
-  // `gap` (device px, absolute) parts the line around descender ink — the
-  // exclusion zone from descSpan. Curly keeps drawing through: it is a
-  // stroked path, and kitty's own curl sits low enough that its exclusion
-  // rarely triggers; segmenting a sine is not worth the fidelity delta.
-  const drawUnderline = (
-    x0: number,
-    x1: number,
-    style: number,
-    color: string,
-    atY = ulY,
-    gap: [number, number] | null = null,
-  ) => {
-    if (!ctx) return;
-    // in-cell clamp: the deepest ink of each style stays inside the band,
-    // like kitty clamping the font's underline position into the cell
-    const depth = style === 2 ? 3 * th : style === 3 ? amp + th : th;
-    atY = Math.min(atY, y1 - depth);
-    ctx.fillStyle = color;
-    // the un-excluded segments of [x0, x1]
-    const segs: [number, number][] =
-      gap !== null && gap[0] < x1 && gap[1] > x0
-        ? ([
-            [x0, Math.max(x0, gap[0])],
-            [Math.min(x1, gap[1]), x1],
-          ].filter(([a, b]) => b > a) as [number, number][])
-        : [[x0, x1]];
-    for (const [s0, s1] of segs) {
-      switch (style) {
-        case 2: // double
-          ctx.fillRect(s0, atY, s1 - s0, th);
-          ctx.fillRect(s0, atY + 2 * th, s1 - s0, th);
-          break;
-        case 3: {
-          // curly: sampled sine, phase from absolute x so adjacent cells join
-          const period = Math.max(6, Math.round(fontPx * 0.5));
-          ctx.strokeStyle = color;
-          ctx.lineWidth = th;
-          ctx.beginPath();
-          const step = Math.max(1, Math.round(dpr));
-          for (let x = s0; x <= s1; x += step) {
-            const y = atY + Math.sin((x * 2 * Math.PI) / period) * amp;
-            if (x === s0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-          }
-          ctx.stroke();
-          break;
-        }
-        case 4: // dotted: th-square dots, one per 2th, phase-locked to x
-          for (let x = s0 - (s0 % (2 * th)); x < s1; x += 2 * th) {
-            if (x >= s0) ctx.fillRect(x, atY, th, th);
-          }
-          break;
-        case 5: // dashed: 3th on, 2th off, phase-locked to x
-          for (let x = s0 - (s0 % (5 * th)); x < s1; x += 5 * th) {
-            const lo = Math.max(x, s0);
-            const hi = Math.min(x + 3 * th, s1);
-            if (hi > lo) ctx.fillRect(lo, atY, hi - lo, th);
-          }
-          break;
-        default: // single
-          ctx.fillRect(s0, atY, s1 - s0, th);
-      }
-    }
-  };
-  let curFont = "";
-  // Block cursors reverse the cell, like a terminal's; underline/bar cursors
-  // draw their shape and leave the colors alone.
-  const blocky = screen.sty <= 2;
-  // Run-shaped text (D.2): the pending same-style run. Flushed as one
-  // fillText when the grid guard holds — a terminal ligature font designs
-  // its multi-cell glyphs to span exactly their cells, so the shaped width
-  // must equal the grid width; a proportional fallback that would break the
-  // grid falls back to per-cell draws with the maxWidth clamp.
-  let runBuf: {
-    cells: { t: string; x0: number; x1: number }[];
-    text: string;
-    x0: number;
-    xEnd: number;
-    font: string;
-    fg: string;
-    k: number;
-  } | null = null;
-  const flushRun = (): void => {
-    if (!ctx || runBuf === null) return;
-    const b = runBuf;
-    runBuf = null;
-    if (b.font !== curFont) {
-      ctx.font = b.font;
-      curFont = b.font;
-    }
-    ctx.fillStyle = b.fg;
-    const expected = b.xEnd - b.x0;
-    // single cells can't shape — skip the measure, keep the old clamp path
-    const gridSafe =
-      b.cells.length > 1 &&
-      Math.abs(ctx.measureText(b.text).width - expected) <= Math.max(dpr, expected * 0.005);
-    const drawText = (): void => {
-      if (!ctx) return;
-      if (gridSafe) {
-        ctx.fillText(b.text, b.x0, baseY);
-      } else {
-        for (const cc of b.cells) ctx.fillText(cc.t, cc.x0, baseY, cc.x1 - cc.x0);
-      }
-    };
-    drawText();
-    // kitty-parity composition (D.1): boost AA midtones — see weightBoost
-    if (b.k > 0) {
-      ctx.globalAlpha = b.k;
-      drawText();
-      ctx.globalAlpha = 1;
-    }
-  };
-  let hasBlink = false;
   let c = 0;
   for (const cell of row) {
     const w = cell.w ? 2 : 1;
     const isCursor =
       curAnim === null && !!screen.cur && screen.cur[0] === r && screen.cur[1] === c;
-    const curBlock = isCursor && blocky;
+    // Block cursors reverse the cell, like a terminal's; underline/bar
+    // cursors draw their shape below and leave the colors alone.
+    const curBlock = isCursor && p.blocky;
     const x0 = Math.round(c * cellW * dpr);
     const x1 = Math.round((c + w) * cellW * dpr);
     const bg = cellBgRgb(cell, curBlock);
-    // Skip fills that match the default bg (apps often set it explicitly — ncurses
-    // color pairs): #screen already shows that color, and an opaque fill here would
-    // blanket the selection highlight painting in the ghost layer below.
-    if (bg && hex(bg) !== defBg) {
-      ctx.fillStyle = hex(bg);
-      ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
-    } else if (
-      imgSpans.length &&
-      ((cell.t && cell.t !== " ") || bg) &&
-      imgSpans.some(([a, b]) => x0 < b && x1 > a)
-    ) {
-      // A written cell over an image paints its bg like a real cell terminal
-      // (the default-bg skip above is only a selection-highlight courtesy).
-      // Untouched blank cells keep showing the image — the wire doesn't say
-      // written-blank vs never-touched, so blanks stay transparent.
-      ctx.fillStyle = defBg;
-      ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
-    }
-    if (cell.x) hasBlink = true;
+    drawCellBg(p, cell, bg, x0, x1);
+    if (cell.x) p.hasBlink = true;
     const hidden = !!cell.o || (!!cell.x && blinkPhase); // conceal / blink-off phase
     const cp = hidden ? 0 : cell.t ? cell.t.codePointAt(0)! : 0;
     if (cp && isCanvasGlyph(cp) && !(cp >= 0xe000 && symbolFamily(cp))) {
-      flushRun();
+      flushRun(p);
       drawGlyph(r, c, cp, cell, curBlock);
     } else if (!hidden && cell.t && cell.t !== " ") {
-      // symbol_map / fill-glyph cells draw with their mapped family — the
-      // served webfonts, once loaded, exactly as the page's CSS stack resolves.
-      const mapped = svgFont(cell);
-      const fam = mapped ?? fontFam;
-      const font = `${cell.i ? "italic " : ""}${cell.b ? "bold " : ""}${fontPx}px ${fam}`;
-      const fgRgb = cellFg(cell, curBlock);
-      const fg = hex(fgRgb);
-      const k = weightBoost(fgRgb, bg ?? defBgRgb);
-      const ink = isFillGlyph(cp) ? inkBox(font, cell.t) : null;
-      const overflow = ink === null && glyphOverflowsCell(cell.t, w) && !symbolFamily(cp);
-      if (ink !== null || overflow || mapped !== null || !runsOn) {
-        // fit-to-cell / overflow / symbol_map cells keep their per-cell
-        // geometry — shaping across them makes no sense
-        flushRun();
-        if (font !== curFont) {
-          ctx.font = font;
-          curFont = font;
-        }
-        ctx.fillStyle = fg;
-        const drawText = (): void => {
-          if (!ctx) return;
-          if (ink !== null) {
-            // Fill glyphs tile the cell like the DOM's stretched SVG: map the
-            // glyph's ink box onto the exact cell rect, so separators and
-            // block fills leave no hairline gaps.
-            const sx = (x1 - x0) / (ink.l + ink.r);
-            const sy = (y1 - y0) / (ink.a + ink.d);
-            ctx.save();
-            ctx.translate(x0 + ink.l * sx, y0 + ink.a * sy);
-            ctx.scale(sx, sy);
-            ctx.fillText(cell.t!, 0, 0);
-            ctx.restore();
-          } else if (overflow) {
-            // Over-wide fallback glyphs overflow their cell visibly (the
-            // neighbour is near-always blank) — no maxWidth squeeze, which
-            // would distort the glyph into 1ch.
-            ctx.fillText(cell.t!, x0, baseY);
-          } else {
-            ctx.fillText(cell.t!, x0, baseY, x1 - x0);
-          }
-        };
-        drawText();
-        // kitty-parity composition (D.1): boost AA midtones — see weightBoost
-        if (k > 0) {
-          ctx.globalAlpha = k;
-          drawText();
-          ctx.globalAlpha = 1;
-        }
-      } else {
-        // Run-shaped text (D.2): contiguous same-style cells accumulate and
-        // draw as ONE fillText so the browser's shaper forms ligatures and
-        // joins scripts — per-cell draws can't.
-        if (
-          runBuf !== null &&
-          (runBuf.font !== font || runBuf.fg !== fg || runBuf.k !== k || runBuf.xEnd !== x0)
-        ) {
-          flushRun();
-        }
-        if (runBuf === null) runBuf = { cells: [], text: "", x0, xEnd: x0, font, fg, k };
-        runBuf.cells.push({ t: cell.t, x0, x1 });
-        runBuf.text += cell.t;
-        runBuf.xEnd = x1;
-      }
+      drawCellText(p, cell, cp, curBlock, bg, x0, x1, w);
     } else {
-      flushRun(); // blanks, spaces and hidden cells end the shaping run
+      flushRun(p); // blanks, spaces and hidden cells end the shaping run
     }
-    // Decorations: underline in the cell's style and SGR 58 color,
-    // strikethrough through the x-height. Cell-level, not inside the text
-    // branch — a terminal decorates the cell, not the glyph, so spaces and
-    // box glyphs carry their line too.
-    if (cell.u || cell.s) {
-      const fg = hex(cellFg(cell, curBlock));
-      if (cell.u) {
-        const style = typeof cell.u === "number" ? cell.u : 1;
-        // Underline exclusion (D.4): part the line around descender ink,
-        // kitty-style. Only for VISIBLE glyphs (a concealed cell keeps its
-        // line whole) and non-curly styles (see drawUnderline).
-        let gap: [number, number] | null = null;
-        if (style !== 3 && !hidden && cell.t && cell.t !== " ") {
-          const fam = svgFont(cell) ?? fontFam;
-          const font = `${cell.i ? "italic " : ""}${cell.b ? "bold " : ""}${fontPx}px ${fam}`;
-          const depth = style === 2 ? 3 * th : th;
-          const atY = Math.min(ulY, y1 - depth);
-          const span = descSpan(font, cell.t, atY - baseY, depth);
-          if (span !== null) {
-            // pad by one underline thickness, kitty's default exclusion
-            gap = [x0 + span[0] - th, x0 + span[1] + th];
-          }
-        }
-        const ulColor = resolveRgb(cell.k);
-        drawUnderline(x0, x1, style, ulColor ? hex(ulColor) : fg, ulY, gap);
-      }
-      if (cell.s) {
-        ctx.fillStyle = fg;
-        ctx.fillRect(x0, strikeY, x1 - x0, th);
-      }
-    }
+    drawCellDecorations(p, cell, curBlock, hidden, x0, x1);
     // kitty's hover affordance — cell-level, so spaces inside a link underline too
     if (r === hoverRow && cell.a !== undefined && cell.a === hoverA && !cell.u) {
-      drawUnderline(x0, x1, 1, hex(cellFg(cell, curBlock)));
+      drawUnderline(p, x0, x1, 1, hex(cellFg(cell, curBlock)));
     }
-    if (isCursor && !blocky) {
+    if (isCursor && !p.blocky) {
       // DECSCUSR underline (3/4) or bar (5/6) cursor, 0.14em thick, in the
       // cell's un-reversed fg.
       const cw = Math.max(1, Math.round(fontPx * 0.14));
       ctx.fillStyle = hex(cellFg(cell, false));
-      if (screen.sty >= 5) ctx.fillRect(x0, y0, cw, y1 - y0);
-      else ctx.fillRect(x0, y1 - cw, x1 - x0, cw);
+      if (screen.sty >= 5) ctx.fillRect(x0, p.y0, cw, p.y1 - p.y0);
+      else ctx.fillRect(x0, p.y1 - cw, x1 - x0, cw);
     }
     c += w;
   }
-  flushRun();
-  noteBlinkRow(r, hasBlink);
-  if (crtOn()) {
-    // Phosphor bloom: blurred lighter self-composite of the row band, glowing
-    // in the ink's own color. Per-row, not per-flush over the full canvas —
-    // undirtied rows must not be re-brightened every flush.
-    ctx.save();
-    ctx.globalCompositeOperation = "lighter";
-    ctx.globalAlpha = 0.4;
-    ctx.filter = `blur(${1.5 * dpr}px)`;
-    ctx.drawImage(canvasEl, 0, y0, canvasEl.width, y1 - y0, 0, y0, canvasEl.width, y1 - y0);
-    ctx.restore();
-  }
+  flushRun(p);
+  noteBlinkRow(r, p.hasBlink);
+  if (crtOn()) drawRowBloom(p, canvasEl);
   ctx.restore(); // the band clip
 }
 
