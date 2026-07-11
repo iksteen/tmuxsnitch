@@ -52,12 +52,19 @@ Shell B — the client:
 ```sh
 export SHELLGLASS_KEY='<the key>'
 ./target/release/shellglass push http://127.0.0.1:8080 -- bash -l
-# shellglass: pushing live to http://127.0.0.1:8080; view at http://127.0.0.1:8080/s/<id>
 ```
 
-Open the printed `/s/<id>` URL. Viewing needs only the URL; pushing needs the
-secret — a key whose id isn't registered is rejected with `403` at startup. For
-access from other machines, bind `0.0.0.0:8080` and use the host's address.
+The **hub** announces the view URL when the session connects:
+
+```
+shellglass: session connected — view at http://127.0.0.1:8080/s/<id>/
+```
+
+(The hub is the authority on view URLs — only it knows the slug and its own
+public address; the client just pushes.) Viewing needs only the URL; pushing
+needs the secret — a key whose id isn't registered is rejected with `403` at
+startup. For access from other machines, bind `0.0.0.0:8080` and use the
+host's address.
 
 **Friendlier view URLs.** `--allow <id>:<slug>` (e.g. `--allow "$ID:demo"`) serves
 the session at `/s/demo` instead of `/s/<64-hex-id>` — the slug becomes the *only*
@@ -92,7 +99,7 @@ Flags by command:
 | `--api-allow <api-id>` | hub | an API id permitted to call the session-management API; repeat per caller. Without it, `/api` is off (404) |
 | `--sessions-file <path>` | hub | persist the session registry across restarts (see [Managing hub sessions](#managing-hub-sessions-over-http)) |
 | `--api` | gen-key, print-id | mint/print in the API salt domain (for `--api-allow`) instead of the session domain |
-| `--id-salt <ext>` | hub, gen-key, print-id, push | optional per-system salt extension (or `SHELLGLASS_ID_SALT`); one value per hub, used by every command deriving ids for it — see [security notes](#security-notes) |
+| `--id-salt <ext>` | hub, gen-key, print-id | optional per-system salt extension (or `SHELLGLASS_ID_SALT`); one value per hub, used by every command deriving ids for it — see [security notes](#security-notes) |
 | `--tls-cert <path>` / `--tls-key <path>` | hub | serve HTTPS with your own PEM cert chain + key |
 | `--acme-domain <d>` | hub | auto-obtain a cert via ACME/Let's Encrypt (repeat per domain) |
 | `--acme-email <e>` | hub | contact email for the ACME account |
@@ -342,10 +349,10 @@ as its view URL — see the security notes below.
   deployments at once. `--id-salt <ext>` (optional) extends the salt
   per-system, closing both — with `gen-key`'s random keys neither attack
   applies and the flag adds nothing. One value per hub, used by `hub`,
-  `gen-key`, `print-id` **and** `push` (push auth sends the key itself, but a
-  mismatched pusher prints a wrong view URL). It is not a secret; set it once
-  and keep it — changing it invalidates every registered id, which doubles as
-  a deliberate mass-revocation lever.
+  `gen-key` and `print-id` (`push` doesn't derive ids at all — it sends the
+  key, and the hub hashes it). It is not a secret; set it once and keep it —
+  changing it invalidates every registered id, which doubles as a deliberate
+  mass-revocation lever.
 - The secret travels in a header on the `/push` WebSocket upgrade. Terminate TLS
   so it isn't sent in the clear. The hub can do this itself:
 
@@ -371,7 +378,12 @@ as its view URL — see the security notes below.
   proxy's public address. The push is a WebSocket (`/push`), so forward the
   `Upgrade`/`Connection` headers — nginx then tunnels it without buffering.
   Viewer streams (`/s/<id>/events`, SSE) send `X-Accel-Buffering: no`, so nginx
-  won't buffer those either.
+  won't buffer those either. **Mounting under a subpath**
+  (`example.com/glass/ → hub`) works: pages reference every asset and stream
+  relatively (view pages are canonical at `/s/<slug>/`, the slash-less form
+  redirects), so they resolve under whatever prefix the proxy strips. Set
+  `X-Forwarded-Prefix` if your proxy doesn't already, so the view URL the hub
+  *logs* includes the prefix too.
 - The hub trusts allowed clients: it caps a pushed WebSocket message at 16 MB but
   does not otherwise rate-limit the content. A bad-key flood is bounded
   (concurrent auth hashes are capped, each rejection logged for fail2ban), but

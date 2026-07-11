@@ -137,17 +137,22 @@ pub fn page(template: &str, head_css: &str, script: &str) -> String {
 }
 
 /// The page's updater block: a tiny inline config the renderer reads (the SSE path
-/// plus the render config), then a `<script src>` for the baked `/viewer.js`. The
+/// plus the render config), then a `<script src>` for the baked renderer. The
 /// renderer itself is served as a cacheable file, not inlined. `cfg_json` is a JSON
 /// object (from [`render_config_json`], or the client's, relayed by the hub); an
 /// empty string falls back to `null` so the renderer uses its built-in defaults.
+///
+/// Every URL here is RELATIVE (`events`, `viewer.js`) and resolves against the
+/// page's directory-shaped URL (`/` standalone, `/s/<slug>/` on the hub): the
+/// hub may sit behind a reverse proxy that mounts it under a subpath, which
+/// neither it nor the client can know — absolute paths would escape the mount.
 pub fn sse_script(events_path: &str, cfg_json: &str) -> String {
     let cfg = if cfg_json.is_empty() {
         "null"
     } else {
         cfg_json
     };
-    let events = serde_json::to_string(events_path).unwrap_or_else(|_| "\"/events\"".into());
+    let events = serde_json::to_string(events_path).unwrap_or_else(|_| "\"events\"".into());
     // The inline classic script runs at parse time (setting the config); the module
     // script is deferred by default and runs after, so the config is ready. viewer.js
     // is an ES module, hence type="module". `proto`/`js` are this binary's wire
@@ -158,7 +163,7 @@ pub fn sse_script(events_path: &str, cfg_json: &str) -> String {
     let js = viewer_tag();
     format!(
         "<script>window.SHELLGLASS={{events:{events},cfg:{cfg},proto:{proto},js:\"{js}\"}};</script>\n\
-         <script type=\"module\" src=\"/viewer.js?v={js}\"></script>"
+         <script type=\"module\" src=\"viewer.js?v={js}\"></script>"
     )
 }
 
@@ -198,13 +203,14 @@ pub fn render_config_json(config: &Config, resolver: &Resolver) -> String {
     serde_json::to_string(&cfg).expect("RenderConfig serializes")
 }
 
-/// Standalone page (local command → local viewer): streams live from `/events`.
+/// Standalone page (local command → local viewer): streams live from `events`
+/// (relative — the page lives at `/`).
 #[cfg(feature = "mirror")]
 pub fn render_page(template: &str, font_css: &str, config: &Config, cfg_json: &str) -> String {
     page(
         template,
         &head_css(font_css, config),
-        &sse_script("/events", cfg_json),
+        &sse_script("events", cfg_json),
     )
 }
 
@@ -318,10 +324,12 @@ mod tests {
             DEFAULT_TEMPLATE.contains("id=\"crt\">"),
             "CRT checkbox must not default to checked"
         );
-        // The favicon link points at the served route, and the asset is baked in.
+        // The favicon link is RELATIVE (resolves under the page's directory —
+        // `/` standalone, `/s/<slug>/` hub — so a subpath mount works), and
+        // the asset is baked in.
         assert!(
-            DEFAULT_TEMPLATE.contains(r#"href="/favicon.svg""#),
-            "template must link the favicon route"
+            DEFAULT_TEMPLATE.contains(r#"href="favicon.svg""#),
+            "template must link the favicon relatively"
         );
         assert!(
             FAVICON_SVG.starts_with("<svg") && FAVICON_SVG.contains("aria-label=\"shellglass\""),

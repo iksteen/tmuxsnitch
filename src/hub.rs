@@ -616,8 +616,22 @@ pub fn app(state: HubState) -> Router {
         .route("/viewer.js", get(viewer_js).layer(compress.clone()))
         .route("/embed.js", get(embed_js).layer(compress.clone()))
         .route("/favicon.svg", get(favicon).layer(compress.clone()))
-        .route("/s/{slug}", get(view).layer(compress.clone()))
+        // Views are canonical at /s/<slug>/ (trailing slash): the page's URLs
+        // are all RELATIVE (events, fonts/<i>, viewer.js, favicon.svg — routed
+        // per slug below), so pages survive a subpath-mounting reverse proxy
+        // that neither the hub nor the client can know about. The slash-less
+        // form redirects RELATIVELY, which a prefixing proxy also survives.
+        .route("/s/{slug}", get(view_redirect))
+        .route("/s/{slug}/", get(view).layer(compress.clone()))
         .route("/s/{slug}/events", get(events))
+        .route(
+            "/s/{slug}/viewer.js",
+            get(viewer_js).layer(compress.clone()),
+        )
+        .route(
+            "/s/{slug}/favicon.svg",
+            get(favicon).layer(compress.clone()),
+        )
         .route("/s/{slug}/fonts/{key}", get(font).layer(compress))
         // The management API (Bearer-authorized in the API salt domain; the
         // namespace 404s while --api-allow is unconfigured). Delete is two
@@ -788,9 +802,12 @@ fn key_of(headers: &HeaderMap) -> Option<String> {
 
 /// Public base URL for logging a view link, honoring reverse-proxy headers so the
 /// URL matches the address a viewer actually reaches (e.g. behind Traefik). Takes
-/// scheme from `X-Forwarded-Proto`, host from `X-Forwarded-Host` then `Host`;
-/// falls back to the configured base for whichever part is absent. XFF headers are
-/// comma-lists (proxy chain) — the first token is the original client-facing value.
+/// scheme from `X-Forwarded-Proto`, host from `X-Forwarded-Host` then `Host`, and
+/// a mount prefix from `X-Forwarded-Prefix` (set by prefix-stripping proxies —
+/// the pages themselves are prefix-agnostic via relative URLs, but a LOGGED link
+/// must spell the prefix out); falls back to the configured base for whichever
+/// part is absent. XFF headers are comma-lists (proxy chain) — the first token is
+/// the original client-facing value.
 fn view_base(headers: &HeaderMap, configured: &str) -> String {
     let fwd = |name| {
         header_str(headers, name)
@@ -814,7 +831,11 @@ fn view_base(headers: &HeaderMap, configured: &str) -> String {
         .or_else(|| header_str(headers, "host"))
         .filter(|s| !s.is_empty())
         .unwrap_or(def_host);
-    format!("{scheme}://{host}")
+    let prefix = fwd("x-forwarded-prefix")
+        .map(|p| p.trim_end_matches('/'))
+        .filter(|p| !p.is_empty())
+        .unwrap_or("");
+    format!("{scheme}://{host}{prefix}")
 }
 
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -961,6 +982,37 @@ async fn push_session(st: HubState, id: String, base: String, mut socket: WebSoc
     }
 }
 
+/// Rewrite every `/s/<64 lowercase hex>/fonts/` prefix in pushed CSS to the
+/// RELATIVE `fonts/`, which resolves against the page's canonical
+/// `/s/<slug>/` URL — correct for any slug and behind any subpath-mounting
+/// proxy (whose prefix neither hub nor client can know). The hex id the
+/// CLIENT derived is only a rendezvous token — it needn't equal the hub's
+/// derivation (e.g. a hub-side `--id-salt`), so match the shape, not the
+/// value.
+fn rewrite_font_urls(css: &str) -> String {
+    let is_id =
+        |s: &str| s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(at) = rest.find("/s/") {
+        let (head, tail) = rest.split_at(at);
+        out.push_str(head);
+        // tail starts with "/s/"; a font prefix is exactly /s/ + 64 hex + /fonts/
+        if tail.len() >= 3 + 64 + 7
+            && tail[3 + 64..].starts_with("/fonts/")
+            && is_id(&tail[3..3 + 64])
+        {
+            out.push_str("fonts/");
+            rest = &tail[3 + 64 + 7..];
+        } else {
+            out.push_str("/s/");
+            rest = &tail[3..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Create or refresh the session for `id` from a register message; returns its
 /// `Live` plus a receiver for the session's kick channel (fired when the
 /// management API deletes the session). New sessions get a "waiting…" banner
@@ -981,15 +1033,13 @@ fn register_session(
         .into_iter()
         .filter_map(|f| Some((f.key, (f.mime, B64.decode(f.b64).ok()?))))
         .collect();
-    // The id's public slug. Views live under the slug only, but the client baked
-    // its `@font-face` URLs as `/s/<id>/fonts/…` (it can't know the hub's slug),
-    // so rewrite them to the slug — otherwise fonts would 404 on an aliased
-    // session. A no-op when slug == id (no alias). ponytail: coupled to client.rs
-    // building exactly that prefix; the font route matches it too.
+    // The id's public slug (for the announce log below). The client baked its
+    // `@font-face` URLs as `/s/<locally-derived id>/fonts/…` (it can't know
+    // the hub's slug or a proxy's mount prefix), so rewrite them to the
+    // relative `fonts/` the canonical page URL resolves — see
+    // rewrite_font_urls for why the id is matched by shape, not value.
     let slug = st.slug_of(id)?;
-    let css = reg
-        .css
-        .replace(&format!("/s/{id}/fonts/"), &format!("/s/{slug}/fonts/"));
+    let css = rewrite_font_urls(&reg.css);
     let mut map = st.sessions.lock().unwrap();
     if let Some(s) = map.get_mut(id) {
         // The common path: every allowed id has at least a stub (ensure_stub),
@@ -1003,7 +1053,7 @@ fn register_session(
         s.fonts = fonts;
         if !s.registered {
             s.registered = true;
-            println!("shellglass: session connected — view at {base}/s/{slug}");
+            println!("shellglass: session connected — view at {base}/s/{slug}/");
         }
         // Coming (back) online — new stubs start offline, dropped pushers were
         // marked offline by push_session.
@@ -1028,7 +1078,7 @@ fn register_session(
                 registered: true,
             },
         );
-        println!("shellglass: session connected — view at {base}/s/{slug}");
+        println!("shellglass: session connected — view at {base}/s/{slug}/");
         Some((live, kick_rx))
     }
 }
@@ -1055,6 +1105,23 @@ async fn font(State(st): State<HubState>, Path((slug, key)): Path<(String, Strin
             .into_response(),
         None => (StatusCode::NOT_FOUND, "unknown font").into_response(),
     }
+}
+
+/// `/s/<slug>` → `/s/<slug>/`, the canonical directory-shaped page URL (the
+/// page's asset/SSE URLs are relative). The Location is RELATIVE too, so the
+/// redirect survives a subpath-mounting proxy; the query (`?embed`) rides
+/// along.
+async fn view_redirect(Path(slug): Path<String>, uri: axum::http::Uri) -> Response {
+    let mut loc = format!("{slug}/");
+    if let Some(q) = uri.query() {
+        loc.push('?');
+        loc.push_str(q);
+    }
+    (
+        StatusCode::PERMANENT_REDIRECT,
+        [(axum::http::header::LOCATION, loc)],
+    )
+        .into_response()
 }
 
 async fn view(
@@ -1086,7 +1153,7 @@ async fn view(
              const s = document.body.dataset.offline;\n\
              if (s === undefined || s === \"\") location.reload();\n\
              }}).observe(document.body, {{ attributes: true, attributeFilter: [\"data-offline\"] }});</script>",
-            render::sse_script(&format!("/s/{slug}/events"), render::DEFAULT_RENDER_CFG)
+            render::sse_script("events", render::DEFAULT_RENDER_CFG)
         );
         return (
             [(CACHE_CONTROL, "no-cache")],
@@ -1102,7 +1169,7 @@ async fn view(
         )
             .into_response();
     }
-    let script = render::sse_script(&format!("/s/{slug}/events"), &s.render_cfg);
+    let script = render::sse_script("events", &s.render_cfg);
     // Empty template = an older client that didn't push one; use the built-in.
     let template = if embed {
         render::EMBED_TEMPLATE
@@ -1458,21 +1525,44 @@ mod tests {
     }
 
     #[test]
-    fn register_rewrites_font_urls_to_the_slug() {
+    fn register_rewrites_font_urls_relative() {
         let id = session_id("secret");
         let st = HubState::new(
             parse_allow(&[format!("{id}:pretty")]).unwrap(),
             "http://h".into(),
         );
-        // The client bakes `/s/<id>/fonts/…`; the hub must rewrite it to the slug so
-        // the sub-resource stays reachable under the slug-only view namespace.
+        // The client bakes `/s/<its own id>/fonts/…`; the hub rewrites to the
+        // RELATIVE `fonts/`, which the canonical `/s/<slug>/` page resolves —
+        // for any slug, and behind any subpath-mounting proxy.
         let css = format!("@font-face{{src:url(/s/{id}/fonts/0)}}");
         register_session(&st, &id, "http://h", reg(&css)).unwrap();
         assert_eq!(
             st.sessions.lock().unwrap().get(&id).unwrap().css,
-            "@font-face{src:url(/s/pretty/fonts/0)}",
-            "font URLs rewritten from id to slug"
+            "@font-face{src:url(fonts/0)}",
+            "font URLs rewritten to page-relative"
         );
+    }
+
+    #[test]
+    fn font_url_rewrite_matches_shape_not_value() {
+        // A FOREIGN 64-hex id (a client that derived without the hub's
+        // --id-salt) still rewrites: the client id is a rendezvous token.
+        let foreign = "ab".repeat(32);
+        assert_eq!(
+            rewrite_font_urls(&format!("url(/s/{foreign}/fonts/3)")),
+            "url(fonts/3)"
+        );
+        // Multiple occurrences, all rewritten; surrounding text intact.
+        let two = format!("a url(/s/{foreign}/fonts/0) b url(/s/{foreign}/fonts/1) c");
+        assert_eq!(rewrite_font_urls(&two), "a url(fonts/0) b url(fonts/1) c");
+        // Non-id /s/ paths and short/non-hex segments are left alone.
+        for keep in [
+            "url(/s/demo/fonts/0)",                          // slug, not a 64-hex id
+            "url(/s/abc)",                                   // short
+            &format!("url(/s/{}/other/0)", "ab".repeat(32)), // not /fonts/
+        ] {
+            assert_eq!(rewrite_font_urls(keep), keep, "must not rewrite {keep}");
+        }
     }
 
     #[test]
@@ -1507,6 +1597,14 @@ mod tests {
         h.insert("x-forwarded-proto", "ws".parse().unwrap());
         h.insert("host", "example.com".parse().unwrap());
         assert_eq!(view_base(&h, cfg), "http://example.com");
+
+        // A subpath-mounting proxy announces its prefix: the logged link must
+        // spell it out (the pages themselves are prefix-agnostic).
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-proto", "https".parse().unwrap());
+        h.insert("x-forwarded-host", "example.com".parse().unwrap());
+        h.insert("x-forwarded-prefix", "/glass/".parse().unwrap());
+        assert_eq!(view_base(&h, cfg), "https://example.com/glass");
     }
 
     // ── management API (router-level) ─────────────────────────────────────────
@@ -1691,11 +1789,25 @@ mod tests {
         );
         let router = app(st.clone());
 
+        // The slash-less form redirects RELATIVELY to the canonical
+        // directory-shaped page URL (prefix-proxy safe), query preserved.
+        let res = router
+            .clone()
+            .oneshot(Request::get("/s/demo?embed").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(
+            res.headers().get("location").and_then(|v| v.to_str().ok()),
+            Some("demo/?embed"),
+            "relative Location, query riding along"
+        );
+
         // The view URL works before any pusher: built-in template + the
         // reload-on-operator-online observer (the placeholder's marker).
         let res = router
             .clone()
-            .oneshot(Request::get("/s/demo").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/s/demo/").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK, "unseeded slug serves a page");
@@ -1720,7 +1832,7 @@ mod tests {
         // Unknown slugs stay hard 404s — 'waiting for operator' ≠ 'not a session'.
         let res = router
             .clone()
-            .oneshot(Request::get("/s/nope").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/s/nope/").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
@@ -1729,7 +1841,7 @@ mod tests {
         // nav) — for the placeholder too, keeping the reload-on-online observer.
         let res = router
             .clone()
-            .oneshot(Request::get("/s/demo?embed").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/s/demo/?embed").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -1743,13 +1855,30 @@ mod tests {
             html.contains("attributeFilter"),
             "embedded placeholder still reloads when the operator arrives"
         );
+        // Pages must stay subpath-mountable: no root-absolute URLs anywhere.
+        for frag in ["src=\"/", "href=\"/", "url(/"] {
+            assert!(
+                !html.contains(frag),
+                "embed page leaked a root-absolute URL ({frag})"
+            );
+        }
         // Unknown slugs 404 with ?embed too.
         let res = router
             .clone()
-            .oneshot(Request::get("/s/nope?embed").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/s/nope/?embed").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        // The per-slug asset routes exist (the page references them relatively).
+        for path in ["/s/demo/viewer.js", "/s/demo/favicon.svg"] {
+            let res = router
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{path}");
+        }
 
         // The embedding shim is served (the snippet host pages reference) —
         // with ACAO *, or a cross-origin `type="module"` load is CORS-blocked.
@@ -1772,7 +1901,7 @@ mod tests {
         register_session(&st, &sid, "http://h", reg(".pushed{}")).unwrap();
         let res = router
             .clone()
-            .oneshot(Request::get("/s/demo").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/s/demo/").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);

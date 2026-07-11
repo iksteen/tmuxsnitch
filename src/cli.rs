@@ -210,11 +210,6 @@ pub struct PushArgs {
     #[command(flatten)]
     key: KeyArg,
 
-    /// Must match the hub's `--id-salt` (only used to derive the view URL this
-    /// command prints — authorization sends the key itself).
-    #[command(flatten)]
-    id_salt: IdSaltArg,
-
     #[command(flatten)]
     source: SourceArgs,
 }
@@ -424,7 +419,7 @@ impl PushArgs {
     /// # Errors
     /// Config/font failures before registration; the client loop's after.
     pub async fn run(self) -> Result<()> {
-        run_push(self.url, self.key.key, &self.id_salt, self.source).await
+        run_push(self.url, self.key.key, self.source).await
     }
 }
 
@@ -590,7 +585,9 @@ async fn run_serve(
         });
     }
     let state = AppState {
-        font_css: Arc::new(render::font_face_css(&s.fonts, "/fonts/")),
+        // Relative: the page lives at `/`, and relative URLs survive a
+        // subpath-mounting reverse proxy that absolute ones can't know about.
+        font_css: Arc::new(render::font_face_css(&s.fonts, "fonts/")),
         config: s.config,
         resolver: s.resolver,
         fonts: s.fonts,
@@ -605,11 +602,17 @@ async fn run_serve(
 /// command) start only once the hub has accepted a registration — `client::run`
 /// invokes the closure after the first successful register.
 #[cfg(feature = "push")]
-async fn run_push(url: String, key: String, id_salt: &IdSaltArg, source: SourceArgs) -> Result<()> {
-    let id = proto::session_id_ext(&key, &id_salt.id_salt);
+async fn run_push(url: String, key: String, source: SourceArgs) -> Result<()> {
+    // The locally-derived id is only a RENDEZVOUS TOKEN for the font URLs the
+    // client bakes into its CSS (`/s/<id>/fonts/…`); the hub rewrites any
+    // 64-hex id there to the session's slug, so it needn't match the hub's own
+    // derivation (which may use an --id-salt this client knows nothing about).
+    // The authoritative view URL is announced in the HUB's log on connect —
+    // the client deliberately prints none (it could only guess: it knows
+    // neither the slug nor the hub's salt extension).
+    let id = proto::session_id(&key);
     let base = url.trim_end_matches('/');
-    // Print the view URL before the backend can take the terminal (PTY raw mode).
-    println!("shellglass: pushing live to {base}; view at {base}/s/{id}");
+    println!("shellglass: pushing live to {base}");
     let s = setup(&source)?;
     client::run(
         url,
