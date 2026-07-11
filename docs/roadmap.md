@@ -526,6 +526,28 @@ own CRT effect.
    rebuilds teleport). Verified: `verify.py` `?mode=cursor` self-check
    (suppression + mid-travel position + landing, driven synchronously via
    `benchCursorStep`).
+4. ⊘ **WebGL subpixel text.** Researched and rejected 2026-07-11. The
+   hypothesis was that WebGL subpixel rendering (astiopin/webgl_fonts —
+   SDF atlas, pseudo-hinting via x-height snapping, per-channel coverage
+   through a `CONSTANT_COLOR/ONE_MINUS_SRC_COLOR` blend trick) could close
+   a canvas-vs-DOM AA gap. Measured: there is no gap on this stack —
+   headless Firefox renders DOM text, transparent canvas2d and opaque
+   canvas2d fillText PIXEL-IDENTICALLY (equal ink/mid-intensity counts,
+   zero RGB fringing), and a real desktop screenshot (Arch/Firefox) shows
+   0% fringed pixels: the platform rasterizes grayscale everywhere, and
+   canvas fillText already uses the same hinted rasterizer as the DOM.
+   Structural blockers had it been pursued: subpixel needs an OPAQUE
+   canvas (no dual-source blending in WebGL), which kills the ghost
+   ::selection show-through and template backdrop; runtime SDF atlases
+   (troika-style, Typr) are feasible for our served ttf/otf but SDF text
+   is measurably softer than platform rasterization at terminal sizes; and
+   the display world (Wayland, macOS, HiDPI) has abandoned subpixel AA —
+   fringes would be a regression on exactly the modern setups.
+   The real remaining canvas fidelity gaps are elsewhere: ligatures/
+   shaping (per-cell fillText can't form them) and pinch-zoom raster blur
+   (wdobbie-style GPU vector textures WOULD fix that, at grayscale — but
+   the cheap fix is re-deriving the backing store from
+   `visualViewport.scale` on its resize event, a future item).
 
 ## Sequencing note
 
