@@ -38,10 +38,11 @@ pub fn viewer_tag() -> &'static str {
 }
 
 /// `@font-face` blocks for served fonts. Each references `{url_prefix}{index}`,
-/// where the index is the font's position (matching [`crate::fonts::font_assets`])
-/// — the standalone server serves those at `/fonts/…`, the hub per session at
-/// `/s/<id>/fonts/…`. Serving (not inlining) keeps the page small and lets the
-/// browser cache the font.
+/// where the index is the font's position (matching [`crate::fonts::font_assets`]).
+/// The prefix is the page-RELATIVE `fonts/` everywhere: it resolves against
+/// the directory-shaped page URL (`/` standalone, `/s/<slug>/` hub), for any
+/// slug and behind any subpath mount. Serving (not inlining) keeps the page
+/// small and lets the browser cache the font.
 pub fn font_face_css(fonts: &[FontFile], url_prefix: &str) -> String {
     let mut css = String::new();
     for (i, f) in fonts.iter().enumerate() {

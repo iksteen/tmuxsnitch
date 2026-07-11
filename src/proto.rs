@@ -62,7 +62,12 @@ pub const KEY_HEADER: &str = "x-shellglass-key";
 /// it and the text mirror stays correct, just without the new overlay; bump only
 /// when an existing message would be *misread*.) The cost of a bump is that
 /// operators re-run `print-id` and update `--allow` + view URLs; keys stay valid.
-const SALT: &[u8] = b"shellglass/session-id/v4";
+///
+/// v5: the register contract changed — pushed CSS carries page-RELATIVE font
+/// URLs (`fonts/<i>`) and the hub stores it verbatim, no rewriting. A v4
+/// client's absolute `/s/<id>/fonts/` URLs would be served untouched and 404
+/// (aliased sessions, subpath mounts), so v4 pairs must fail loudly instead.
+const SALT: &[u8] = b"shellglass/session-id/v5";
 
 /// The management-API identity domain. Same derivation as [`session_id`],
 /// DIFFERENT salt: domain separation. A leaked session key can never

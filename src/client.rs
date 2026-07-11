@@ -46,13 +46,12 @@ const INITIAL_SEND_TIMEOUT: Duration = Duration::from_secs(60);
 /// Backoff between reconnect attempts.
 const RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
 
-// ponytail: 8 positional args, one call site — an args struct would be ceremony
+// ponytail: 7 positional args, one call site — an args struct would be ceremony
 // for no reader benefit. Bundle them if a second caller ever appears.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     base_url: String,
     key: String,
-    id: String,
     config: Arc<Config>,
     resolver: Arc<Resolver>,
     fonts: Arc<Vec<FontFile>>,
@@ -69,10 +68,11 @@ pub async fn run(
         .http1_only()
         .build()
         .context("building HTTP client")?;
-    // The view URL is printed by `main` before any backend (and any PTY raw mode)
-    // starts. The hub serves our fonts under this session's id, so bake that URL
-    // prefix into the @font-face CSS and upload the font bytes alongside it.
-    let font_css = render::font_face_css(&fonts, &format!("/s/{id}/fonts/"));
+    // Font URLs are page-RELATIVE: the hub serves the view at /s/<slug>/ and
+    // the fonts under it, so `fonts/<i>` resolves for any slug and behind any
+    // subpath mount — the client needs to know nothing about either (SALT v5;
+    // the hub stores this CSS verbatim). Upload the font bytes alongside.
+    let font_css = render::font_face_css(&fonts, "fonts/");
     let css = render::head_css(&font_css, &config);
     let reg = RegisterBody {
         css,

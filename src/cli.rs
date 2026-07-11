@@ -603,27 +603,16 @@ async fn run_serve(
 /// invokes the closure after the first successful register.
 #[cfg(feature = "push")]
 async fn run_push(url: String, key: String, source: SourceArgs) -> Result<()> {
-    // The locally-derived id is only a RENDEZVOUS TOKEN for the font URLs the
-    // client bakes into its CSS (`/s/<id>/fonts/…`); the hub rewrites any
-    // 64-hex id there to the session's slug, so it needn't match the hub's own
-    // derivation (which may use an --id-salt this client knows nothing about).
-    // The authoritative view URL is announced in the HUB's log on connect —
-    // the client deliberately prints none (it could only guess: it knows
-    // neither the slug nor the hub's salt extension).
-    let id = proto::session_id(&key);
+    // The client derives NO ids: authorization sends the key itself, font URLs
+    // in the pushed CSS are page-relative, and the authoritative view URL is
+    // announced in the HUB's log on connect — the client could only guess it
+    // (it knows neither the slug nor the hub's --id-salt).
     let base = url.trim_end_matches('/');
     println!("shellglass: pushing live to {base}");
     let s = setup(&source)?;
-    client::run(
-        url,
-        key,
-        id,
-        s.config,
-        s.resolver,
-        s.fonts,
-        s.template,
-        || pty::start(&source.command()),
-    )
+    client::run(url, key, s.config, s.resolver, s.fonts, s.template, || {
+        pty::start(&source.command())
+    })
     .await
 }
 

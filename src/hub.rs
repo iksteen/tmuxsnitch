@@ -982,37 +982,6 @@ async fn push_session(st: HubState, id: String, base: String, mut socket: WebSoc
     }
 }
 
-/// Rewrite every `/s/<64 lowercase hex>/fonts/` prefix in pushed CSS to the
-/// RELATIVE `fonts/`, which resolves against the page's canonical
-/// `/s/<slug>/` URL — correct for any slug and behind any subpath-mounting
-/// proxy (whose prefix neither hub nor client can know). The hex id the
-/// CLIENT derived is only a rendezvous token — it needn't equal the hub's
-/// derivation (e.g. a hub-side `--id-salt`), so match the shape, not the
-/// value.
-fn rewrite_font_urls(css: &str) -> String {
-    let is_id =
-        |s: &str| s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
-    let mut out = String::with_capacity(css.len());
-    let mut rest = css;
-    while let Some(at) = rest.find("/s/") {
-        let (head, tail) = rest.split_at(at);
-        out.push_str(head);
-        // tail starts with "/s/"; a font prefix is exactly /s/ + 64 hex + /fonts/
-        if tail.len() >= 3 + 64 + 7
-            && tail[3 + 64..].starts_with("/fonts/")
-            && is_id(&tail[3..3 + 64])
-        {
-            out.push_str("fonts/");
-            rest = &tail[3 + 64 + 7..];
-        } else {
-            out.push_str("/s/");
-            rest = &tail[3..];
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
 /// Create or refresh the session for `id` from a register message; returns its
 /// `Live` plus a receiver for the session's kick channel (fired when the
 /// management API deletes the session). New sessions get a "waiting…" banner
@@ -1033,13 +1002,12 @@ fn register_session(
         .into_iter()
         .filter_map(|f| Some((f.key, (f.mime, B64.decode(f.b64).ok()?))))
         .collect();
-    // The id's public slug (for the announce log below). The client baked its
-    // `@font-face` URLs as `/s/<locally-derived id>/fonts/…` (it can't know
-    // the hub's slug or a proxy's mount prefix), so rewrite them to the
-    // relative `fonts/` the canonical page URL resolves — see
-    // rewrite_font_urls for why the id is matched by shape, not value.
+    // The id's public slug (for the announce log below). The pushed CSS is
+    // stored VERBATIM: its font URLs are page-relative (`fonts/<i>`, the SALT
+    // v5 register contract), which the canonical `/s/<slug>/` page resolves
+    // for any slug and behind any subpath mount — nothing to rewrite.
     let slug = st.slug_of(id)?;
-    let css = rewrite_font_urls(&reg.css);
+    let css = reg.css;
     let mut map = st.sessions.lock().unwrap();
     if let Some(s) = map.get_mut(id) {
         // The common path: every allowed id has at least a stub (ensure_stub),
@@ -1525,44 +1493,24 @@ mod tests {
     }
 
     #[test]
-    fn register_rewrites_font_urls_relative() {
+    fn register_stores_css_verbatim() {
         let id = session_id("secret");
         let st = HubState::new(
             parse_allow(&[format!("{id}:pretty")]).unwrap(),
             "http://h".into(),
         );
-        // The client bakes `/s/<its own id>/fonts/…`; the hub rewrites to the
-        // RELATIVE `fonts/`, which the canonical `/s/<slug>/` page resolves —
-        // for any slug, and behind any subpath-mounting proxy.
-        let css = format!("@font-face{{src:url(/s/{id}/fonts/0)}}");
-        register_session(&st, &id, "http://h", reg(&css)).unwrap();
+        // The SALT v5 register contract: font URLs arrive page-relative
+        // (`fonts/<i>`), which the canonical `/s/<slug>/` page resolves for
+        // any slug and behind any subpath mount — the hub stores the CSS
+        // untouched. No rewriting, ever: a rewrite is a hidden coupling to
+        // the client's output format.
+        let css = "@font-face{src:url(fonts/0)}";
+        register_session(&st, &id, "http://h", reg(css)).unwrap();
         assert_eq!(
             st.sessions.lock().unwrap().get(&id).unwrap().css,
-            "@font-face{src:url(fonts/0)}",
-            "font URLs rewritten to page-relative"
+            css,
+            "pushed CSS must be stored byte-for-byte"
         );
-    }
-
-    #[test]
-    fn font_url_rewrite_matches_shape_not_value() {
-        // A FOREIGN 64-hex id (a client that derived without the hub's
-        // --id-salt) still rewrites: the client id is a rendezvous token.
-        let foreign = "ab".repeat(32);
-        assert_eq!(
-            rewrite_font_urls(&format!("url(/s/{foreign}/fonts/3)")),
-            "url(fonts/3)"
-        );
-        // Multiple occurrences, all rewritten; surrounding text intact.
-        let two = format!("a url(/s/{foreign}/fonts/0) b url(/s/{foreign}/fonts/1) c");
-        assert_eq!(rewrite_font_urls(&two), "a url(fonts/0) b url(fonts/1) c");
-        // Non-id /s/ paths and short/non-hex segments are left alone.
-        for keep in [
-            "url(/s/demo/fonts/0)",                          // slug, not a 64-hex id
-            "url(/s/abc)",                                   // short
-            &format!("url(/s/{}/other/0)", "ab".repeat(32)), // not /fonts/
-        ] {
-            assert_eq!(rewrite_font_urls(keep), keep, "must not rewrite {keep}");
-        }
     }
 
     #[test]
