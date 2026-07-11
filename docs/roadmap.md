@@ -450,6 +450,9 @@ API credential and vice versa. All five items below landed as sketched; the
 placeholder transition shipped as a MutationObserver on `body[data-offline]`
 reloading when the operator comes online, and registration ADOPTS the stub's
 `Live` so placeholder viewers' SSE subscriptions survive the handover.
+Follow-up (21646f5): `shellglass sessions` — a first-party hub-control CLI
+(list/add/remove with explicit `--id`/`--slug`, `SHELLGLASS_API_KEY`), its
+own lightweight `sessions` feature and `shellglass-sessions` binary.
 
 1. **API identity: a second salt domain.** `proto.rs`: refactor the argon2id
    derivation to take the salt as a parameter; add
