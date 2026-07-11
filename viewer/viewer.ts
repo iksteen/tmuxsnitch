@@ -1901,15 +1901,24 @@ const clock = () => (typeof performance !== "undefined" ? performance.now() : 0)
 function schedulePaint(): void {
   if (paintScheduled) return;
   paintScheduled = true;
-  raf(flushPaint);
+  // Canvas mode paints unshaped and OFF the rAF clock: rAF suspends in
+  // background tabs, so a shaped canvas stalls while hidden and comes back to
+  // a stale screen — and its rAF-based cost sampling books the suspension as
+  // frame cost, throttling long after the tab returns. Canvas frames are
+  // cheap and the server's 30fps cap is the only pacing needed; setTimeout
+  // still coalesces one event-loop turn of messages, and the browser's
+  // background throttling (~1Hz) keeps a hidden tab roughly current for free.
+  if (canvasModeOn()) setTimeout(flushPaint, 0);
+  else raf(flushPaint);
 }
 
 function flushPaint(): void {
   // A structural rebuild (full frame / banner) always paints now — rare, and it resets
-  // everything. Per-row diffs are shaped: if the pacing interval hasn't elapsed, re-arm
-  // and coalesce more into the next paint (dirtyRows/cursor persist, stays scheduled).
+  // everything. Per-row diffs are shaped (DOM mode only — see schedulePaint): if the
+  // pacing interval hasn't elapsed, re-arm and coalesce more into the next paint
+  // (dirtyRows/cursor persist, stays scheduled).
   const now = clock();
-  const interval = Math.min(paintCost / TARGET_LOAD, MAX_INTERVAL);
+  const interval = canvasModeOn() ? 0 : Math.min(paintCost / TARGET_LOAD, MAX_INTERVAL);
   if (!rebuildDims && rebuildBanner === null && now - lastFlush < interval) {
     raf(flushPaint);
     return;
@@ -1982,9 +1991,13 @@ function flushPaint(): void {
   }
   // Sample this frame's true cost once the browser commits it (the next animation frame
   // fires only after layout+paint+composite) and fold it into the EWMA (α=0.3).
-  raf(() => {
-    paintCost += 0.3 * (clock() - t0 - paintCost);
-  });
+  // DOM mode only: canvas mode is unshaped, and a background tab's suspended rAF
+  // would book the whole suspension as frame cost.
+  if (!canvasModeOn()) {
+    raf(() => {
+      paintCost += 0.3 * (clock() - t0 - paintCost);
+    });
+  }
 }
 
 function applyFull(m: FullMsg): void {
@@ -2211,7 +2224,7 @@ function startStats(): void {
     lastBytes = bytesIn;
     lastPaints = paints;
     lastT = t;
-    el.textContent = `${fmtRate(bps)} · ${fps.toFixed(0)} fps (cap ${cap.toFixed(0)})${storm ? (canvasModeOn() ? " · canvas" : " · storm") : ""}`;
+    el.textContent = `${fmtRate(bps)} · ${fps.toFixed(0)} fps (cap ${canvasModeOn() ? "off" : cap.toFixed(0)})${storm ? (canvasModeOn() ? " · canvas" : " · storm") : ""}`;
   }, 1000);
 }
 

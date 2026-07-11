@@ -1353,11 +1353,14 @@ function schedulePaint() {
     if (paintScheduled)
         return;
     paintScheduled = true;
-    raf(flushPaint);
+    if (canvasModeOn())
+        setTimeout(flushPaint, 0);
+    else
+        raf(flushPaint);
 }
 function flushPaint() {
     const now = clock();
-    const interval = Math.min(paintCost / TARGET_LOAD, MAX_INTERVAL);
+    const interval = canvasModeOn() ? 0 : Math.min(paintCost / TARGET_LOAD, MAX_INTERVAL);
     if (!rebuildDims && rebuildBanner === null && now - lastFlush < interval) {
         raf(flushPaint);
         return;
@@ -1426,9 +1429,11 @@ function flushPaint() {
         }
         dirtyRows.clear();
     }
-    raf(() => {
-        paintCost += 0.3 * (clock() - t0 - paintCost);
-    });
+    if (!canvasModeOn()) {
+        raf(() => {
+            paintCost += 0.3 * (clock() - t0 - paintCost);
+        });
+    }
 }
 function applyFull(m) {
     screen = {
@@ -1605,7 +1610,7 @@ function startStats() {
         lastBytes = bytesIn;
         lastPaints = paints;
         lastT = t;
-        el.textContent = `${fmtRate(bps)} · ${fps.toFixed(0)} fps (cap ${cap.toFixed(0)})${storm ? (canvasModeOn() ? " · canvas" : " · storm") : ""}`;
+        el.textContent = `${fmtRate(bps)} · ${fps.toFixed(0)} fps (cap ${canvasModeOn() ? "off" : cap.toFixed(0)})${storm ? (canvasModeOn() ? " · canvas" : " · storm") : ""}`;
     }, 1000);
 }
 function injectViewerCss() {
