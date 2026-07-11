@@ -1,27 +1,22 @@
 <!doctype html>
-<!-- Canvas-track verification page: renders one static representative frame
-     through the production apply() path, in DOM mode (?mode=dom) or with
-     storm forced on (?mode=storm). verify.py screenshots both and measures
-     per-row vertical ink offsets (baseline parity) and fill-glyph coverage. -->
+<!-- Canvas verification page: renders one static representative frame through
+     the production apply() path (canvas picture over ghost text). verify.py
+     screenshots it for terminal-semantics checks, plus one green/red
+     self-check scenario per ?mode. -->
 <html><head><meta charset="utf-8"><style>
   html,body { margin:0; }
   #screen { font-family:monospace; font-size:14px; --lh:17px; line-height:var(--lh);
             color:#d0d0d0; background:#000; }
   .screen { position:relative; white-space:pre; overflow:hidden; }
   .row { position:relative; height:var(--lh); contain:layout style; }
-  .run { position:absolute; top:0; height:var(--lh); overflow:hidden; }
 </style></head><body>
-<!-- explicit renderer state: canvas is the viewer's default now, and the rig's
-     dom/storm split must not depend on defaults — modes force storm via benchStorm -->
-<input type="checkbox" id="render" hidden>
-<input type="checkbox" id="storm" hidden>
 <input type="checkbox" id="crt" hidden>
 <div id="screen"></div>
 <script type="module">
-import { setConfig, apply, benchInit, benchStorm, benchFlush, benchCursorStep, benchBlinkPhase, benchWeight, benchRuns, benchPinch, weightBoost } from "./viewer.js";
+import { setConfig, apply, benchInit, benchFlush, benchRedraw, benchCursorStep, benchBlinkPhase, benchWeight, benchRuns, benchPinch, weightBoost } from "./viewer.js";
 
 const PARAMS = new URLSearchParams(location.search);
-const MODE = PARAMS.get("mode") ?? "dom";
+const MODE = PARAMS.get("mode") ?? "static";
 const ZOOM = parseFloat(PARAMS.get("zoom") ?? "1");
 if (ZOOM !== 1) document.getElementById("screen").style.zoom = String(ZOOM);
 setConfig({ defFg: "#d0d0d0", defBg: "#000000", fillFont: "monospace", sym: [] });
@@ -54,11 +49,7 @@ apply({ v: 4 });
 apply({ d, w: COLS, h: ROWS, p: [10, 4], q: 5 }); // bar cursor on row 10
 benchFlush(); // synchronous paint — safe to screenshot at onload
 
-if (MODE === "storm") {
-  benchStorm(true); // repaints every row on the canvas
-}
-
-// ?mode=links: storm-mode OSC 8 self-check — synthetic hover over a linked
+// ?mode=links: OSC 8 self-check — synthetic hover over a linked
 // cell must set cursor:pointer + draw underline ink on the canvas; hover off
 // a link must clear both. Paints the body green/red so verify.py can assert
 // from the screenshot alone.
@@ -68,7 +59,6 @@ if (MODE === "links") {
   for (let i = d2.length; i < ROWS; i++) d2.push([[pad(`row ${i}`)]]);
   apply({ d: d2, w: COLS, h: ROWS, y: { 1: "https://example.com" } });
   benchFlush();
-  benchStorm(true);
   const scr = document.querySelector("#screen .screen");
   const canvas = document.querySelector("#screen canvas");
   const cw = scr.getBoundingClientRect().width / COLS;
@@ -98,8 +88,8 @@ if (MODE === "links") {
   document.body.style.background = pass ? "#00ff00" : "#ff0000";
 }
 
-// ?mode=image: canvas-mode inline-image self-check — in storm the <img>
-// overlay hides and the image draws on the canvas UNDER the glyphs: a text
+// ?mode=image: inline-image self-check — the <img> element is hidden (by
+// stylesheet rule) and the image draws on the canvas UNDER the glyphs: a text
 // cell over the image shows its painted bg (text wins, like a real cell
 // terminal), an untouched cell shows the image. Green/red convention.
 if (MODE === "image") {
@@ -111,7 +101,7 @@ if (MODE === "image") {
   benchFlush();
   const img = document.querySelector("img.inline-img");
   img.decode().then(() => {
-    benchStorm(true);
+    benchRedraw(); // deterministic: don't race the async image-load repaint
     const scr = document.querySelector("#screen .screen");
     const canvas = document.querySelector("#screen canvas");
     const g = canvas.getContext("2d");
@@ -135,9 +125,7 @@ if (MODE === "image") {
     range.setStart(rows[1].firstChild, 0);
     range.setEnd(rows[5].firstChild, 3);
     const copied = range.cloneContents().querySelector("img.inline-img") !== null;
-    benchStorm(false);
-    const shown = getComputedStyle(img).visibility !== "hidden";
-    const pass = hidden && noInline && laidOut && copied && shown
+    const pass = hidden && noInline && laidOut && copied
       && imgPx[0] > 180 && imgPx[1] < 60 // red image under blank cells
       && txtPx[0] < 60 && txtPx[1] < 60 && txtPx[2] < 60; // painted bg under text
     document.getElementById("screen").style.display = "none";
@@ -155,7 +143,6 @@ if (MODE === "cursor") {
   for (let i = 0; i < ROWS; i++) d4.push([[pad("")]]);
   apply({ d: d4, w: COLS, h: ROWS, p: [5, 5] });
   benchFlush();
-  benchStorm(true);
   const scr = document.querySelector("#screen .screen");
   const canvas = document.querySelector("#screen canvas");
   const g = canvas.getContext("2d");
@@ -202,7 +189,6 @@ if (MODE === "bleed") {
   d5[5] = [[pad("double underline gjq")], [[0, 20, { u: 2 }]]];
   apply({ d: d5, w: COLS, h: ROWS });
   benchFlush();
-  benchStorm(true);
   const canvas = document.querySelector("#screen canvas");
   const g = canvas.getContext("2d");
   const lh = 14 * devicePixelRatio;
@@ -225,7 +211,6 @@ if (MODE === "blink") {
   d6[2] = [[pad("blinking Mgjq")], [[0, 13, { x: 1, g: 4 }]]];
   apply({ d: d6, w: COLS, h: ROWS });
   benchFlush();
-  benchStorm(true);
   const canvas = document.querySelector("#screen canvas");
   const g = canvas.getContext("2d");
   const lh = 17 * devicePixelRatio;
@@ -260,7 +245,6 @@ if (MODE === "freeze") {
   for (let i = 0; i < ROWS; i++) d7.push([[pad(`row ${i} stable text`)]]);
   apply({ d: d7, w: COLS, h: ROWS });
   benchFlush();
-  benchStorm(true);
   const spin = (ms) => { const t = performance.now(); while (performance.now() - t < ms); };
   const rowEl = document.querySelectorAll("#screen .row")[3];
   const node = rowEl.firstChild;
@@ -286,7 +270,6 @@ if (MODE === "hold") {
   for (let i = 0; i < ROWS; i++) d8.push([[pad(`row ${i} calm text`)]]);
   apply({ d: d8, w: COLS, h: ROWS });
   benchFlush();
-  benchStorm(true);
   const spin = (ms) => { const t = performance.now(); while (performance.now() - t < ms); };
   const rows = document.querySelectorAll("#screen .row");
   const selNode = rows[3].firstChild;
@@ -330,7 +313,6 @@ if (MODE === "weight") {
   d9[2] = [[pad("weight probe mille illuminated Willi 0123456789")]];
   apply({ d: d9, w: COLS, h: ROWS });
   benchFlush();
-  benchStorm(true);
   const canvas = document.querySelector("#screen canvas");
   const g = canvas.getContext("2d");
   const lh = 17 * devicePixelRatio;
@@ -383,7 +365,6 @@ if (MODE === "liga") {
     dl[2] = [[pad("a => b != c === d -> e")]];
     apply({ d: dl, w: COLS, h: ROWS });
     benchFlush();
-    benchStorm(true);
     const canvas = document.querySelector("#screen canvas");
     const g = canvas.getContext("2d");
     const lh = 17 * devicePixelRatio;
@@ -418,7 +399,6 @@ if (MODE === "stems") {
   ds[2] = [[pad("l".repeat(50))]];
   apply({ d: ds, w: COLS, h: ROWS });
   benchFlush();
-  benchStorm(true);
   if (PARAMS.get("runs") === "off") benchRuns(false);
 }
 
@@ -431,7 +411,6 @@ if (MODE === "pinch") {
   for (let i = 0; i < ROWS; i++) dp.push([[pad(`row ${i} pinch probe text`)]]);
   apply({ d: dp, w: COLS, h: ROWS });
   benchFlush();
-  benchStorm(true);
   const canvas = document.querySelector("#screen canvas");
   const g = canvas.getContext("2d");
   const ink = () => {
@@ -453,10 +432,9 @@ if (MODE === "pinch") {
 }
 
 // ?mode=crt: canvas phosphor self-check — flipping the #crt toggle on must
-// add bloom ink to storm rows (blurred lighter self-composite), and off must
-// remove it. Same green/red screenshot convention as ?mode=links.
+// add bloom ink to the canvas rows (blurred lighter self-composite), and off
+// must remove it. Same green/red screenshot convention as ?mode=links.
 if (MODE === "crt") {
-  benchStorm(true);
   const canvas = document.querySelector("#screen canvas");
   const ink = () => {
     const px = canvas.getContext("2d")

@@ -1,43 +1,31 @@
 <!doctype html>
-<!-- exp/cell-matrix throughput bench: pumps synthetic cmatrix-class frames
-     through the production apply() path and reports paints/sec + flush cost
-     for the classic renderer (which storm-escalates under this load — the
-     number to beat) vs the matrix renderer. Driven headless by bench.py. -->
+<!-- Throughput bench: pumps synthetic cmatrix-class frames through the
+     production apply() path and reports paints/sec for the canvas renderer.
+     Driven headless by bench.py. -->
 <html><head><meta charset="utf-8"><style>
   html,body { margin:0; }
   #screen { font-family:monospace; font-size:14px; --lh:17px; line-height:var(--lh);
             color:#d0d0d0; background:#000; }
   .screen { position:relative; white-space:pre; overflow:hidden; }
   .row { position:relative; height:var(--lh); contain:layout style; }
-  .run { position:absolute; top:0; height:var(--lh); overflow:hidden; }
 </style></head><body>
 <div id="screen"></div>
 <script type="module">
 import { setConfig, apply, benchInit, benchStats } from "./viewer.js";
 
 const q = new URLSearchParams(location.search);
-const MODE = q.get("mode") ?? "dom";              // dom | dom-nostorm | canvas
 const LOAD = q.get("load") ?? "rain";             // rain | typing | editor
 const COLS = Number(q.get("cols") ?? 200);
 const ROWS = Number(q.get("rows") ?? 60);
 const SECONDS = Number(q.get("secs") ?? 5);
 
 setConfig({ defFg: "#d0d0d0", defBg: "#000000", fillFont: "monospace", sym: [] });
-// Exercise the real toggles: the viewer reads these checkboxes. Both are
-// explicit — canvas is the viewer's DEFAULT now, so the dom modes must opt
-// out, and 'dom' opts back into the (default-off) storm escalation it
-// benchmarks.
-for (const [id, on] of [["render", MODE === "canvas"], ["storm", MODE === "dom"]]) {
-  const c = document.createElement("input");
-  c.type = "checkbox"; c.id = id; c.checked = on; c.hidden = true;
-  document.body.appendChild(c);
-}
 benchInit(document.getElementById("screen"));
 
 // Honest cmatrix simulation: independent falling streams per column. Nearly
-// every ROW changes each frame (storm engages on the classic path, as in
-// real life), but only a few percent of CELLS differ frame-over-frame —
-// the head advances and the tail erases, everything between is stable.
+// every ROW changes each frame, but only a few percent of CELLS differ
+// frame-over-frame — the head advances and the tail erases, everything
+// between is stable.
 const GLYPHS = "abcdefghijklmnopqrstuvwxyz0123456789@#$%&*+=<>";
 let seed = 42;
 const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
@@ -130,7 +118,7 @@ function diffMsg() {
   if (LOAD === "editor") {
     // Editor-style partial churn: ~30% of rows get a mid-row rewrite of
     // syntax-highlighted TOKENS — short (2-8 char) runs cycling ~6 styles,
-    // like real highlighting. Below the per-frame storm trigger (50%).
+    // like real highlighting.
     const TOKEN_STYLES = [
       { f: 4 }, { f: 3 }, { f: 6, b: 1 }, { f: 5 }, { f: 2 }, { f: 7, d: 1 },
     ];
@@ -173,10 +161,8 @@ function pump() {
     fetch("/result", {
       method: "POST",
       body: JSON.stringify({
-        mode: MODE, load: LOAD, cols: COLS, rows: ROWS,
+        load: LOAD, cols: COLS, rows: ROWS,
         fps: (s.paints - startPaints) / dt,
-        cost_ms: s.cost,
-        storm: s.storm,
       }),
     });
     return;

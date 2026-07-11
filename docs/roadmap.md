@@ -512,9 +512,10 @@ own lightweight `sessions` feature and `shellglass-sessions` binary.
 ## Canvas fidelity track
 
 Context: item-14 experiments — DOM is optimization-exhausted, canvas is ~5×
-faster under fragmented churn. Goal: canvas at DOM fidelity, offered as a
-first-class renderer switchable with DOM (which stays); each mode carries its
-own CRT effect.
+faster under fragmented churn. Goal (as of tracks A–D): canvas at DOM
+fidelity, offered as a first-class renderer switchable with DOM. **Endgame
+(section E): the goal was exceeded — canvas surpassed the DOM renderer and
+the DOM mode was removed entirely.**
 
 ### A. Storm-mode fidelity (needed while canvas is the escape hatch)
 
@@ -739,6 +740,25 @@ rasterizer at terminal sizes).
    (wdobbie-style GPU vector textures WOULD fix that, at grayscale — but
    the cheap fix is re-deriving the backing store from
    `visualViewport.scale` on its resize event, a future item).
+
+### E. DOM renderer removal ✅ (landed 2026-07-11, `canvas-only`)
+
+With tracks A–D landed, canvas met or beat the DOM renderer on every axis
+(fidelity per the kitty reference, throughput, selection/copy semantics via
+the ghost layer), so the comparison had served its purpose and the DOM
+renderer was cut: `renderRow`/`cellStyle` and the SVG symbol-cell path,
+the `#render`/`#storm` nav toggles (`?render=dom`/`?storm=on`), the storm
+enter/exit machinery (canvas paints always; there is no other medium to
+escalate from or fall back to), and the adaptive frame shaper (it paced DOM
+layout cost; canvas frames are cheap and unshaped, `setTimeout(0)`-coalesced
+off the rAF clock). What stays, unchanged in role: the ghost-text backing
+DOM (selection/copy/find, in-place `replaceData` patching, whole-picture
+hold), hidden `<img>` siblings for clipboard fidelity, grid-arithmetic OSC 8
+links, blink, smooth cursor, pinch re-rasterization. `verify.py` dropped its
+DOM-vs-canvas centroid comparison (no reference renderer to compare against)
+and keeps the terminal-semantics pixel checks + all green/red self-checks;
+`bench.py` measures canvas throughput only. Color math stays unit-tested via
+the exported `cellFg`/`cellBgRgb` (the `cellStyle` tests' successors).
 
 ## Sequencing note
 

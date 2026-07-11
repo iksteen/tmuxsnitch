@@ -164,9 +164,6 @@ body:has(#crt:not(:checked)) .panel {
   box-shadow:0 40px 90px -20px rgba(0,0,0,.9), 0 0 0 1px var(--border);
 }
 body:has(#crt:not(:checked)) #screen { filter:none; text-shadow:none; }
-/* The storm toggle governs DOM mode's auto-escalation only — meaningless while
-   canvas mode is on (storm is pinned), so hide it there. */
-body:has(#render:checked) label.toggle:has(#storm) { display:none; }
 /* Hug the terminal so the panel shrink-wraps it, and so the ResizeObserver in the
    fit script below fires on grid width changes too (not just height). */
 #screen { width:fit-content; }
@@ -201,8 +198,6 @@ body[data-offline="operator"] .offline .off-op { display:block; }
   <span class="brand"><span class="dot"></span><span class="grad">shellglass</span></span>
   <span class="nav-right">
     <span class="meta">live terminal mirror</span>
-    <label class="toggle"><input type="checkbox" id="render">canvas</label>
-    <label class="toggle"><input type="checkbox" id="storm">storm</label>
     <label class="toggle"><input type="checkbox" id="crt">CRT</label>
   </span>
 </nav>
@@ -210,8 +205,8 @@ body[data-offline="operator"] .offline .off-op { display:block; }
 // Persist the nav toggles across reloads. Runs before <main> so the stored state
 // is applied before the panel paints (no flash of effects). localStorage is wrapped —
 // a viewer with it disabled still gets working toggles, just not remembered ones.
-// A query param (`?crt`, `?render=dom`, `?storm=on`) flips the default, but only
-// when there is no stored choice — an explicit toggle always wins over the URL.
+// A query param (`?crt`) flips the default, but only when there is no stored
+// choice — an explicit toggle always wins over the URL.
 (() => {
   const params = new URLSearchParams(location.search);
   const wire = (id, key, urlOn) => {
@@ -224,8 +219,6 @@ body[data-offline="operator"] .offline .off-op { display:block; }
     });
   };
   wire('crt', 'shellglass-crt', params.has('crt'));
-  wire('render', 'shellglass-render', params.get('render') !== 'dom'); // canvas is the default
-  wire('storm', 'shellglass-storm', params.get('storm') === 'on'); // DOM-mode escalation, opt-in
 })();
 </script>
 <main class="stage">

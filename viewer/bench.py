@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""exp/cell-matrix bench driver: serves viewer/ + dist/viewer.js, launches
-headless Firefox at bench.html for each mode/size, collects the POSTed
+"""Canvas-renderer bench driver: serves viewer/ + dist/viewer.js, launches
+headless Firefox at bench.html for each load/size, collects the POSTed
 results, prints a table. Kills only the Firefox PIDs it spawned."""
 import http.server, json, os, socketserver, subprocess, sys, threading, time
 
@@ -23,10 +23,10 @@ class H(http.server.SimpleHTTPRequestHandler):
         DONE.set()
     def log_message(self, *a): pass
 
-def run(port, mode, load, cols, rows, secs):
+def run(port, load, cols, rows, secs):
     DONE.clear()
-    url = f"http://127.0.0.1:{port}/bench.html?mode={mode}&load={load}&cols={cols}&rows={rows}&secs={secs}"
-    profile = f"/tmp/sg-bench-profile-{mode}-{cols}x{rows}"
+    url = f"http://127.0.0.1:{port}/bench.html?load={load}&cols={cols}&rows={rows}&secs={secs}"
+    profile = f"/tmp/sg-bench-profile-{cols}x{rows}"
     p = subprocess.Popen(
         ["firefox", "--headless", "--no-remote", "--profile", profile, url],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -43,14 +43,12 @@ def main():
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         for load in ["typing", "editor", "rain"]:
             for cols, rows in [(80, 24), (200, 60), (320, 100)]:
-                for mode in ["dom-nostorm", "dom", "canvas"]:
-                    os.makedirs(f"/tmp/sg-bench-profile-{mode}-{cols}x{rows}", exist_ok=True)
-                    if not run(port, mode, load, cols, rows, secs):
-                        print(f"{mode} {load} {cols}x{rows}: TIMED OUT", file=sys.stderr)
+                os.makedirs(f"/tmp/sg-bench-profile-{cols}x{rows}", exist_ok=True)
+                if not run(port, load, cols, rows, secs):
+                    print(f"{load} {cols}x{rows}: TIMED OUT", file=sys.stderr)
         srv.shutdown()
-    print(f"{'load':<8} {'size':<10} {'mode':<9} {'fps':>7} {'flush ms':>9} {'storm':>6}")
+    print(f"{'load':<8} {'size':<10} {'fps':>7}")
     for r in RESULTS:
-        print(f"{r.get('load','rain'):<8} {r['cols']}x{r['rows']:<5} {r['mode']:<9} "
-              f"{r['fps']:>7.1f} {r['cost_ms']:>9.2f} {str(r['storm']):>6}")
+        print(f"{r.get('load','rain'):<8} {r['cols']}x{r['rows']:<5} {r['fps']:>7.1f}")
 
 main()

@@ -5,7 +5,8 @@ import assert from "node:assert/strict";
 import {
   palette,
   resolveRgb,
-  cellStyle,
+  cellFg,
+  cellBgRgb,
   applyDefaults,
   linkHref,
   ghostText,
@@ -14,7 +15,6 @@ import {
   isCanvasGlyph,
   glyphOps,
   sextantMask,
-  renderRow,
   patchCells,
   decodeBlock,
   setConfig,
@@ -66,92 +66,33 @@ test("resolveRgb handles the three color forms", () => {
   assert.deepEqual(resolveRgb([1, 2, 3]), [1, 2, 3]); // rgb passthrough
 });
 
-test("cellStyle emits colors, weight, and reverse video", () => {
-  assert.equal(cellStyle({ f: 1, b: true }, false), "color:#cd0000;font-weight:bold;");
-  // Inverse on an otherwise-default cell swaps in the default fg/bg.
-  assert.equal(cellStyle({ n: true }, false), "color:#000000;background:#d0d0d0;");
+test("cellFg/cellBgRgb: colors and reverse video", () => {
+  assert.deepEqual(cellFg({ f: 1 }, false), [0xcd, 0x00, 0x00]);
+  // Inverse on an otherwise-default cell swaps in the materialized defaults.
+  assert.deepEqual(cellFg({ n: true }, false), [0x00, 0x00, 0x00]);
+  assert.deepEqual(cellBgRgb({ n: true }, false), [0xd0, 0xd0, 0xd0]);
   // The cursor reverses too; inverse XOR cursor cancels back to normal.
-  assert.equal(cellStyle({ n: true }, true), "");
-  assert.equal(cellStyle({}, true), "color:#000000;background:#d0d0d0;");
+  assert.deepEqual(cellFg({ n: true }, true), [0xd0, 0xd0, 0xd0]);
+  assert.equal(cellBgRgb({ n: true }, true), null, "back to the default bg");
+  assert.deepEqual(cellFg({}, true), [0x00, 0x00, 0x00]);
+  assert.deepEqual(cellBgRgb({}, true), [0xd0, 0xd0, 0xd0]);
 });
 
-test("cellStyle dim matches the Rust floor formula, italic/underline emit", () => {
+test("cellFg dim matches the Rust floor formula", () => {
   // Rust: f/10*6 (integer division) — default fg 0xd0=208 → 20*6 = 120 = 0x78.
-  assert.equal(cellStyle({ d: true }, false), "color:#787878;");
+  assert.deepEqual(cellFg({ d: true }, false), [0x78, 0x78, 0x78]);
   // On a palette color: bright red 255 → 25*6 = 150 = 0x96.
-  assert.equal(cellStyle({ f: 9, d: true }, false), "color:#960000;");
-  assert.equal(
-    cellStyle({ i: true, u: true }, false),
-    "font-style:italic;text-decoration:underline;",
-  );
+  assert.deepEqual(cellFg({ f: 9, d: true }, false), [0x96, 0x00, 0x00]);
 });
 
 test("applyDefaults overrides the config defaults and reverts", () => {
   // Override the bg only: inverse on a default cell now swaps in the new bg.
   const css = applyDefaults([null, [0x30, 0x0a, 0x24]]);
   assert.deepEqual(css, { fg: "", bg: "#300a24" });
-  assert.equal(cellStyle({ n: true }, false), "color:#300a24;background:#d0d0d0;");
+  assert.deepEqual(cellFg({ n: true }, false), [0x30, 0x0a, 0x24]);
   // An absent `e` (the next full frame without overrides) reverts everything.
   assert.deepEqual(applyDefaults(undefined), { fg: "", bg: "" });
-  assert.equal(cellStyle({ n: true }, false), "color:#000000;background:#d0d0d0;");
-});
-
-test("cellStyle renders modern SGR: underline styles, strike, underline color", () => {
-  // u carries the style number: 1 plain, 3 wavy undercurl, 2/4/5 the rest.
-  assert.equal(cellStyle({ u: 1 }, false), "text-decoration:underline;");
-  assert.equal(cellStyle({ u: 3 }, false), "text-decoration:underline wavy;");
-  assert.equal(cellStyle({ u: 2 }, false), "text-decoration:underline double;");
-  assert.equal(cellStyle({ u: 4 }, false), "text-decoration:underline dotted;");
-  assert.equal(cellStyle({ u: 5 }, false), "text-decoration:underline dashed;");
-  // Strikethrough alone, and combined with an underline.
-  assert.equal(cellStyle({ s: 1 }, false), "text-decoration:line-through;");
-  assert.equal(
-    cellStyle({ u: 1, s: 1 }, false),
-    "text-decoration:underline line-through;",
-  );
-  // Underline color rides the shorthand; absent = currentcolor.
-  assert.equal(
-    cellStyle({ u: 3, k: 9 }, false),
-    "text-decoration:underline wavy #ff0000;",
-  );
-  assert.equal(
-    cellStyle({ u: 1, k: [1, 2, 3] }, false),
-    "text-decoration:underline #010203;",
-  );
-});
-
-test("renderRow coalesces same-style cells into one positioned run", () => {
-  const html = renderRow([{ t: "a" }, { t: "b" }, { t: "c" }], -1);
-  assert.equal(html, '<span class="run" style="left:0ch;width:3ch;">abc</span>');
-});
-
-test("renderRow turns OSC 8 runs into safe anchors", () => {
-  const links = { 1: "https://example.com/?q=\"x\"", 2: "javascript:alert(1)" };
-  // Linked cells coalesce into one anchor; href is attribute-escaped; the
-  // neighbours stay plain spans.
-  const html = renderRow(
-    [{ t: "x" }, { t: "a", a: 1 }, { t: "b", a: 1 }, { t: "y" }],
-    -1,
-    0,
-    links,
-  );
-  assert.equal(
-    html,
-    '<span class="run" style="left:0ch;width:1ch;">x</span>' +
-      '<a class="run" href="https://example.com/?q=&quot;x&quot;" target="_blank" rel="noopener noreferrer" style="left:1ch;width:2ch;">ab</a>' +
-      '<span class="run" style="left:3ch;width:1ch;">y</span>',
-  );
-  // Adjacent cells with different links must not merge into one anchor.
-  const two = renderRow([{ t: "a", a: 1 }, { t: "b", a: 2 }], -1, 0, {
-    1: "https://a.example",
-    2: "https://b.example",
-  });
-  assert.equal(two.match(/<a /g)?.length, 2);
-  // A blank cell must not ride a linked run (no clickable gaps).
-  const gap = renderRow([{ t: "a", a: 1 }, {}, { t: "b", a: 1 }], -1, 0, {
-    1: "https://a.example",
-  });
-  assert.equal(gap.match(/<a /g)?.length, 2, "blank splits the anchor");
+  assert.deepEqual(cellFg({ n: true }, false), [0x00, 0x00, 0x00]);
 });
 
 test("linkHref allowlists schemes and tolerates pruned ids", () => {
@@ -169,72 +110,12 @@ test("linkHref allowlists schemes and tolerates pruned ids", () => {
   assert.equal(linkHref(links, undefined), null);
 });
 
-test("renderRow draws DECSCUSR cursor shapes", () => {
-  const cells = [{ t: "a" }, { t: "b" }];
-  // Default/block styles (0-2): the classic reverse-video cell.
-  assert.equal(
-    renderRow(cells, 0),
-    '<span class="run" style="left:0ch;width:1ch;color:#000000;background:#d0d0d0;">a</span>' +
-      '<span class="run" style="left:1ch;width:1ch;">b</span>',
-  );
-  assert.equal(renderRow(cells, 0, 2), renderRow(cells, 0));
-  // Bar (5/6): no reverse video, an inset left-edge decoration instead.
-  assert.equal(
-    renderRow(cells, 0, 5),
-    '<span class="run" style="left:0ch;width:1ch;box-shadow:inset 0.14em 0 0 0 currentColor;">a</span>' +
-      '<span class="run" style="left:1ch;width:1ch;">b</span>',
-  );
-  // Underline (3/4): bottom-edge decoration.
-  assert.ok(renderRow(cells, 0, 4).includes("inset 0 -0.14em"));
-  // A blank cursor cell must not coalesce its decoration away into the run.
-  const blanks = [{ t: "x" }, {}, { t: "y" }];
-  assert.ok(
-    renderRow(blanks, 1, 6).includes("box-shadow"),
-    "bar cursor visible on a blank cell",
-  );
-});
-
-test("renderRow positions each run absolutely by column", () => {
-  // A styled middle cell splits the row into three runs, each at its own column.
-  const html = renderRow([{ t: "a" }, { t: "b", b: true }, { t: "c" }], -1);
-  assert.match(html, /left:0ch;width:1ch;">a</);
-  assert.match(html, /left:1ch;width:1ch;font-weight:bold;">b</);
-  assert.match(html, /left:2ch;width:1ch;">c</);
-});
-
-test("renderRow marks the cursor cell with reverse video", () => {
-  const html = renderRow([{ t: "x" }], 0);
-  assert.match(html, /color:#000000;background:#d0d0d0;/);
-});
-
-test("wide cells advance two columns", () => {
-  // Same-style cells coalesce (as render_row does), so the wide glyph shows up as
-  // extra width, not a separate run: 世(2) + a(1) = width 3.
-  assert.equal(
-    renderRow([{ t: "世", w: true }, { t: "a" }], -1),
-    '<span class="run" style="left:0ch;width:3ch;">世a</span>',
-  );
-  // A style break after the wide glyph reveals the column advance: the next run
-  // starts at column 2, not 1.
-  const split = renderRow([{ t: "世", w: true }, { t: "a", b: true }], -1);
-  assert.match(split, /left:0ch;width:2ch;">世</);
-  assert.match(split, /left:2ch;width:1ch;font-weight:bold;">a</);
-});
-
-test("box/block/legacy/powerline glyphs route to the canvas as transparent text", () => {
-  // These ranges draw on the overlay canvas; the DOM keeps the real glyph as
-  // transparent text (no SVG) so it stays selectable/copyable.
+test("box/block/legacy/powerline glyphs route to the canvas geometry", () => {
   const ranges = [[0x2500, 0x259f], [0x1fb00, 0x1fb3b], [0x1fb70, 0x1fb7b], [0xe0b0, 0xe0b3]];
   for (const [lo, hi] of ranges) {
     for (let cp = lo; cp <= hi; cp++) {
       assert.ok(isCanvasGlyph(cp), `U+${cp.toString(16)} should be canvas-routed`);
     }
-  }
-  for (const cp of [0x2502, 0x253c, 0x2550, 0x256d, 0x2591, 0x2588, 0x259a, 0x1fb00, 0x1fb70, 0xe0b0]) {
-    const g = String.fromCodePoint(cp);
-    const html = renderRow([{ t: g }], -1);
-    assert.doesNotMatch(html, /<svg/, `U+${cp.toString(16)} emitted SVG`);
-    assert.match(html, new RegExp(`color:transparent">${g}</span>`), `U+${cp.toString(16)} not transparent`);
   }
 });
 
@@ -249,27 +130,14 @@ test("isCanvasGlyph and glyphOps stay in lockstep (no invisible routing)", () =>
   }
 });
 
-test("non-canvas fill glyphs (wedges/flames) still take the SVG path", () => {
-  // The seam-motivated subset moved to the canvas; the long tail (smooth-mosaic wedges,
-  // rounded/flame separators) stays on the stretched-SVG font path.
+test("non-canvas fill glyphs (wedges/flames) take the fit-to-cell path", () => {
+  // The seam-motivated subset draws as canvas geometry; the long tail
+  // (smooth-mosaic wedges, rounded/flame separators) renders as fillText
+  // stretched onto the exact cell rect (inkBox mapping in redrawCanvasRow).
   for (const cp of [0xe0b8, 0x1fb3c, 0x1fb8c]) {
     assert.ok(!isCanvasGlyph(cp));
     assert.ok(isFillGlyph(cp));
-    assert.match(renderRow([{ t: String.fromCodePoint(cp) }], -1), /<svg /);
   }
-});
-
-test("symbol_map overrides the canvas for PUA arrows but not standard box glyphs", () => {
-  // A user who maps the powerline arrows to a Nerd Font wins over the canvas (E0B0–B3);
-  // a map over the standard box range loses — the canvas owns it unconditionally.
-  setConfig({ ...CFG, sym: [[0x2500, 0x259f, "Box Font"], [0xe0b0, 0xe0b3, "Arrow Font"]] });
-  const arrow = renderRow([{ t: String.fromCodePoint(0xe0b0) }], -1);
-  assert.match(arrow, /font-family="Arrow Font"/, "mapped PUA arrow should take the SVG font path");
-  assert.doesNotMatch(arrow, /color:transparent/, "mapped arrow should not stay a canvas glyph");
-  const box = renderRow([{ t: String.fromCodePoint(0x2500) }], -1);
-  assert.doesNotMatch(box, /<svg/, "canvas box glyph must ignore its symbol_map entry");
-  assert.match(box, /color:transparent/);
-  setConfig(CFG);
 });
 
 test("glyphOps emits pure device-pixel ops for the box/block range", () => {
@@ -385,7 +253,7 @@ test("patchCells pads a growing row with blanks, never holes", () => {
   const state = { cells: [[{ t: "s" }, { t: "h" }]], cur: null as [number, number] | null };
   patchCells(state, { cur: null, rows: [{ r: 0, l: 4, cells: [{ t: "$" }] }] });
   assert.deepEqual(state.cells[0], [{ t: "s" }, { t: "h" }, { t: " " }, { t: " " }, { t: "$" }]);
-  assert.doesNotThrow(() => renderRow(state.cells[0], -1));
+  assert.equal(ghostText(state.cells[0]), "sh  $", "no holes ghostText can trip on");
 });
 
 test("patchCells tri-state cursor: undefined leaves it untouched", () => {
@@ -450,16 +318,13 @@ test("uniform spans decode one cell per codepoint with a shared style", () => {
   assert.deepEqual(expand("a🚀"), [{ t: "a" }, { t: "🚀" }]);
 });
 
-test("flags as 1 style like true (weight, reverse, dim, wide)", () => {
-  assert.equal(cellStyle({ f: 1, b: 1 }, false), "color:#cd0000;font-weight:bold;");
-  assert.equal(cellStyle({ n: 1 }, false), "color:#000000;background:#d0d0d0;");
-  assert.equal(cellStyle({ d: 1 }, false), "color:#787878;");
-  // Wide flag as 1 advances two columns.
-  const split = renderRow([{ t: "世", w: 1 }, { t: "a", b: 1 }], -1);
-  assert.match(split, /left:2ch;width:1ch;font-weight:bold;">a</);
+test("flags as 1 style like true (reverse, dim)", () => {
+  assert.deepEqual(cellFg({ n: 1 }, false), [0x00, 0x00, 0x00]);
+  assert.deepEqual(cellBgRgb({ n: 1 }, false), [0xd0, 0xd0, 0xd0]);
+  assert.deepEqual(cellFg({ d: 1 }, false), [0x78, 0x78, 0x78]);
 });
 
-// ── ghost layer (storm mode's copy/find/a11y surface) ─────────────────────────
+// ── ghost layer (the copy/find/a11y surface under the canvas) ─────────────────
 
 test("ghostText: wide cells emit their grapheme once (2ch advance is the font's)", () => {
   assert.equal(ghostText([{ t: "漢", w: 1 }, { t: "x" }] as never), "漢x");
@@ -473,28 +338,6 @@ test("ghostText: blank and empty cells become spaces, trailing blanks preserved"
 
 test("ghostText: multi-codepoint graphemes survive intact", () => {
   assert.equal(ghostText([{ t: "e\u0301" }, { t: "👩‍🚀", w: 1 }] as never), "e\u0301👩‍🚀");
-});
-
-test("cellStyle conceal: glyph transparent, bg stays, decorations keep their ink", () => {
-  // conceal hides the glyph but not the cell — bg fills still paint
-  assert.equal(cellStyle({ o: 1 }, false), "color:transparent;");
-  assert.equal(cellStyle({ o: 1, g: 4 }, false), "color:transparent;background:#0000ee;");
-  // transparent currentcolor would erase decorations — the color is pinned
-  assert.equal(
-    cellStyle({ o: 1, u: 1 }, false),
-    "color:transparent;text-decoration:underline #d0d0d0;",
-  );
-  // an explicit underline color (k) wins as usual
-  assert.equal(
-    cellStyle({ o: 1, u: 1, k: 9 }, false),
-    "color:transparent;text-decoration:underline #ff0000;",
-  );
-});
-
-test("cellStyle blink animates the ink; conceal wins over blink", () => {
-  assert.equal(cellStyle({ x: 1 }, false), "animation:sg-blink 1s step-end infinite;");
-  // blinking a concealed cell is meaningless — conceal's transparent wins
-  assert.equal(cellStyle({ x: 1, o: 1 }, false), "color:transparent;");
 });
 
 // ── ghostSpan (in-place ghost patching) ───────────────────────────────────────

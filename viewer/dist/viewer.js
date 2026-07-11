@@ -119,48 +119,6 @@ export function weightBoost(fg, bg) {
     weightBoosts.set(key, k);
     return k;
 }
-export function cellStyle(cell, isCursor) {
-    let fg = resolveRgb(cell.f);
-    let bg = resolveRgb(cell.g);
-    if (!!cell.n !== isCursor) {
-        const f = fg ?? parseHex(cfg.defFg);
-        const b = bg ?? parseHex(cfg.defBg);
-        fg = b;
-        bg = f;
-    }
-    if (cell.d) {
-        const f = fg ?? parseHex(cfg.defFg);
-        fg = [Math.floor(f[0] / 10) * 6, Math.floor(f[1] / 10) * 6, Math.floor(f[2] / 10) * 6];
-    }
-    let s = "";
-    if (cell.o) {
-        s += "color:transparent;";
-    }
-    else if (fg) {
-        s += `color:${hex(fg)};`;
-    }
-    if (bg)
-        s += `background:${hex(bg)};`;
-    if (cell.b)
-        s += "font-weight:bold;";
-    if (cell.i)
-        s += "font-style:italic;";
-    if (cell.x && !cell.o)
-        s += "animation:sg-blink 1s step-end infinite;";
-    if (cell.u || cell.s) {
-        let d = `${cell.u ? "underline" : ""}${cell.s ? " line-through" : ""}`;
-        const us = { 2: "double", 3: "wavy", 4: "dotted", 5: "dashed" }[cell.u];
-        if (us)
-            d += ` ${us}`;
-        const k = resolveRgb(cell.k);
-        if (k)
-            d += ` ${hex(k)}`;
-        else if (cell.o)
-            d += ` ${hex(fg ?? parseHex(cfg.defFg))}`;
-        s += `text-decoration:${d.trim()};`;
-    }
-    return s;
-}
 let cellW = 8;
 let cellH = 17;
 let dpr = 1;
@@ -212,7 +170,7 @@ export function isCanvasGlyph(cp) {
         (cp >= 0x1fb70 && cp <= 0x1fb7b) ||
         (cp >= 0xe0b0 && cp <= 0xe0b3));
 }
-function cellFg(cell, isCursor) {
+export function cellFg(cell, isCursor) {
     let fg = resolveRgb(cell.f) ?? parseHex(cfg.defFg);
     if (!!cell.n !== isCursor)
         fg = resolveRgb(cell.g) ?? parseHex(cfg.defBg);
@@ -688,36 +646,6 @@ function drawGlyph(r, c, cp, cell, isCursor) {
     const light = Math.max(1, Math.round(dpr));
     paintOps(ctx, hex(cellFg(cell, isCursor)), glyphOps(cp, x0, y0, x1, y1, light));
 }
-function redrawCanvasRow(r) {
-    if (!ctx || !canvasEl)
-        return;
-    if (storm)
-        return drawRowStorm(r);
-    const row = screen.cells[r];
-    const y0 = Math.round(r * cellH * dpr);
-    const y1 = Math.round((r + 1) * cellH * dpr);
-    ctx.clearRect(0, y0, canvasEl.width, y1 - y0);
-    if (!row)
-        return;
-    let hasBlink = false;
-    let c = 0;
-    for (const cell of row) {
-        const w = cell.w ? 2 : 1;
-        const cp = cell.o ? 0 : cell.t ? cell.t.codePointAt(0) : 0;
-        if (cp && isCanvasGlyph(cp)) {
-            if (cell.x)
-                hasBlink = true;
-            if (cell.x && blinkPhase) {
-                c += w;
-                continue;
-            }
-            const isCursor = !!screen.cur && screen.cur[0] === r && screen.cur[1] === c && screen.sty <= 2;
-            drawGlyph(r, c, cp, cell, isCursor);
-        }
-        c += w;
-    }
-    noteBlinkRow(r, hasBlink);
-}
 function redrawCanvasAll() {
     if (!ctx || !canvasEl)
         return;
@@ -725,14 +653,7 @@ function redrawCanvasAll() {
     for (let r = 0; r < screen.cells.length; r++)
         redrawCanvasRow(r);
 }
-let storm = false;
-let stormHot = 0;
-let lastStormy = 0;
-let stormTimer = null;
-const STORM_RATIO = 0.5;
-const STORM_ENTER = 3;
-const STORM_EXIT_MS = 1200;
-function cellBgRgb(cell, isCursor) {
+export function cellBgRgb(cell, isCursor) {
     if (!!cell.n !== isCursor)
         return resolveRgb(cell.f) ?? parseHex(cfg.defFg);
     return resolveRgb(cell.g);
@@ -763,7 +684,7 @@ function startCurAnim(from, to) {
 function stepCurAnim() {
     if (!curAnim)
         return;
-    if (!ctx || !storm || pictureHeld()) {
+    if (!ctx || pictureHeld()) {
         curAnim = null;
         return;
     }
@@ -796,58 +717,6 @@ function stepCurAnim() {
     else
         ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
     requestAnimationFrame(stepCurAnim);
-}
-let renderBox;
-let renderPref;
-function canvasModeOn() {
-    if (renderBox === undefined) {
-        renderBox = document.getElementById("render");
-        renderBox?.addEventListener("change", () => {
-            if (renderBox?.checked)
-                setStorm(true);
-            else if (!selectionActive())
-                setStorm(false);
-        });
-    }
-    if (renderBox !== null)
-        return renderBox.checked;
-    if (renderPref === undefined) {
-        let stored = null;
-        try {
-            stored = localStorage.getItem("shellglass-render");
-        }
-        catch {
-        }
-        renderPref = stored
-            ? stored === "on"
-            : new URLSearchParams(location.search).get("render") !== "dom";
-    }
-    return renderPref;
-}
-let stormBox;
-let stormPref;
-function stormAutoOn() {
-    if (stormBox === undefined) {
-        stormBox = document.getElementById("storm");
-        stormBox?.addEventListener("change", () => {
-            if (!stormBox?.checked && storm && !canvasModeOn() && !selectionActive())
-                setStorm(false);
-        });
-    }
-    if (stormBox !== null)
-        return stormBox.checked;
-    if (stormPref === undefined) {
-        let stored = null;
-        try {
-            stored = localStorage.getItem("shellglass-storm");
-        }
-        catch {
-        }
-        stormPref = stored
-            ? stored === "on"
-            : new URLSearchParams(location.search).get("storm") === "on";
-    }
-    return stormPref;
 }
 let blinkPhase = false;
 const blinkRows = new Set();
@@ -885,7 +754,7 @@ function crtOn() {
     }
     return crtBox !== null && crtBox.checked;
 }
-function drawRowStorm(r) {
+function redrawCanvasRow(r) {
     if (!ctx || !canvasEl)
         return;
     const y0 = Math.round(r * cellH * dpr);
@@ -1182,14 +1051,12 @@ function setHover(a, r) {
 function onScreenMove(ev) {
     if (pictureHeld())
         return;
-    if (!storm)
-        return setHover(undefined, -1);
     const hit = cellAt(ev);
     const linked = hit !== null && linkHref(screen.links, hit.cell.a) !== null;
     setHover(linked ? hit.cell.a : undefined, linked ? hit.r : -1);
 }
 function onScreenClick(ev) {
-    if (!storm || selectionActive())
+    if (selectionActive())
         return;
     const hit = cellAt(ev);
     const uri = hit === null ? null : linkHref(screen.links, hit.cell.a);
@@ -1259,62 +1126,7 @@ function selectionActive() {
     return s !== null && !s.isCollapsed;
 }
 function pictureHeld() {
-    return storm && (selectionActive() || pointerHeld);
-}
-let ghostCss = false;
-function ensureGhostCss() {
-    if (ghostCss || typeof document === "undefined")
-        return;
-    ghostCss = true;
-    const st = document.createElement("style");
-    st.textContent =
-        ".row.ghost{color:transparent;text-shadow:none}" +
-            ".row.ghost::selection{background:rgba(110,170,255,.4)}" +
-            ".screen.sg-canvas img.inline-img{visibility:hidden}";
-    document.head.appendChild(st);
-}
-function setStorm(on) {
-    if (storm === on)
-        return;
-    storm = on;
-    if (!on)
-        setHover(undefined, -1);
-    screenEl.firstElementChild?.classList.toggle("sg-canvas", on);
-    ensureGhostCss();
-    for (const el of screen.rowEls)
-        el.classList.toggle("ghost", on);
-    if (on) {
-        for (let r = 0; r < screen.cells.length; r++)
-            ghostRow(r);
-        redrawCanvasAll();
-        lastStormy = clock();
-        stormTimer = setInterval(() => {
-            if (clock() - lastStormy > STORM_EXIT_MS &&
-                !selectionActive() &&
-                !pointerHeld &&
-                !canvasModeOn())
-                setStorm(false);
-        }, 300);
-    }
-    else {
-        if (stormTimer !== null)
-            clearInterval(stormTimer);
-        stormTimer = null;
-        stormHot = 0;
-        for (let r = 0; r < screen.cells.length; r++) {
-            const el = screen.rowEls[r];
-            if (el)
-                el.innerHTML = renderRow(screen.cells[r], cursorCol(screen.cur, r), screen.sty, screen.links);
-        }
-        redrawCanvasAll();
-    }
-}
-function stormReset() {
-    if (stormTimer !== null)
-        clearInterval(stormTimer);
-    stormTimer = null;
-    storm = false;
-    stormHot = 0;
+    return selectionActive() || pointerHeld;
 }
 export function isFillGlyph(cp) {
     return ((cp >= 0xe0b0 && cp <= 0xe0d4) ||
@@ -1369,9 +1181,6 @@ function svgFont(cell) {
 function esc(s) {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
-function escAttr(s) {
-    return esc(s).replace(/"/g, "&quot;");
-}
 export function linkHref(links, id) {
     if (id === undefined)
         return null;
@@ -1379,110 +1188,6 @@ export function linkHref(links, id) {
     if (!uri)
         return null;
     return /^(https?|ftp|mailto|file):/i.test(uri) ? uri : null;
-}
-function symbolSpan(col, w, boxStyle, font, glyph, stretch) {
-    const par = stretch ? "none" : "xMidYMid meet";
-    const len = stretch ? ' textLength="14" lengthAdjust="spacingAndGlyphs"' : "";
-    return (`<span class="run" style="left:${col}ch;width:${w}ch;${boxStyle}">` +
-        `<svg viewBox="0 0 14 14" preserveAspectRatio="${par}" style="display:block;width:100%;height:100%">` +
-        `<text x="0" y="12" font-family="${font}" font-size="14" fill="currentColor"${len}>${glyph}</text></svg></span>`);
-}
-function symbolCell(cell, isCursor, col, w, font, deco = "") {
-    const boxStyle = cellStyle(cell, isCursor) + deco;
-    const t = cell.t ?? " ";
-    const cp = t.codePointAt(0) ?? 0x20;
-    const stretch = isFillGlyph(cp);
-    return symbolSpan(col, w, boxStyle, font, esc(t), stretch);
-}
-function inkFree(s) {
-    return !s.includes("background") && !s.includes("text-decoration") && !s.includes("box-shadow");
-}
-function cursorDeco(sty) {
-    return sty >= 5
-        ? "box-shadow:inset 0.14em 0 0 0 currentColor;"
-        : "box-shadow:inset 0 -0.14em 0 0 currentColor;";
-}
-export function renderRow(cells, cursorCol, curSty = 0, links = {}) {
-    const blocky = curSty <= 2;
-    let out = "";
-    let col = 0;
-    let runStyle = null;
-    let runHref = null;
-    let runCol = 0;
-    let cols = 0;
-    let text = "";
-    const flushText = () => {
-        if (text.length === 0)
-            return;
-        const st = `left:${runCol}ch;width:${cols}ch;${runStyle ?? ""}`;
-        out +=
-            runHref === null
-                ? `<span class="run" style="${st}">${text}</span>`
-                : `<a class="run" href="${escAttr(runHref)}" target="_blank" rel="noopener noreferrer" style="${st}">${text}</a>`;
-        text = "";
-    };
-    for (const cell of cells) {
-        const isCursor = col === cursorCol;
-        const curBlock = isCursor && blocky;
-        const deco = isCursor && !blocky ? cursorDeco(curSty) : "";
-        const w = cell.w ? 2 : 1;
-        const cp0 = cell.t ? cell.t.codePointAt(0) : 0;
-        if (cp0 && isCanvasGlyph(cp0) && !(cp0 >= 0xe000 && symbolFamily(cp0))) {
-            flushText();
-            runStyle = null;
-            runHref = null;
-            cols = 0;
-            out += `<span class="run" style="left:${col}ch;width:${w}ch;${cellStyle(cell, curBlock)}${deco}color:transparent">${esc(cell.t)}</span>`;
-            col += w;
-            continue;
-        }
-        if (cp0 && glyphOverflowsCell(cell.t, w) && !isFillGlyph(cp0) && !symbolFamily(cp0)) {
-            flushText();
-            runStyle = null;
-            runHref = null;
-            cols = 0;
-            out += `<span class="run" style="left:${col}ch;width:${w}ch;overflow:visible;${cellStyle(cell, curBlock)}${deco}">${esc(cell.t)}</span>`;
-            col += w;
-            continue;
-        }
-        const font = svgFont(cell);
-        if (font) {
-            flushText();
-            runStyle = null;
-            runHref = null;
-            cols = 0;
-            out += symbolCell(cell, curBlock, col, w, font, deco);
-        }
-        else {
-            let style = cellStyle(cell, curBlock) + deco;
-            const href = linkHref(links, cell.a);
-            if ((!cell.t || cell.t === " ") &&
-                href === null &&
-                runHref === null &&
-                runStyle !== null &&
-                runStyle !== style &&
-                inkFree(style) &&
-                inkFree(runStyle)) {
-                style = runStyle;
-            }
-            if (runStyle !== style || runHref !== href) {
-                flushText();
-                runStyle = style;
-                runHref = href;
-                cols = 0;
-            }
-            if (cols === 0)
-                runCol = col;
-            text += esc(cell.t && cell.t.length ? cell.t : " ");
-            cols += w;
-        }
-        col += w;
-    }
-    flushText();
-    return out;
-}
-function cursorCol(cur, row) {
-    return cur && cur[0] === row ? cur[1] : -1;
 }
 let screen = { cells: [], cur: null, sty: 0, links: {}, rowEls: [] };
 let screenImages = [];
@@ -1521,98 +1226,55 @@ let paintScheduled = false;
 const dirtyRows = new Set();
 let rebuildDims = null;
 let rebuildBanner = null;
-let lastFlush = 0;
-const TARGET_LOAD = 0.7;
-const MAX_INTERVAL = 250;
-let paintCost = 16;
 let bytesIn = 0;
 let paints = 0;
-const raf = (cb) => (typeof requestAnimationFrame !== "undefined" ? requestAnimationFrame : (f) => setTimeout(f, 16))(cb);
 const clock = () => (typeof performance !== "undefined" ? performance.now() : 0);
 function schedulePaint() {
     if (paintScheduled)
         return;
     paintScheduled = true;
-    if (canvasModeOn())
-        setTimeout(flushPaint, 0);
-    else
-        raf(flushPaint);
+    setTimeout(flushPaint, 0);
 }
 function flushPaint() {
-    const now = clock();
-    const interval = canvasModeOn() ? 0 : Math.min(paintCost / TARGET_LOAD, MAX_INTERVAL);
-    if (!rebuildDims && rebuildBanner === null && now - lastFlush < interval) {
-        raf(flushPaint);
-        return;
-    }
-    lastFlush = now;
     paintScheduled = false;
     paints++;
     if (rebuildBanner !== null) {
-        stormReset();
         screenEl.innerHTML = rebuildBanner;
         rebuildBanner = null;
         rebuildDims = null;
         dirtyRows.clear();
         return;
     }
-    const t0 = clock();
     if (rebuildDims) {
-        stormReset();
         paintFull(rebuildDims);
         rebuildDims = null;
         dirtyRows.clear();
-        if (canvasModeOn())
-            setStorm(true);
         lastCurPos = screen.cur ? [screen.cur[0], screen.cur[1]] : null;
     }
     else {
-        const stormy = dirtyRows.size >= STORM_RATIO * (screen.cells.length || 1);
-        if (stormy) {
-            lastStormy = now;
-            if (stormAutoOn() && !storm && ++stormHot >= STORM_ENTER)
-                setStorm(true);
-        }
-        else if (!storm) {
-            stormHot = 0;
-        }
         const held = pictureHeld();
         const cur = screen.cur;
-        if (storm && !held && smoothCursorOn() && cur && lastCurPos &&
+        if (!held && smoothCursorOn() && cur && lastCurPos &&
             (cur[0] !== lastCurPos[0] || cur[1] !== lastCurPos[1])) {
             startCurAnim(lastCurPos, cur);
         }
         if (!held)
             lastCurPos = cur ? [cur[0], cur[1]] : null;
-        if (storm && !held && frozenStale) {
+        if (!held && frozenStale) {
             redrawCanvasAll();
             for (let r = 0; r < screen.cells.length; r++)
                 ghostRow(r);
             frozenStale = false;
         }
         for (const r of dirtyRows) {
-            if (storm) {
-                if (held) {
-                    frozenStale = true;
-                    continue;
-                }
-                drawRowStorm(r);
-                ghostRow(r);
+            if (held) {
+                frozenStale = true;
+                continue;
             }
-            else {
-                const el = screen.rowEls[r];
-                if (!el)
-                    continue;
-                el.innerHTML = renderRow(screen.cells[r] ?? [], cursorCol(screen.cur, r), screen.sty, screen.links);
-                redrawCanvasRow(r);
-            }
+            redrawCanvasRow(r);
+            ghostRow(r);
         }
         dirtyRows.clear();
-    }
-    if (!canvasModeOn()) {
-        raf(() => {
-            paintCost += 0.3 * (clock() - t0 - paintCost);
-        });
     }
 }
 function applyFull(m) {
@@ -1642,10 +1304,9 @@ function setTitle(t) {
 function paintFull(dims) {
     screenEl.style.color = defaultsCss.fg;
     screenEl.style.backgroundColor = defaultsCss.bg;
-    const cur = screen.cur;
     let html = `<div class="screen" style="width:${dims.w}ch;height:calc(${dims.h} * var(--lh));">`;
     for (let r = 0; r < screen.cells.length; r++) {
-        html += `<div class="row">${renderRow(screen.cells[r], cursorCol(cur, r), screen.sty, screen.links)}</div>`;
+        html += `<div class="row ghost">${esc(ghostText(screen.cells[r]))}</div>`;
     }
     html += "</div>";
     screenEl.innerHTML = html;
@@ -1653,16 +1314,12 @@ function paintFull(dims) {
     screen.rowEls = Array.from(screenDiv.children);
     attachCanvas(dims.w, dims.h, screenDiv);
     redrawCanvasAll();
-    screenDiv.classList.toggle("sg-canvas", storm);
     screenImages = (dims.i ?? []).map((ref) => {
         const anchor = screen.rowEls[Math.min(Math.max(ref.r, 0), screen.rowEls.length - 1)];
         anchor.insertAdjacentHTML(ref.r < 0 ? "beforebegin" : "afterend", renderImage(ref));
         const el = (ref.r < 0 ? anchor.previousElementSibling : anchor.nextElementSibling);
         if (!el.complete)
-            el.addEventListener("load", () => {
-                if (storm)
-                    redrawCanvasAll();
-            });
+            el.addEventListener("load", () => redrawCanvasAll());
         return { ref, el };
     });
 }
@@ -1782,26 +1439,24 @@ function startStats() {
         const dt = (t - lastT) / 1000 || 1;
         const bps = (bytesIn - lastBytes) / dt;
         const fps = (paints - lastPaints) / dt;
-        const cap = 1000 / Math.min(paintCost / TARGET_LOAD, MAX_INTERVAL);
         lastBytes = bytesIn;
         lastPaints = paints;
         lastT = t;
-        el.textContent = `${fmtRate(bps)} · ${fps.toFixed(0)} fps (cap ${canvasModeOn() ? "off" : cap.toFixed(0)})${storm ? (canvasModeOn() ? " · canvas" : " · storm") : ""}`;
+        el.textContent = `${fmtRate(bps)} · ${fps.toFixed(0)} fps`;
     }, 1000);
 }
 function injectViewerCss() {
-    const linkCss = document.createElement("style");
-    linkCss.textContent =
-        "#screen a.run{color:inherit;text-decoration:none}" +
-            "#screen a.run:hover{text-decoration:underline}" +
-            "@keyframes sg-blink{50%,100%{color:transparent}}" +
+    const css = document.createElement("style");
+    css.textContent =
+        ".row.ghost{color:transparent;text-shadow:none}" +
+            ".row.ghost::selection{background:rgba(110,170,255,.4)}" +
             "#screen img.inline-img{position:absolute;" +
             "left:calc(var(--sg-c)*1ch);top:calc(var(--sg-r)*var(--lh));" +
-            "z-index:3;pointer-events:none}" +
+            "z-index:3;pointer-events:none;visibility:hidden}" +
             "#screen img.inline-img.sized{width:calc(var(--sg-w)*1ch);" +
             "height:calc(var(--sg-h)*var(--lh));" +
             "object-fit:contain;object-position:left top}";
-    document.head.appendChild(linkCss);
+    document.head.appendChild(css);
 }
 export function benchInit(el) {
     screenEl = el;
@@ -1809,13 +1464,13 @@ export function benchInit(el) {
     attachLinkHandlers();
 }
 export function benchStats() {
-    return { paints, cost: paintCost, storm };
-}
-export function benchStorm(on) {
-    setStorm(on);
+    return { paints };
 }
 export function benchFlush() {
     flushPaint();
+}
+export function benchRedraw() {
+    redrawCanvasAll();
 }
 export function benchCursorStep() {
     stepCurAnim();

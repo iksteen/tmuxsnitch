@@ -157,7 +157,7 @@ resurrect sessions the API deleted.
 command in a PTY  ── output bytes ─►  long-lived vt100 parser
   → parser-agnostic StyledCell grid   → per-line diffs (changed spans only)
   → SSE deltas, encoded once per frame for all viewers
-  → viewer.js renders cells → HTML in the browser
+  → viewer.js paints cells on a canvas in the browser
 ```
 
 The command runs in a pseudo-terminal you drive from your own terminal (the
@@ -165,7 +165,8 @@ The command runs in a pseudo-terminal you drive from your own terminal (the
 parallel, fed to a long-lived vt100 parser snapshotted at up to 30fps. Each
 viewer gets a full frame on connect, then only the **changed spans** — a
 keystroke costs bytes, not a full screen — and a small baked-in renderer
-(`/viewer.js`) turns cells into HTML client-side. Terminal resizes (`SIGWINCH`)
+(`/viewer.js`) paints cells client-side (see [Templating](#templating) for the
+rendering model). Terminal resizes (`SIGWINCH`)
 reflow both the PTY and the browser. In hub mode the client pushes frames over a
 **single persistent WebSocket** (not a request per frame), so throughput isn't
 gated by round-trip latency; the hub relays them per session and re-serves the
@@ -266,22 +267,17 @@ proportionally.
 
 ## Templating
 
-The built-in page is a dark chrome with nav toggles, each remembered per browser
-in localStorage:
+The picture paints on a canvas, by the terminal's own rules (kitty is the
+reference): ink seated inside the cell box, decorations clamped into the cell
+and drawn through spaces, DECSCUSR cursor shapes, images under later text. The
+DOM underneath carries the same content as transparent ghost text, so native
+select/copy/find work — what you see, what you highlight, and what Ctrl-C
+copies are the same thing (the whole picture holds still while you select).
 
-- **canvas** — the renderer switch, **on by default** (`?render=dom` flips a fresh
-  browser to DOM mode). On = every update paints on a canvas, rendered by the
-  terminal's own rules — ink seated inside the cell box, decorations clamped into
-  the cell — with the DOM underneath as transparent ghost text so
-  select/copy/find keep working. Off = the classic CSS-native DOM renderer: real
-  links, native selection and find.
-- **storm** — only shown in DOM mode; off by default (`?storm=on` opts in). Gates
-  DOM mode's automatic escalation to the canvas under full-screen animation load.
-- **CRT** — a CRT tube effect (scanlines, phosphor bloom, flicker, vignette;
-  also `?crt`). Works in both renderer modes.
-
-`?cursor=smooth` (canvas rendering only) makes the cursor glide between cells
-over ~80ms instead of teleporting.
+The built-in page is a dark chrome with a **CRT** nav toggle — a CRT tube
+effect (scanlines, phosphor bloom, flicker, vignette; also `?crt`), remembered
+per browser in localStorage. `?cursor=smooth` makes the cursor glide between
+cells over ~80ms instead of teleporting.
 
 For a fully custom page, point `template` at a full HTML document with three
 tokens the renderer fills at serve time:

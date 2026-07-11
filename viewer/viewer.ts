@@ -1,11 +1,15 @@
 // shellglass browser renderer — THE renderer; nothing is painted server-side.
 //
-// Receives the compact cell-diff stream over SSE and renders it to HTML: run
-// coalescing with absolute per-run positioning, SVG-scaled symbol glyphs, the
-// xterm-256 palette, and reverse/dim/bold/italic/underline styling. It keeps the
-// full cell grid in memory so a line diff only re-renders the affected rows. The
-// page arrives with an empty #screen and the first SSE event after the version
-// hello is always a full frame, so the initial paint lands one round-trip in.
+// Receives the compact cell-diff stream over SSE and paints it on a canvas by
+// the terminal's own rules (kitty is the reference): per-cell backgrounds,
+// run-shaped text, crisp device-pixel geometry for box/block glyphs, the
+// xterm-256 palette, and reverse/dim/bold/italic/underline styling. The DOM
+// underneath holds one transparent GHOST TEXT node per row (plus the inline
+// image elements), kept in sync with the picture, so native select/copy/find
+// work through the pointer-events:none canvas. It keeps the full cell grid in
+// memory so a line diff only repaints the affected rows. The page arrives with
+// an empty #screen and the first SSE event after the version hello is always a
+// full frame, so the initial paint lands one round-trip in.
 //
 // Compiled to viewer.js (see build.rs) and served at /viewer.js; the page injects
 // `window.SHELLGLASS = { events, cfg }` before loading this module.
@@ -112,8 +116,8 @@ interface LineMsg {
   q?: number;
 }
 
-// Materialize text entries + style runs into per-cell objects (the form renderRow
-// consumes). for..of on a string iterates CODEPOINTS (unlike split(""), which
+// Materialize text entries + style runs into per-cell objects (the grid's cell
+// form). for..of on a string iterates CODEPOINTS (unlike split(""), which
 // would shred surrogate pairs), matching the encoder's merge rule exactly.
 export function decodeCells(text: TextEntry[], runs?: StyleRun[]): Cell[] {
   const cells: Cell[] = [];
@@ -160,7 +164,7 @@ type RGB = [number, number, number];
 let cfg: Cfg;
 // The *configured* defaults, kept so OSC 10/11 overrides (the full frame's `e`
 // key) can be applied by mutating cfg.defFg/defBg — every consumer (reverse/dim
-// math, storm fills, canvas line colors) reads cfg live — and reverted on reset.
+// math, cell fills, canvas line colors) reads cfg live — and reverted on reset.
 let baseFg = "";
 let baseBg = "";
 export function setConfig(c: Cfg): void {
@@ -278,7 +282,7 @@ export function weightCurve(fgLum: number, bgLum: number, a: number): number {
 // The remap ships as a DOUBLE-DRAW: a second fillText at globalAlpha k
 // composites source-over to a′ = a + k·a(1−a) — same rasterization path, no
 // per-draw filter surface (an exact SVG feComponentTransfer table filter was
-// measured 5× slower under storm: every filtered draw pays an intermediate
+// measured 5× slower under animation load: every filtered draw pays an intermediate
 // surface). k is fitted per (fg,bg)-luminance bucket so the boosted curve
 // meets the exact linear-blend target at half coverage. Thickening only:
 // dark-on-light would need thinning, which overdraw cannot express — kitty's
@@ -305,59 +309,6 @@ export function weightBoost(fg: RGB, bg: RGB): number {
       : Math.min(1, Math.max(0, (weightCurve(fl, bl, 0.5) - 0.5) / 0.25));
   weightBoosts.set(key, k);
   return k;
-}
-
-// ── cell → CSS (port of render.rs:cell_box_style) ─────────────────────────────
-
-export function cellStyle(cell: Cell, isCursor: boolean): string {
-  let fg = resolveRgb(cell.f);
-  let bg = resolveRgb(cell.g);
-  // Reverse video (inverse XOR cursor) swaps fg/bg, materializing defaults.
-  if (!!cell.n !== isCursor) {
-    const f = fg ?? parseHex(cfg.defFg);
-    const b = bg ?? parseHex(cfg.defBg);
-    fg = b;
-    bg = f;
-  }
-  if (cell.d) {
-    const f = fg ?? parseHex(cfg.defFg);
-    fg = [Math.floor(f[0] / 10) * 6, Math.floor(f[1] / 10) * 6, Math.floor(f[2] / 10) * 6];
-  }
-  let s = "";
-  if (cell.o) {
-    // Conceal (SGR 8): the glyph is hidden, bg and decorations stay — like
-    // the terminals that implement it (xterm/foot/alacritty; kitty ignores
-    // SGR 8, a deviation the vendored parser documents). transparent kills
-    // currentcolor decorations too, so the decoration branch below pins its
-    // color explicitly.
-    s += "color:transparent;";
-  } else if (fg) {
-    s += `color:${hex(fg)};`;
-  }
-  if (bg) s += `background:${hex(bg)};`;
-  if (cell.b) s += "font-weight:bold;";
-  if (cell.i) s += "font-style:italic;";
-  // Blink (SGR 5): keyframes injected by injectViewerCss — the ink goes
-  // transparent for the second half of each 1s cycle (bg stays), like kitty.
-  if (cell.x && !cell.o) s += "animation:sg-blink 1s step-end infinite;";
-  if (cell.u || cell.s) {
-    // The text-decoration shorthand: lines, then style (u: 2 double, 3 wavy
-    // undercurl, 4 dotted, 5 dashed), then color (absent = currentcolor, which
-    // already follows the inverse/dim fg math above). One CSS limitation,
-    // accepted: style and color apply to the strikethrough too when both
-    // lines are on — kitty draws the strike straight/fg, but the combination
-    // is vanishingly rare.
-    let d = `${cell.u ? "underline" : ""}${cell.s ? " line-through" : ""}`;
-    const us = { 2: "double", 3: "wavy", 4: "dotted", 5: "dashed" }[
-      cell.u as number
-    ];
-    if (us) d += ` ${us}`;
-    const k = resolveRgb(cell.k);
-    if (k) d += ` ${hex(k)}`;
-    else if (cell.o) d += ` ${hex(fg ?? parseHex(cfg.defFg))}`;
-    s += `text-decoration:${d.trim()};`;
-  }
-  return s;
 }
 
 // ── canvas line overlay (exp) ─────────────────────────────────────────────────
@@ -434,8 +385,10 @@ export function isCanvasGlyph(cp: number): boolean {
   );
 }
 
-// The line color for a box cell — fg after inverse/dim (mirrors cellStyle's fg path).
-function cellFg(cell: Cell, isCursor: boolean): RGB {
+// The cell's ink color: fg after reverse video (inverse XOR cursor, which swaps
+// in the materialized defaults) and dim (the Rust f/10*6 floor formula —
+// render.rs:cell_box_style is the reference for this math).
+export function cellFg(cell: Cell, isCursor: boolean): RGB {
   let fg = resolveRgb(cell.f) ?? parseHex(cfg.defFg);
   if (!!cell.n !== isCursor) fg = resolveRgb(cell.g) ?? parseHex(cfg.defBg);
   if (cell.d) fg = [Math.floor(fg[0] / 10) * 6, Math.floor(fg[1] / 10) * 6, Math.floor(fg[2] / 10) * 6];
@@ -444,15 +397,15 @@ function cellFg(cell: Cell, isCursor: boolean): RGB {
 
 let canvasEl: HTMLCanvasElement | null = null;
 let ctx: CanvasRenderingContext2D | null = null;
-let fontPx = 16; // device-pixel font size for storm-mode fillText (set in sizeCanvas)
+let fontPx = 16; // device-pixel font size for canvas fillText (set in sizeCanvas)
 let fontFam = "monospace";
 
 // ── canvas text metrics (baseline parity + fill-glyph stretch) ────────────────
 //
-// The DOM aligns every run on the row's STRUT baseline — the base font's
-// ascent placed after half-leading — regardless of a span's own font. Canvas
-// must do the same: one baseline per row, derived from the base font, or text
-// visibly jumps when storm engages. Computed lazily per (font string), reset
+// A DOM line box aligns text on the row's STRUT baseline — the base font's
+// ascent placed after half-leading — regardless of the glyph's own font. Canvas
+// does the same: one baseline per row, derived from the base font, so canvas
+// text sits exactly on the ghost rows' lines. Computed lazily per (font string), reset
 // with the caches on resize/font-load (sizeCanvas bumps fontPx into the key).
 const fontMetricsCache = new Map<string, { asc: number; desc: number; iAsc: number; iDesc: number }>();
 function strutMetrics(font: string): { asc: number; desc: number; iAsc: number; iDesc: number } {
@@ -617,7 +570,7 @@ function sizeCanvas(): void {
   dpr = (window.devicePixelRatio || 1) * vvScale;
   canvasEl.width = Math.round(rect.width * dpr);
   canvasEl.height = Math.round(rect.height * dpr);
-  // Storm mode draws text on the canvas with the same face the DOM uses; capture it
+  // Canvas text draws with the same face the ghost rows use; capture it
   // here so the backing-store size and the font stay in lockstep (both dpr-scaled).
   // CSS `zoom` (the template's fit + user zoom) splits the coordinate spaces:
   // in Firefox getBoundingClientRect() is zoomed but computed width/font-size
@@ -1009,82 +962,33 @@ function drawGlyph(r: number, c: number, cp: number, cell: Cell, isCursor: boole
   paintOps(ctx, hex(cellFg(cell, isCursor)), glyphOps(cp, x0, y0, x1, y1, light));
 }
 
-// Redraw one row's band of the canvas from screen.cells (clears then repaints its box
-// cells). Self-contained: a cell's ink stays within its own [y0,y1], so a per-row
-// redraw never disturbs neighbours — matching the DOM's per-row update.
-function redrawCanvasRow(r: number): void {
-  if (!ctx || !canvasEl) return;
-  if (storm) return drawRowStorm(r);
-  const row = screen.cells[r];
-  const y0 = Math.round(r * cellH * dpr);
-  const y1 = Math.round((r + 1) * cellH * dpr);
-  ctx.clearRect(0, y0, canvasEl.width, y1 - y0);
-  if (!row) return;
-  let hasBlink = false;
-  let c = 0;
-  for (const cell of row) {
-    const w = cell.w ? 2 : 1;
-    const cp = cell.o ? 0 : cell.t ? cell.t.codePointAt(0)! : 0; // conceal: no glyph
-    if (cp && isCanvasGlyph(cp)) {
-      // a blinking box glyph is timer-repainted here even in DOM mode (the
-      // CSS animation only reaches DOM-drawn text)
-      if (cell.x) hasBlink = true;
-      if (cell.x && blinkPhase) {
-        c += w;
-        continue; // blink-off phase: skip the glyph, keep the registration
-      }
-      // Only a block cursor reverses the glyph's ink; underline/bar cursors
-      // ride the DOM span's decoration and leave the colors alone.
-      const isCursor =
-        !!screen.cur && screen.cur[0] === r && screen.cur[1] === c && screen.sty <= 2;
-      drawGlyph(r, c, cp, cell, isCursor);
-    }
-    c += w;
-  }
-  noteBlinkRow(r, hasBlink);
-}
-
 function redrawCanvasAll(): void {
   if (!ctx || !canvasEl) return;
   ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
   for (let r = 0; r < screen.cells.length; r++) redrawCanvasRow(r);
 }
 
-// ── storm mode: full-canvas rendering under animation load ───────────────────
+// ── full-canvas cell rendering ────────────────────────────────────────────────
 //
-// When most of the screen changes every frame (cmatrix, `yes`, fast scroll), the DOM
-// is the wrong medium: thousands of positioned spans rebuilt per frame cost tens of
-// ms of style+layout+paint, and no amount of pacing makes that fast. So under
-// sustained near-full-screen change the visible picture moves to the (already
-// cell-exact, dpr-aware) canvas overlay — backgrounds, text, crisp glyph geometry —
-// no style recalc, near-zero layout, single composited surface, a few ms per full
-// frame. The adaptive shaper then sees cheap frames and raises the rate on its own —
-// the two mechanisms compose.
+// The whole picture paints on the (cell-exact, dpr-aware) canvas — backgrounds,
+// text, crisp glyph geometry — no style recalc, near-zero layout, a single
+// composited surface, a few ms per full frame even under full-screen animation
+// (cmatrix, `yes`, fast scroll). Ground truth is terminal behavior, kitty
+// specifically: ink seated inside the cell box, decorations clamped into the
+// cell and drawn per cell, DECSCUSR cursor shapes, images under later text.
 //
-// The DOM rows stay, as GHOST TEXT: each row is one unstyled text node
+// The DOM rows underneath are GHOST TEXT: each row is one unstyled text node
 // (textContent, no spans, transparent color) kept in sync with the grid. That is
 // the degenerate case DOM layout is fast at, and it keeps select/copy working
 // through the canvas (which is pointer-events:none): the browser's selection
 // highlight paints in the DOM layer and shows through — the canvas clears to
 // transparent instead of filling the default bg, so it never occludes it. The CRT
 // text-shadow is forced off on ghost rows (shadows have explicit colors and would
-// render even for transparent text). On calm the rows repaint fully styled.
-//
-// Fidelity: same cells, same color math (cellFg / storm bg mirror cellStyle), same
-// canvas geometry for box glyphs. Deliberate storm-only approximations, ponytail:
-// symbol_map/SVG fill glyphs render with the base font, text baseline is the
-// em-box middle, and selection highlight sits under the canvas ink — pixel-nudge
-// differences during full-screen animation only.
-let storm = false;
-let stormHot = 0; // consecutive high-change flushes (enter counter)
-let lastStormy = 0; // last time a flush looked stormy (exit-on-calm/idle timestamp)
-let stormTimer: ReturnType<typeof setInterval> | null = null;
-const STORM_RATIO = 0.5; // a flush touching ≥ half the rows is "stormy"
-const STORM_ENTER = 3; // stormy flushes in a row before switching media
-const STORM_EXIT_MS = 1200; // this long without a stormy flush ⇒ back to DOM
+// render even for transparent text).
 
-// The storm bg for a cell — bg after reverse/cursor (mirrors cellStyle's bg path).
-function cellBgRgb(cell: Cell, isCursor: boolean): RGB | null {
+// The cell's fill color — bg after reverse video (null = the default bg, which
+// #screen already shows; see cellFg for the fg side of the same math).
+export function cellBgRgb(cell: Cell, isCursor: boolean): RGB | null {
   if (!!cell.n !== isCursor) return resolveRgb(cell.f) ?? parseHex(cfg.defFg);
   return resolveRgb(cell.g);
 }
@@ -1125,7 +1029,7 @@ function startCurAnim(from: [number, number], to: [number, number]): void {
 }
 function stepCurAnim(): void {
   if (!curAnim) return;
-  if (!ctx || !storm || pictureHeld()) {
+  if (!ctx || pictureHeld()) {
     curAnim = null; // a hold landing mid-travel abandons the glide
     return;
   }
@@ -1161,66 +1065,6 @@ function stepCurAnim(): void {
   requestAnimationFrame(stepCurAnim);
 }
 
-// The renderer switch: canvas mode pins storm on — every dirty row paints on
-// the canvas, the DOM stays as ghost text + image overlays. Driven by the
-// template's #render checkbox when present (change flips live), else by the
-// stored choice / ?render=canvas at boot. DOM mode keeps today's behavior:
-// classic renderer with storm escalation under load.
-let renderBox: HTMLInputElement | null | undefined;
-let renderPref: boolean | undefined;
-function canvasModeOn(): boolean {
-  if (renderBox === undefined) {
-    renderBox = document.getElementById("render") as HTMLInputElement | null;
-    renderBox?.addEventListener("change", () => {
-      if (renderBox?.checked) setStorm(true);
-      else if (!selectionActive()) setStorm(false); // else the watchdog exits later
-    });
-  }
-  if (renderBox !== null) return renderBox.checked;
-  if (renderPref === undefined) {
-    let stored: string | null = null;
-    try {
-      stored = localStorage.getItem("shellglass-render");
-    } catch {
-      /* viewer with localStorage disabled */
-    }
-    renderPref = stored
-      ? stored === "on"
-      : new URLSearchParams(location.search).get("render") !== "dom"; // canvas is the default
-  }
-  return renderPref;
-}
-
-// The storm toggle: gates DOM mode's AUTO-escalation to canvas under load
-// (opt-in; off by default). Off = the DOM renderer never leaves the DOM —
-// full text semantics (real links, selection, find) at whatever frame rate
-// the DOM manages. Ignored in canvas mode, which pins storm explicitly.
-let stormBox: HTMLInputElement | null | undefined;
-let stormPref: boolean | undefined;
-function stormAutoOn(): boolean {
-  if (stormBox === undefined) {
-    stormBox = document.getElementById("storm") as HTMLInputElement | null;
-    stormBox?.addEventListener("change", () => {
-      // switching escalation off drops an active storm back to DOM now
-      // (unless a selection is live — the exit path would kill its Ranges)
-      if (!stormBox?.checked && storm && !canvasModeOn() && !selectionActive()) setStorm(false);
-    });
-  }
-  if (stormBox !== null) return stormBox.checked;
-  if (stormPref === undefined) {
-    let stored: string | null = null;
-    try {
-      stored = localStorage.getItem("shellglass-storm");
-    } catch {
-      /* viewer with localStorage disabled */
-    }
-    stormPref = stored
-      ? stored === "on"
-      : new URLSearchParams(location.search).get("storm") === "on"; // opt-in
-  }
-  return stormPref;
-}
-
 // Blink (SGR 5) on the canvas: rows holding blink cells register here while
 // painted; a lazy 500ms timer flips the phase and repaints exactly those rows
 // (the DOM path animates via CSS instead). In the off phase the glyph is
@@ -1249,7 +1093,7 @@ function noteBlinkRow(r: number, has: boolean): void {
 // The template's CRT is mostly blend-mode overlays + a #screen filter, which
 // composite over the canvas for free; only the text-shadow phosphor bloom is
 // text-bound (and forced off on ghost rows). Canvas rows re-create it below in
-// drawRowStorm. Any template with a #crt checkbox opts in; none = no CRT.
+// redrawCanvasRow. Any template with a #crt checkbox opts in; none = no CRT.
 let crtBox: HTMLInputElement | null | undefined;
 function crtOn(): boolean {
   if (crtBox === undefined) {
@@ -1262,7 +1106,9 @@ function crtOn(): boolean {
   return crtBox !== null && crtBox.checked;
 }
 
-function drawRowStorm(r: number): void {
+// Redraw one row's band of the canvas from screen.cells. Self-contained: all
+// ink is clipped to the band, so a per-row redraw never disturbs neighbours.
+function redrawCanvasRow(r: number): void {
   if (!ctx || !canvasEl) return;
   const y0 = Math.round(r * cellH * dpr);
   const y1 = Math.round((r + 1) * cellH * dpr);
@@ -1302,7 +1148,7 @@ function drawRowStorm(r: number): void {
     return;
   }
   // Alphabetic at the row's strut baseline — the DOM line box's own
-  // arithmetic, so toggling storm produces no vertical shift.
+  // arithmetic, so canvas text sits exactly where the ghost text would.
   ctx.textBaseline = "alphabetic";
   const baseY = rowBaseline(r);
   const defBg = cfg.defBg.toLowerCase();
@@ -1592,9 +1438,9 @@ function drawRowStorm(r: number): void {
 // textContent (not innerHTML) — no parsing, no spans, no styles; wide cells emit
 // their grapheme once and monospace CJK advances 2ch, matching the styled path's
 // column math, so a selection maps to the picture the canvas paints on top.
-// ── OSC 8 links in storm mode ─────────────────────────────────────────────────
+// ── OSC 8 links ───────────────────────────────────────────────────────────────
 //
-// The DOM path renders real anchors; storm's ghost text has none, so pointer
+// The ghost text has no anchors, so pointer
 // events map back to cells by grid arithmetic. Hover shows the kitty
 // affordance (pointer cursor + underline on the link's cells in that row) and
 // click opens the same linkHref-vetted URI a DOM anchor would.
@@ -1626,20 +1472,19 @@ function setHover(a: number | undefined, r: number): void {
 }
 function onScreenMove(ev: MouseEvent): void {
   if (pictureHeld()) return; // no hover repaints on a held picture
-  if (!storm) return setHover(undefined, -1);
   const hit = cellAt(ev);
   const linked = hit !== null && linkHref(screen.links, hit.cell.a) !== null;
   setHover(linked ? hit.cell.a : undefined, linked ? hit.r : -1);
 }
 function onScreenClick(ev: MouseEvent): void {
-  if (!storm || selectionActive()) return; // a drag-select release is not a click
+  if (selectionActive()) return; // a drag-select release is not a click
   const hit = cellAt(ev);
   const uri = hit === null ? null : linkHref(screen.links, hit.cell.a);
   if (uri !== null) window.open(uri, "_blank", "noopener,noreferrer");
 }
 // A selection only counts as "active" once it is NON-collapsed — but the
 // browser anchors it (collapsed) at pointerdown, and the first ghost update
-// after that replaces the text node and orphans the anchor. At storm rates
+// after that replaces the text node and orphans the anchor. At animation rates
 // that is a ≤33ms race the user loses most frames. So the ghost layer freezes
 // for the WHOLE pointer hold: by the time the anchor lands, nothing moves
 // under it. pointerup (or a cancelled/blurred drag) releases; if no selection
@@ -1729,79 +1574,7 @@ function selectionActive(): boolean {
 // One predicate for every repaint path (flush, blink timer, hover, cursor
 // travel) — anything that would put fresh pixels on a held picture.
 function pictureHeld(): boolean {
-  return storm && (selectionActive() || pointerHeld);
-}
-
-// Ghost styling lives in a viewer-injected rule (not the served CSS) so it can never
-// skew against this file through the hub, which mixes the pusher's CSS with its own
-// viewer.js. The explicit ::selection background is the visible highlight — the UA
-// default is unreliable over transparent text.
-let ghostCss = false;
-function ensureGhostCss(): void {
-  if (ghostCss || typeof document === "undefined") return;
-  ghostCss = true;
-  const st = document.createElement("style");
-  st.textContent =
-    ".row.ghost{color:transparent;text-shadow:none}" +
-    ".row.ghost::selection{background:rgba(110,170,255,.4)}" +
-    // canvas mode: overlays hidden by CLASS so copied fragments paste visible
-    ".screen.sg-canvas img.inline-img{visibility:hidden}";
-  document.head.appendChild(st);
-}
-
-// Switch media. Entering: ghost every row (uncolorized selectable text) and paint the
-// whole grid on canvas (must be complete — the canvas is now the whole picture).
-// Leaving: repaint every row's DOM fully styled and give the canvas back to the
-// glyph-only pass.
-function setStorm(on: boolean): void {
-  if (storm === on) return;
-  storm = on;
-  if (!on) setHover(undefined, -1);
-  // canvas mode draws the images itself; the stylesheet class (not inline
-  // style) hides the overlays so a copied fragment still pastes them visible
-  screenEl.firstElementChild?.classList.toggle("sg-canvas", on);
-  ensureGhostCss();
-  for (const el of screen.rowEls) el.classList.toggle("ghost", on);
-  if (on) {
-    for (let r = 0; r < screen.cells.length; r++) ghostRow(r);
-    redrawCanvasAll();
-    // Exit is time-based, not flush-based: when the animation stops, messages stop,
-    // flushes stop — a counter would strand us on canvas forever. A watchdog sees
-    // "nothing stormy lately" even in total silence.
-    lastStormy = clock();
-    stormTimer = setInterval(() => {
-      // Never exit while a selection is live: the exit path rewrites every row's
-      // innerHTML, destroying the very Ranges the frozen ghost layer protects —
-      // and the calm-down fires ~1.2s after the animation ends, exactly when the
-      // user reaches for Ctrl-C. Storm stays on (the canvas keeps painting); the
-      // first tick after the selection clears drops back to DOM.
-      if (
-        clock() - lastStormy > STORM_EXIT_MS &&
-        !selectionActive() &&
-        !pointerHeld && // a drag in progress anchors Ranges the exit would kill
-        !canvasModeOn()
-      )
-        setStorm(false);
-    }, 300);
-  } else {
-    if (stormTimer !== null) clearInterval(stormTimer);
-    stormTimer = null;
-    stormHot = 0;
-    for (let r = 0; r < screen.cells.length; r++) {
-      const el = screen.rowEls[r];
-      if (el) el.innerHTML = renderRow(screen.cells[r], cursorCol(screen.cur, r), screen.sty, screen.links);
-    }
-    redrawCanvasAll();
-  }
-}
-
-// Structural resets (full frame, banner) rebuild the DOM fresh — drop storm state
-// without the exit repaint (the rebuild does it).
-function stormReset(): void {
-  if (stormTimer !== null) clearInterval(stormTimer);
-  stormTimer = null;
-  storm = false;
-  stormHot = 0;
+  return selectionActive() || pointerHeld;
 }
 
 // ── symbol / fill glyphs ──────────────────────────────────────────────────────
@@ -1881,191 +1654,17 @@ function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-// Attribute-context escape (href): quotes too.
-function escAttr(s: string): string {
-  return esc(s).replace(/"/g, "&quot;");
-}
-
 // OSC 8 comes from whatever program runs in the mirrored session, so treat the
-// URI as hostile: only schemes that can't execute in the page are rendered as
-// anchors (javascript:/data:/vbscript: would be viewer XSS one click away).
+// URI as hostile: only schemes that can't execute in the page open on click
+// (javascript:/data:/vbscript: would be viewer XSS one click away).
 // file: is allowed — `ls --hyperlink` emits it for every entry, and while the
 // browser itself refuses file: navigation from web content, the hover
-// affordance and copyable href still mirror what the terminal shows.
+// affordance still mirrors what the terminal shows.
 export function linkHref(links: Record<number, string>, id: number | undefined): string | null {
   if (id === undefined) return null;
   const uri = links[id];
   if (!uri) return null; // pruned table entry: render unlinked
   return /^(https?|ftp|mailto|file):/i.test(uri) ? uri : null;
-}
-
-// Emit one SVG symbol span (already-escaped glyph, precomputed boxStyle) covering w
-// columns. When `stretch`, the glyph is forced to the full box (none + textLength) so
-// fill glyphs tile and an over-wide glyph is squeezed to 1ch at full height; otherwise
-// it scales to fit centred (xMidYMid meet), which keeps symbol_map glyphs' geometry.
-function symbolSpan(
-  col: number,
-  w: number,
-  boxStyle: string,
-  font: string,
-  glyph: string,
-  stretch: boolean,
-): string {
-  const par = stretch ? "none" : "xMidYMid meet";
-  // textLength forces the glyph advance to the viewBox width; `none` then maps that onto
-  // the full box. Without it a ~0.6em monospace advance under-fills and horizontals dash.
-  const len = stretch ? ' textLength="14" lengthAdjust="spacingAndGlyphs"' : "";
-  return (
-    `<span class="run" style="left:${col}ch;width:${w}ch;${boxStyle}">` +
-    `<svg viewBox="0 0 14 14" preserveAspectRatio="${par}" style="display:block;width:100%;height:100%">` +
-    `<text x="0" y="12" font-family="${font}" font-size="14" fill="currentColor"${len}>${glyph}</text></svg></span>`
-  );
-}
-
-function symbolCell(cell: Cell, isCursor: boolean, col: number, w: number, font: string, deco = ""): string {
-  const boxStyle = cellStyle(cell, isCursor) + deco;
-  const t = cell.t ?? " ";
-  const cp = t.codePointAt(0) ?? 0x20;
-  // Fill glyphs tile the box (stretch); symbol_map glyphs keep intrinsic geometry (meet).
-  // An isFillGlyph that is also symbol-mapped still tiles.
-  const stretch = isFillGlyph(cp);
-  return symbolSpan(col, w, boxStyle, font, esc(t), stretch);
-}
-
-// ── row rendering (port of render.rs:render_row) ──────────────────────────────
-
-// True when a style string paints nothing for a space: no background, no
-// underline, no cursor decoration.
-function inkFree(s: string): boolean {
-  return !s.includes("background") && !s.includes("text-decoration") && !s.includes("box-shadow");
-}
-
-// The non-block DECSCUSR cursors (3/4 underline, 5/6 bar) draw as an inset
-// box-shadow — no layout impact, currentColor follows the cell's fg. Blink
-// variants render steady.
-// ponytail: no blink — a CSS animation class needs an injected stylesheet;
-// add one if anyone misses it.
-function cursorDeco(sty: number): string {
-  return sty >= 5
-    ? "box-shadow:inset 0.14em 0 0 0 currentColor;"
-    : "box-shadow:inset 0 -0.14em 0 0 currentColor;";
-}
-
-// Render one row's cells to inner HTML. `cursorCol` is the cursor column (or -1),
-// `curSty` the DECSCUSR style: 0-2 render as the classic reverse-video block,
-// 3-6 leave the cell's colors alone and add an underline/bar decoration.
-// `links` is the OSC 8 id→URI table: linked runs render as real anchors.
-export function renderRow(
-  cells: Cell[],
-  cursorCol: number,
-  curSty = 0,
-  links: Record<number, string> = {},
-): string {
-  const blocky = curSty <= 2;
-  let out = "";
-  let col = 0;
-  let runStyle: string | null = null;
-  let runHref: string | null = null;
-  let runCol = 0;
-  let cols = 0;
-  let text = "";
-  const flushText = () => {
-    if (text.length === 0) return;
-    const st = `left:${runCol}ch;width:${cols}ch;${runStyle ?? ""}`;
-    // A linked run is a real anchor. rel severs the referrer/opener; the
-    // scheme was allowlisted in linkHref. Color/decoration are inherited via
-    // the injected #screen a.run rule, so page-template `a` styling can't
-    // repaint terminal text.
-    out +=
-      runHref === null
-        ? `<span class="run" style="${st}">${text}</span>`
-        : `<a class="run" href="${escAttr(runHref)}" target="_blank" rel="noopener noreferrer" style="${st}">${text}</a>`;
-    text = "";
-  };
-  for (const cell of cells) {
-    const isCursor = col === cursorCol;
-    const curBlock = isCursor && blocky;
-    const deco = isCursor && !blocky ? cursorDeco(curSty) : "";
-    const w = cell.w ? 2 : 1;
-    const cp0 = cell.t ? cell.t.codePointAt(0)! : 0;
-    // Canvas paints box/block/legacy geometry, always winning over symbol_map there. The
-    // one exception is the PUA powerline arrows (E0B0–B3): a user who symbol_maps them to a
-    // Nerd Font did so deliberately, so a mapping hit defers to the font path. The cp>=0xe000
-    // guard short-circuits before symbolFamily() on every standard box glyph — the hot path.
-    if (cp0 && isCanvasGlyph(cp0) && !(cp0 >= 0xe000 && symbolFamily(cp0))) {
-      // The canvas paints the line; keep the real glyph as transparent text so it stays
-      // selectable/copyable. Own span (color forced transparent, background retained).
-      flushText();
-      runStyle = null;
-      runHref = null;
-      cols = 0;
-      out += `<span class="run" style="left:${col}ch;width:${w}ch;${cellStyle(cell, curBlock)}${deco}color:transparent">${esc(cell.t!)}</span>`;
-      col += w;
-      continue;
-    }
-    // A glyph whose fallback advance exceeds its cell (❯ U+276F at ~1.67ch) would shove
-    // the rest of its coalesced run rightward — off-column and, at the end, under the
-    // cursor. Give it its own cell rendered as plain text at natural size, overflowing
-    // visibly into the (near-always blank) next cell rather than distorting it into 1ch:
-    // every run is absolutely positioned, so neighbours keep their columns regardless.
-    if (cp0 && glyphOverflowsCell(cell.t!, w) && !isFillGlyph(cp0) && !symbolFamily(cp0)) {
-      flushText();
-      runStyle = null;
-      runHref = null;
-      cols = 0;
-      out += `<span class="run" style="left:${col}ch;width:${w}ch;overflow:visible;${cellStyle(cell, curBlock)}${deco}">${esc(cell.t!)}</span>`;
-      col += w;
-      continue;
-    }
-    const font = svgFont(cell);
-    if (font) {
-      // A symbol_map or long-tail fill glyph: its own scaled-SVG span (per cell — these
-      // are rare, so run-merging them isn't worth the bookkeeping).
-      // ponytail: canvas-glyph/overflow/symbol cells stay plain spans — a
-      // linked box-drawing or symbol_map glyph is fringe; the run resets so
-      // the anchor never bleeds across.
-      flushText();
-      runStyle = null;
-      runHref = null;
-      cols = 0;
-      out += symbolCell(cell, curBlock, col, w, font, deco);
-    } else {
-      let style = cellStyle(cell, curBlock) + deco;
-      const href = linkHref(links, cell.a);
-      // A blank cell with no visible ink (no bg, no underline) renders identically
-      // under any fg/weight — let it ride the open run instead of splitting it, as
-      // long as that run is equally ink-free (adopting a bg/underline run would
-      // paint the gap) and NOT a link (a blank must never become clickable).
-      // Halves the span count on sparse animated screens (cmatrix).
-      if (
-        (!cell.t || cell.t === " ") &&
-        href === null &&
-        runHref === null &&
-        runStyle !== null &&
-        runStyle !== style &&
-        inkFree(style) &&
-        inkFree(runStyle)
-      ) {
-        style = runStyle;
-      }
-      if (runStyle !== style || runHref !== href) {
-        flushText();
-        runStyle = style;
-        runHref = href;
-        cols = 0;
-      }
-      if (cols === 0) runCol = col;
-      text += esc(cell.t && cell.t.length ? cell.t : " ");
-      cols += w;
-    }
-    col += w;
-  }
-  flushText();
-  return out;
-}
-
-function cursorCol(cur: Cur, row: number): number {
-  return cur && cur[0] === row ? cur[1] : -1;
 }
 
 // ── screen state + message application ────────────────────────────────────────
@@ -2079,10 +1678,10 @@ interface ScreenState {
 }
 
 let screen: ScreenState = { cells: [], cur: null, sty: 0, links: {}, rowEls: [] };
-// Inline images: DOM mode shows them as <img> overlays above the grid; storm
-// hides the overlays and draws the same (already decoded) elements onto the
-// canvas UNDER the glyphs, so text painted over an image wins — like a real
-// cell terminal. Rebuilt on every full frame (images ride only fulls).
+// Inline images: hidden <img> elements in the document (they ride copied
+// fragments — see paintFull) whose decoded bitmaps are drawn onto the canvas
+// UNDER the glyphs, so text painted over an image wins — like a real cell
+// terminal. Rebuilt on every full frame (images ride only fulls).
 let screenImages: { ref: ImageRef; el: HTMLImageElement }[] = [];
 let screenEl: HTMLElement;
 
@@ -2127,118 +1726,69 @@ export function patchCells(
 }
 
 // Paint is decoupled from apply. A message updates the in-memory `screen` model
-// synchronously (cheap), marks what changed, and schedules one rAF flush; the flush
-// does the expensive DOM/canvas work once per frame. cmatrix-class output pushes
-// ~30fps of near-full-screen diffs; the browser buffers several SSE events while the
-// main thread is busy and, without this, would run their innerHTML+canvas paints
-// back-to-back and never yield — pinning the thread at ~10fps. Coalescing collapses
-// every message queued between two rAFs into a single repaint of the union of dirty
-// rows (or one full rebuild) and yields the thread between frames. A hidden tab
-// (rAF paused) still applies state but skips all paint — dirtyRows is a Set of row
-// indices, so it can't grow past the row count.
+// synchronously (cheap), marks what changed, and schedules one coalesced flush;
+// the flush does the canvas/ghost work once per event-loop turn. The browser can
+// buffer several SSE events while the main thread is busy; coalescing collapses
+// every message queued behind one flush into a single repaint of the union of
+// dirty rows (or one full rebuild) — always the latest state, intermediate
+// frames dropped, the same "show latest, skip ticks" the server's MIN_FRAME
+// does to the PTY. dirtyRows is a Set of row indices, so it can't grow past
+// the row count.
 let paintScheduled = false;
 const dirtyRows = new Set<number>();
 let rebuildDims: { w: number; h: number; i?: ImageRef[] } | null = null;
 let rebuildBanner: string | null = null;
-let lastFlush = 0;
-
-// Adaptive frame shaping. A full-screen 30fps repaint (cmatrix, `yes`, a scrolling
-// build log) rebuilds thousands of positioned spans per frame; in a real (GPU) browser
-// one such frame costs tens of ms of layout+paint+composite, so painting every server
-// frame pins the main thread at 100% and the tab stops responding. Rather than a fixed
-// fps cap, we *measure* each paint's real cost (start-of-paint → the next animation
-// frame, which the browser fires only once the previous frame's layout/paint/composite
-// has committed) and pace the next paint so painting occupies at most TARGET_LOAD of
-// wall-clock, leaving the rest for input + message decode. Cheap frames (interactive
-// typing) measure ~one vsync and aren't throttled; expensive frames stretch the
-// interval out — traffic-shaping on frame cost, self-tuning as the cost rises or falls.
-// We always render the *latest* coalesced state and drop the intermediate animation
-// frames, the same "show latest, skip ticks" the server's MIN_FRAME does to the PTY;
-// the screen always converges to the true current state.
-const TARGET_LOAD = 0.7; // spend ≤70% of wall-clock painting
-// ponytail: if a single frame measures slower than MAX_INTERVAL×LOAD, we cap the pacing
-// interval here (≈4fps floor) and knowingly run over budget rather than stall to
-// multi-second gaps — a backstop for a pathologically slow client, not the normal path.
-const MAX_INTERVAL = 250;
-let paintCost = 16; // EWMA of measured frame cost (ms); seeds at one 60fps frame
 
 // Footer stats counters (see startStats): total SSE payload received, and the number
-// of paints actually committed (throttled re-arms don't count).
+// of paints actually committed.
 let bytesIn = 0;
 let paints = 0;
 
-const raf = (cb: () => void) =>
-  (typeof requestAnimationFrame !== "undefined" ? requestAnimationFrame : (f: () => void) => setTimeout(f, 16))(cb);
 const clock = () => (typeof performance !== "undefined" ? performance.now() : 0);
 
+// Paints are unshaped and OFF the rAF clock: rAF suspends in background tabs,
+// so a rAF-paced canvas would stall while hidden and come back to a stale
+// screen. Canvas frames are cheap and the server's 30fps cap is the only
+// pacing needed; setTimeout still coalesces one event-loop turn of messages,
+// and the browser's background throttling (~1Hz) keeps a hidden tab roughly
+// current for free.
 function schedulePaint(): void {
   if (paintScheduled) return;
   paintScheduled = true;
-  // Canvas mode paints unshaped and OFF the rAF clock: rAF suspends in
-  // background tabs, so a shaped canvas stalls while hidden and comes back to
-  // a stale screen — and its rAF-based cost sampling books the suspension as
-  // frame cost, throttling long after the tab returns. Canvas frames are
-  // cheap and the server's 30fps cap is the only pacing needed; setTimeout
-  // still coalesces one event-loop turn of messages, and the browser's
-  // background throttling (~1Hz) keeps a hidden tab roughly current for free.
-  if (canvasModeOn()) setTimeout(flushPaint, 0);
-  else raf(flushPaint);
+  setTimeout(flushPaint, 0);
 }
 
 function flushPaint(): void {
-  // A structural rebuild (full frame / banner) always paints now — rare, and it resets
-  // everything. Per-row diffs are shaped (DOM mode only — see schedulePaint): if the
-  // pacing interval hasn't elapsed, re-arm and coalesce more into the next paint
-  // (dirtyRows/cursor persist, stays scheduled).
-  const now = clock();
-  const interval = canvasModeOn() ? 0 : Math.min(paintCost / TARGET_LOAD, MAX_INTERVAL);
-  if (!rebuildDims && rebuildBanner === null && now - lastFlush < interval) {
-    raf(flushPaint);
-    return;
-  }
-  lastFlush = now;
   paintScheduled = false;
   paints++;
 
   if (rebuildBanner !== null) {
-    stormReset(); // banner replaces the grid wholesale
+    // banner replaces the grid wholesale
     screenEl.innerHTML = rebuildBanner;
     rebuildBanner = null;
     rebuildDims = null;
     dirtyRows.clear();
-    return; // a one-off banner isn't representative steady paint cost — don't sample it
+    return;
   }
-  const t0 = clock();
   if (rebuildDims) {
-    stormReset(); // paintFull rebuilds the DOM fresh — start over in DOM mode
     paintFull(rebuildDims);
     rebuildDims = null;
     dirtyRows.clear();
-    if (canvasModeOn()) setStorm(true); // canvas mode: re-pin after the rebuild
     // a rebuild teleports the cursor; the NEXT move animates from here
     lastCurPos = screen.cur ? [screen.cur[0], screen.cur[1]] : null;
   } else {
-    // Storm detection: a flush touching most rows, several times in a row, means
-    // full-screen animation — flip to canvas rendering (see storm mode above).
-    const stormy = dirtyRows.size >= STORM_RATIO * (screen.cells.length || 1);
-    if (stormy) {
-      lastStormy = now;
-      if (stormAutoOn() && !storm && ++stormHot >= STORM_ENTER) setStorm(true); // paints all rows
-    } else if (!storm) {
-      stormHot = 0;
-    }
     const held = pictureHeld();
     // Smooth cursor: catch the move BEFORE painting rows, so this flush's row
     // repaints already suppress the static cursor at the target (no double
     // cursor while the rect travels). Full rebuilds teleport (layout change) —
     // and so does releasing a hold (the cursor may be rows away by then).
     const cur = screen.cur;
-    if (storm && !held && smoothCursorOn() && cur && lastCurPos &&
+    if (!held && smoothCursorOn() && cur && lastCurPos &&
         (cur[0] !== lastCurPos[0] || cur[1] !== lastCurPos[1])) {
       startCurAnim(lastCurPos, cur);
     }
     if (!held) lastCurPos = cur ? [cur[0], cur[1]] : null;
-    if (storm && !held && frozenStale) {
+    if (!held && frozenStale) {
       // Hold released — the grid moved on while the picture stood still;
       // catch both layers up in one step.
       redrawCanvasAll();
@@ -2246,30 +1796,14 @@ function flushPaint(): void {
       frozenStale = false;
     }
     for (const r of dirtyRows) {
-      if (storm) {
-        if (held) {
-          frozenStale = true; // neither canvas nor ghost moves under a hold
-          continue;
-        }
-        drawRowStorm(r);
-        ghostRow(r); // keep the selectable backing text in sync with the picture
-      } else {
-        const el = screen.rowEls[r];
-        if (!el) continue;
-        el.innerHTML = renderRow(screen.cells[r] ?? [], cursorCol(screen.cur, r), screen.sty, screen.links);
-        redrawCanvasRow(r);
+      if (held) {
+        frozenStale = true; // neither canvas nor ghost moves under a hold
+        continue;
       }
+      redrawCanvasRow(r);
+      ghostRow(r); // keep the selectable backing text in sync with the picture
     }
     dirtyRows.clear();
-  }
-  // Sample this frame's true cost once the browser commits it (the next animation frame
-  // fires only after layout+paint+composite) and fold it into the EWMA (α=0.3).
-  // DOM mode only: canvas mode is unshaped, and a background tab's suspended rAF
-  // would book the whole suspension as frame cost.
-  if (!canvasModeOn()) {
-    raf(() => {
-      paintCost += 0.3 * (clock() - t0 - paintCost);
-    });
   }
 }
 
@@ -2311,10 +1845,11 @@ function paintFull(dims: { w: number; h: number; i?: ImageRef[] }): void {
   // clearing it reverts.
   screenEl.style.color = defaultsCss.fg;
   screenEl.style.backgroundColor = defaultsCss.bg;
-  const cur = screen.cur;
+  // Rows are GHOST TEXT from the start: one text node per row, transparent ink
+  // (the injected .row.ghost rule), the canvas above paints the picture.
   let html = `<div class="screen" style="width:${dims.w}ch;height:calc(${dims.h} * var(--lh));">`;
   for (let r = 0; r < screen.cells.length; r++) {
-    html += `<div class="row">${renderRow(screen.cells[r], cursorCol(cur, r), screen.sty, screen.links)}</div>`;
+    html += `<div class="row ghost">${esc(ghostText(screen.cells[r]))}</div>`;
   }
   html += "</div>";
   screenEl.innerHTML = html;
@@ -2326,17 +1861,14 @@ function paintFull(dims: { w: number; h: number; i?: ImageRef[] }): void {
   attachCanvas(dims.w, dims.h, screenDiv);
   redrawCanvasAll();
 
-  // Inline images overlay the grid. They ride only in full frames (an image
-  // add/remove/move forces one server-side), so rebuilding them here is
-  // authoritative; diffs never touch them. Each is inserted as a SIBLING
-  // right after its anchor row, so document order matches visual order and a
-  // selection spanning the image's rows carries it into the clipboard's HTML
-  // flavor (the data: src pastes as a real picture). Stacking is z-index:3,
-  // independent of DOM position. Canvas mode hides them via a stylesheet
-  // class on .screen (see ensureGhostCss/setStorm) — an inline
-  // visibility:hidden would travel with the copied fragment and paste
-  // invisibly.
-  screenDiv.classList.toggle("sg-canvas", storm);
+  // Inline images ride only in full frames (an image add/remove/move forces
+  // one server-side), so rebuilding them here is authoritative; diffs never
+  // touch them. The canvas paints the pixels; the <img> elements are hidden by
+  // a stylesheet rule (never an inline style, which would travel with a copied
+  // fragment and paste invisibly). Each is inserted as a SIBLING right after
+  // its anchor row, so document order matches visual order and a selection
+  // spanning the image's rows carries it into the clipboard's HTML flavor
+  // (the data: src pastes as a real picture).
   screenImages = (dims.i ?? []).map((ref) => {
     const anchor =
       screen.rowEls[Math.min(Math.max(ref.r, 0), screen.rowEls.length - 1)];
@@ -2344,10 +1876,7 @@ function paintFull(dims: { w: number; h: number; i?: ImageRef[] }): void {
     const el = (ref.r < 0 ? anchor.previousElementSibling : anchor.nextElementSibling) as HTMLImageElement;
     // data: URLs still decode async — a static screen would never repaint, so
     // redraw the canvas when a not-yet-ready image lands.
-    if (!el.complete)
-      el.addEventListener("load", () => {
-        if (storm) redrawCanvasAll();
-      });
+    if (!el.complete) el.addEventListener("load", () => redrawCanvasAll());
     return { ref, el };
   });
 }
@@ -2489,10 +2018,10 @@ function fmtRate(bytesPerSec: number): string {
   return `${bytesPerSec.toFixed(0)} B/s`;
 }
 
-// Footer stats, refreshed once a second: SSE payload throughput, the frames-per-second
-// the adaptive shaper is currently allowing (its pacing interval), and the fps actually
-// committed. Rates are per-window (deltas ÷ elapsed), so they reflect the last second,
-// not a since-boot average. No-ops if the template has no #sg-stats (custom templates).
+// Footer stats, refreshed once a second: SSE payload throughput and the fps
+// actually committed. Rates are per-window (deltas ÷ elapsed), so they reflect
+// the last second, not a since-boot average. No-ops if the template has no
+// #sg-stats (custom templates).
 function startStats(): void {
   const el = document.getElementById("sg-stats");
   if (!el) return;
@@ -2504,35 +2033,40 @@ function startStats(): void {
     const dt = (t - lastT) / 1000 || 1;
     const bps = (bytesIn - lastBytes) / dt;
     const fps = (paints - lastPaints) / dt;
-    const cap = 1000 / Math.min(paintCost / TARGET_LOAD, MAX_INTERVAL);
     lastBytes = bytesIn;
     lastPaints = paints;
     lastT = t;
-    el.textContent = `${fmtRate(bps)} · ${fps.toFixed(0)} fps (cap ${canvasModeOn() ? "off" : cap.toFixed(0)})${storm ? (canvasModeOn() ? " · canvas" : " · storm") : ""}`;
+    el.textContent = `${fmtRate(bps)} · ${fps.toFixed(0)} fps`;
   }, 1000);
 }
 
-// Viewer-owned CSS (anchor styling), injected at boot.
+// Viewer-owned CSS, injected at boot (not the served CSS, so it can never skew
+// against this file through the hub, which mixes the pusher's CSS with its own
+// viewer.js).
 function injectViewerCss(): void {
-  const linkCss = document.createElement("style");
-  linkCss.textContent =
-    "#screen a.run{color:inherit;text-decoration:none}" +
-    "#screen a.run:hover{text-decoration:underline}" +
-    // SGR 5 blink, DOM path: ink transparent for the cycle's second half
-    "@keyframes sg-blink{50%,100%{color:transparent}}" +
+  const css = document.createElement("style");
+  css.textContent =
+    // Ghost rows: transparent selectable text under the canvas. The explicit
+    // ::selection background is the visible highlight — the UA default is
+    // unreliable over transparent text. text-shadow off so a CRT phosphor
+    // bloom can't re-ink the invisible glyphs.
+    ".row.ghost{color:transparent;text-shadow:none}" +
+    ".row.ghost::selection{background:rgba(110,170,255,.4)}" +
     // Inline-image layout, sourced from the per-element custom properties —
     // deliberately NOT inline styles, so copied fragments paste at natural
     // size instead of dragging half-parseable ch/var() sizing along (see
     // renderImage). The .sized box is contain-fitted, anchored top-left: the
     // emitter sized the cell box for the LOCAL terminal's cell ratio, which
-    // needn't match the browser's, so stretching would distort.
+    // needn't match the browser's, so stretching would distort. The canvas
+    // paints the pixels, so the element itself is hidden — by stylesheet
+    // rule, never inline, so copied fragments paste visible.
     "#screen img.inline-img{position:absolute;" +
     "left:calc(var(--sg-c)*1ch);top:calc(var(--sg-r)*var(--lh));" +
-    "z-index:3;pointer-events:none}" +
+    "z-index:3;pointer-events:none;visibility:hidden}" +
     "#screen img.inline-img.sized{width:calc(var(--sg-w)*1ch);" +
     "height:calc(var(--sg-h)*var(--lh));" +
     "object-fit:contain;object-position:left top}";
-  document.head.appendChild(linkCss);
+  document.head.appendChild(css);
 }
 
 // ── canvas-track verification hooks (verify.html, bench.html; no SSE) ─────────
@@ -2541,14 +2075,16 @@ export function benchInit(el: HTMLElement): void {
   injectViewerCss();
   attachLinkHandlers();
 }
-export function benchStats(): { paints: number; cost: number; storm: boolean } {
-  return { paints, cost: paintCost, storm };
-}
-export function benchStorm(on: boolean): void {
-  setStorm(on);
+export function benchStats(): { paints: number } {
+  return { paints };
 }
 export function benchFlush(): void {
   flushPaint();
+}
+// Repaint the whole canvas from the current grid (e.g. after an image decode,
+// without racing the async load-listener repaint).
+export function benchRedraw(): void {
+  redrawCanvasAll();
 }
 // Drive one smooth-cursor animation step synchronously (headless rAF is
 // unreliable pre-load; verify.html busy-waits wall-clock then steps).

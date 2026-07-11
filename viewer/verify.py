@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Canvas-track verification: screenshot verify.html in DOM mode and with
-storm forced, then measure per-row-band vertical ink centroids and coverage.
-Kills only the Firefox PIDs it spawns."""
+"""Canvas verification: screenshot verify.html (the canvas picture over ghost
+text) and check terminal-rendering semantics on the pixels, plus the green/red
+per-mode self-checks. Kills only the Firefox PIDs it spawns."""
 import http.server, os, socketserver, subprocess, sys, threading
 from PIL import Image
 
@@ -47,135 +47,76 @@ def main():
     with socketserver.TCPServer(("127.0.0.1", 0), H) as srv:
         port = srv.server_address[1]
         threading.Thread(target=srv.serve_forever, daemon=True).start()
-        a, b = "/tmp/sg-verify-dom.png", "/tmp/sg-verify-storm.png"
-        c = "/tmp/sg-verify-links.png"
-        e = "/tmp/sg-verify-crt.png"
-        f = "/tmp/sg-verify-image.png"
-        h = "/tmp/sg-verify-cursor.png"
-        j = "/tmp/sg-verify-bleed.png"
-        shot(port, "dom", a)
-        shot(port, "storm", b)
-        shot(port, "links", c)
-        shot(port, "crt", e)
-        shot(port, "image", f)
-        shot(port, "cursor&cursor=smooth", h)
-        shot(port, "bleed", j)
-        m = "/tmp/sg-verify-blink.png"
-        shot(port, "blink", m)
-        n = "/tmp/sg-verify-freeze.png"
-        shot(port, "freeze", n)
-        p2 = "/tmp/sg-verify-hold.png"
-        shot(port, "hold", p2)
-        q2 = "/tmp/sg-verify-weight.png"
-        shot(port, "weight", q2)
-        r2 = "/tmp/sg-verify-liga.png"
-        shot(port, "liga", r2)
-        s2 = "/tmp/sg-verify-pinch.png"
-        shot(port, "pinch", s2)
-        za, zb = "/tmp/sg-verify-zdom.png", "/tmp/sg-verify-zstorm.png"
-        shot(port, "dom&zoom=1.5", za)
-        shot(port, "storm&zoom=1.5", zb)
+        base = "/tmp/sg-verify-static.png"
+        shot(port, "static", base)
+        selfchecks = ["links", "crt", "image", "cursor&cursor=smooth", "bleed",
+                      "blink", "freeze", "hold", "weight", "liga", "pinch"]
+        paths = {}
+        for m in selfchecks:
+            name = m.split("&")[0]
+            paths[name] = f"/tmp/sg-verify-{name}.png"
+            shot(port, m, paths[name])
         srv.shutdown()
-    dom, storm = Image.open(a).convert("RGB"), Image.open(b).convert("RGB")
-    print(f"{'row':>3} {'dom-y':>7} {'storm-y':>8} {'shift':>6} {'ink dom':>9} {'ink storm':>10}")
-    # Row 6 (double underline): the canvas clamps both bars fully inside the
-    # cell box (kitty's model); the DOM clips its lower bar at the .run edge.
-    # Intended divergence — report it, keep it out of the gate.
-    CLAMPED = {6}
-    worst = 0.0
+    img = Image.open(base).convert("RGB")
+    # Every content row must have ink in its own band (baseline sanity: text
+    # is seated in its row box, nothing amputated or shifted a band away).
+    print(f"{'row':>3} {'ink-y':>7} {'ink':>9}")
+    empty = []
     for r in range(ROWS):
-        cd, id_ = band_profile(dom, r)
-        cs, is_ = band_profile(storm, r)
-        if cd < 0 or cs < 0:
+        cy, ink = band_profile(img, r)
+        if cy < 0:
+            empty.append(r)
             continue
-        shift = cs - cd
-        if r not in CLAMPED:
-            worst = max(worst, abs(shift))
-        tag = "  (in-box clamp, ungated)" if r in CLAMPED else ""
-        print(f"{r:>3} {cd:>7.2f} {cs:>8.2f} {shift:>+6.2f} {id_:>9.0f} {is_:>10.0f}{tag}")
-    print(f"worst vertical shift: {worst:.2f}px "
-          "(canvas seats ink fully in-box — kitty's model; the DOM clips low "
-          "ink at the .run edge, so a sub-pixel lift vs the DOM is intended)")
-    # Same parity under the template's CSS-zoom model (the local zoom): the
-    # canvas derives fontPx across the zoomed/local coordinate-space split.
-    # Gated on TEXT rows: on decoration rows (5-9) the zoomed DOM clips its
-    # own low-riding underlines at the .run boundary (Firefox artifact,
-    # measured: DOM ink drops, canvas keeps the full decoration) — a centroid
-    # gap there is the DOM losing ink, not the canvas mis-seating glyphs.
-    DECOR = {5, 6, 7, 8, 9}
-    zdom, zstorm = Image.open(za).convert("RGB"), Image.open(zb).convert("RGB")
-    zworst = zdecor = 0.0
-    for r in range(ROWS):
-        cd, _ = band_profile(zdom, r, LH * 1.5)
-        cs, _ = band_profile(zstorm, r, LH * 1.5)
-        if cd < 0 or cs < 0:
-            continue
-        if r in DECOR:
-            zdecor = max(zdecor, abs(cs - cd))
-        else:
-            zworst = max(zworst, abs(cs - cd))
-    print(f"worst text shift at zoom 1.5: {zworst:.2f}px "
-          f"({'PASS' if zworst < 0.3 else 'FAIL'}; decoration rows {zdecor:.2f}px, "
-          f"dominated by the DOM's own clipping)")
+        print(f"{r:>3} {cy:>7.2f} {ink:>9.0f}")
+    # Row 11 is the concealed row — the ONLY row allowed (required) to be dark.
+    print(f"row-ink check: {'PASS' if empty == [11] else f'FAIL (dark rows {empty})'}")
     # Device-pixel bg continuity: row 10 is a 50-cell contiguous bg run; a
     # hairline seam shows as a column whose summed brightness dips far below
-    # its neighbours inside the run. (Row 10 in the frame = index BGROW.)
+    # its neighbours inside the run.
     BGROW = 10
-    for label, img in (("dom", dom), ("storm", storm)):
-        px = img.load()
-        y0, y1 = BGROW * LH, (BGROW + 1) * LH
-        cols = []
-        for x in range(0, int(50 * 8.4)):  # stay inside the 50-cell run
-            v = sum(sum(px[x, y][:3]) for y in range(y0, y1))
-            cols.append(v)
-        med = sorted(cols)[len(cols) // 2]
-        seams = sum(1 for v in cols if v < med * 0.5)
-        print(f"bg seam check ({label}): {'PASS' if seams == 0 else f'FAIL ({seams} dark cols)'}")
+    px = img.load()
+    y0, y1 = BGROW * LH, (BGROW + 1) * LH
+    cols = []
+    for x in range(0, int(50 * 8.4)):  # stay inside the 50-cell run
+        v = sum(sum(px[x, y][:3]) for y in range(y0, y1))
+        cols.append(v)
+    med = sorted(cols)[len(cols) // 2]
+    seams = sum(1 for v in cols if v < med * 0.5)
+    print(f"bg seam check: {'PASS' if seams == 0 else f'FAIL ({seams} dark cols)'}")
     # Conceal (SGR 8): row 11 is concealed text — the glyphs must not render
-    # in either mode (the one direction mirror fidelity can leak content).
-    for label, img in (("dom", dom), ("storm", storm)):
-        px = img.load()
-        ink = sum(
-            1
-            for y in range(11 * LH, 12 * LH)
-            for x in range(0, int(18 * 8.4))
-            if sum(px[x, y][:3]) > 60
-        )
-        print(f"conceal check ({label}): {'PASS' if ink == 0 else f'FAIL ({ink} lit px)'}")
+    # (the one direction mirror fidelity can leak content).
+    ink = sum(
+        1
+        for y in range(11 * LH, 12 * LH)
+        for x in range(0, int(18 * 8.4))
+        if sum(px[x, y][:3]) > 60
+    )
+    print(f"conceal check: {'PASS' if ink == 0 else f'FAIL ({ink} lit px)'}")
     # Underline skip-ink (D.4): row 5's underline must PART around the
-    # descenders of "Mgjq" (cols 14-17) — kitty's exclusion zones; the DOM
-    # does the same via text-decoration-skip-ink. Gap = a column in the
-    # underline band with no ink below the x-height region.
-    for label, img in (("dom", dom), ("storm", storm)):
-        px = img.load()
-        y0, y1 = 5 * LH + 12, 6 * LH  # the underline band (below the baseline)
-        gaps = sum(
-            1
-            for x in range(int(14 * 8.4), int(18 * 8.4))
-            if all(sum(px[x, y][:3]) <= 60 for y in range(y0, y1))
-        )
-        print(f"skip-ink check ({label}): {'PASS' if gaps >= 2 else f'FAIL ({gaps} gap cols)'}")
+    # descenders of "Mgjq" (cols 14-17) — kitty's exclusion zones. Gap = a
+    # column in the underline band with no ink below the x-height region.
+    y0, y1 = 5 * LH + 12, 6 * LH  # the underline band (below the baseline)
+    gaps = sum(
+        1
+        for x in range(int(14 * 8.4), int(18 * 8.4))
+        if all(sum(px[x, y][:3]) <= 60 for y in range(y0, y1))
+    )
+    print(f"skip-ink check: {'PASS' if gaps >= 2 else f'FAIL ({gaps} gap cols)'}")
     # Decoration continuity at SPACES: rows 5 (underline) and 9 (strike)
     # style their first 18 cells including the spaces between words — the
-    # line must run through the space cells (text-decoration doesn't break
-    # at spaces). Only space cells are scanned: over glyphs, Firefox's
-    # text-decoration-skip-ink legitimately lifts the DOM underline around
-    # descenders (kitty's underline exclusion zones are the terminal
-    # equivalent; the canvas draws straight through — not checked here).
-    for label, img in (("dom", dom), ("storm", storm)):
-        px = img.load()
-        gaps = []
-        for r, cols_ in ((5, (9, 13)), (9, (13,))):
-            y0, y1 = r * LH, (r + 1) * LH
-            for col in cols_:
-                for x in range(int(col * 8.4) + 2, int((col + 1) * 8.4) - 2):
-                    if all(sum(px[x, y][:3]) <= 60 for y in range(y0, y1)):
-                        gaps.append((r, x))
-        print(f"decoration continuity ({label}): "
-              f"{'PASS' if not gaps else f'FAIL ({len(gaps)} empty cols, first {gaps[0]})'}")
-    for name, path in (("links", c), ("crt", e), ("image", f), ("cursor", h),
-                       ("bleed", j), ("blink", m), ("freeze", n),
-                       ("hold", p2), ("weight", q2), ("liga", r2), ("pinch", s2)):
+    # line must run through the space cells (a terminal decorates the cell,
+    # not the glyph). Only space cells are scanned; over glyphs the skip-ink
+    # exclusion above legitimately parts the line.
+    gaps = []
+    for r, cols_ in ((5, (9, 13)), (9, (13,))):
+        y0, y1 = r * LH, (r + 1) * LH
+        for col in cols_:
+            for x in range(int(col * 8.4) + 2, int((col + 1) * 8.4) - 2):
+                if all(sum(px[x, y][:3]) <= 60 for y in range(y0, y1)):
+                    gaps.append((r, x))
+    print(f"decoration continuity: "
+          f"{'PASS' if not gaps else f'FAIL ({len(gaps)} empty cols, first {gaps[0]})'}")
+    for name, path in paths.items():
         lr, lg, lb = Image.open(path).convert("RGB").load()[20, 20]
         print(f"{name} self-check: {'PASS' if lg > 200 and lr < 60 else 'FAIL'}")
 
