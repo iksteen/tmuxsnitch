@@ -1743,7 +1743,9 @@ function ensureGhostCss(): void {
   const st = document.createElement("style");
   st.textContent =
     ".row.ghost{color:transparent;text-shadow:none}" +
-    ".row.ghost::selection{background:rgba(110,170,255,.4)}";
+    ".row.ghost::selection{background:rgba(110,170,255,.4)}" +
+    // canvas mode: overlays hidden by CLASS so copied fragments paste visible
+    ".screen.sg-canvas img.inline-img{visibility:hidden}";
   document.head.appendChild(st);
 }
 
@@ -1755,7 +1757,9 @@ function setStorm(on: boolean): void {
   if (storm === on) return;
   storm = on;
   if (!on) setHover(undefined, -1);
-  for (const { el } of screenImages) el.style.visibility = on ? "hidden" : "";
+  // canvas mode draws the images itself; the stylesheet class (not inline
+  // style) hides the overlays so a copied fragment still pastes them visible
+  screenEl.firstElementChild?.classList.toggle("sg-canvas", on);
   ensureGhostCss();
   for (const el of screen.rowEls) el.classList.toggle("ghost", on);
   if (on) {
@@ -2323,22 +2327,29 @@ function paintFull(dims: { w: number; h: number; i?: ImageRef[] }): void {
   redrawCanvasAll();
 
   // Inline images overlay the grid. They ride only in full frames (an image
-  // add/remove/move forces one server-side), so rebuilding them here is authoritative;
-  // diffs never touch them. Appended after the canvas ⇒ they stack on top.
-  if (dims.i?.length) screenDiv.insertAdjacentHTML("beforeend", renderImages(dims.i));
-  screenImages = (dims.i ?? []).map((ref, idx) => ({
-    ref,
-    el: screenDiv.querySelectorAll("img.inline-img")[idx] as HTMLImageElement,
-  }));
-  for (const { el } of screenImages) {
-    el.style.visibility = storm ? "hidden" : "";
+  // add/remove/move forces one server-side), so rebuilding them here is
+  // authoritative; diffs never touch them. Each is inserted as a SIBLING
+  // right after its anchor row, so document order matches visual order and a
+  // selection spanning the image's rows carries it into the clipboard's HTML
+  // flavor (the data: src pastes as a real picture). Stacking is z-index:3,
+  // independent of DOM position. Canvas mode hides them via a stylesheet
+  // class on .screen (see ensureGhostCss/setStorm) — an inline
+  // visibility:hidden would travel with the copied fragment and paste
+  // invisibly.
+  screenDiv.classList.toggle("sg-canvas", storm);
+  screenImages = (dims.i ?? []).map((ref) => {
+    const anchor =
+      screen.rowEls[Math.min(Math.max(ref.r, 0), screen.rowEls.length - 1)];
+    anchor.insertAdjacentHTML(ref.r < 0 ? "beforebegin" : "afterend", renderImage(ref));
+    const el = (ref.r < 0 ? anchor.previousElementSibling : anchor.nextElementSibling) as HTMLImageElement;
     // data: URLs still decode async — a static screen would never repaint, so
     // redraw the canvas when a not-yet-ready image lands.
     if (!el.complete)
       el.addEventListener("load", () => {
         if (storm) redrawCanvasAll();
       });
-  }
+    return { ref, el };
+  });
 }
 
 // `<img>` overlays positioned at their cell. Given cols/rows, the image is fit into
@@ -2346,13 +2357,9 @@ function paintFull(dims: { w: number; h: number; i?: ImageRef[] }): void {
 // stretched — the emitter (e.g. chafa) sizes the cell box for the *local* terminal's
 // cell ratio, which needn't match the browser's, so stretching would distort.
 // Without a size it renders at natural pixel size.
-function renderImages(imgs: ImageRef[]): string {
-  return imgs
-    .map((im) => {
-      const size = im.w && im.h ? `width:${im.w}ch;height:calc(${im.h} * var(--lh));object-fit:contain;object-position:left top;` : "";
-      return `<img class="inline-img" alt="" src="data:${im.m};base64,${im.d}" style="position:absolute;left:${im.c}ch;top:calc(${im.r} * var(--lh));${size}z-index:3;pointer-events:none;">`;
-    })
-    .join("");
+function renderImage(im: ImageRef): string {
+  const size = im.w && im.h ? `width:${im.w}ch;height:calc(${im.h} * var(--lh));object-fit:contain;object-position:left top;` : "";
+  return `<img class="inline-img" alt="" src="data:${im.m};base64,${im.d}" style="position:absolute;left:${im.c}ch;top:calc(${im.r} * var(--lh));${size}z-index:3;pointer-events:none;">`;
 }
 
 function decodeRow([r, l, text, style]: WireRow): { r: number; l: number; cells: Cell[] } {

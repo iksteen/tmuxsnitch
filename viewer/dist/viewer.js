@@ -1269,7 +1269,8 @@ function ensureGhostCss() {
     const st = document.createElement("style");
     st.textContent =
         ".row.ghost{color:transparent;text-shadow:none}" +
-            ".row.ghost::selection{background:rgba(110,170,255,.4)}";
+            ".row.ghost::selection{background:rgba(110,170,255,.4)}" +
+            ".screen.sg-canvas img.inline-img{visibility:hidden}";
     document.head.appendChild(st);
 }
 function setStorm(on) {
@@ -1278,8 +1279,7 @@ function setStorm(on) {
     storm = on;
     if (!on)
         setHover(undefined, -1);
-    for (const { el } of screenImages)
-        el.style.visibility = on ? "hidden" : "";
+    screenEl.firstElementChild?.classList.toggle("sg-canvas", on);
     ensureGhostCss();
     for (const el of screen.rowEls)
         el.classList.toggle("ghost", on);
@@ -1653,28 +1653,22 @@ function paintFull(dims) {
     screen.rowEls = Array.from(screenDiv.children);
     attachCanvas(dims.w, dims.h, screenDiv);
     redrawCanvasAll();
-    if (dims.i?.length)
-        screenDiv.insertAdjacentHTML("beforeend", renderImages(dims.i));
-    screenImages = (dims.i ?? []).map((ref, idx) => ({
-        ref,
-        el: screenDiv.querySelectorAll("img.inline-img")[idx],
-    }));
-    for (const { el } of screenImages) {
-        el.style.visibility = storm ? "hidden" : "";
+    screenDiv.classList.toggle("sg-canvas", storm);
+    screenImages = (dims.i ?? []).map((ref) => {
+        const anchor = screen.rowEls[Math.min(Math.max(ref.r, 0), screen.rowEls.length - 1)];
+        anchor.insertAdjacentHTML(ref.r < 0 ? "beforebegin" : "afterend", renderImage(ref));
+        const el = (ref.r < 0 ? anchor.previousElementSibling : anchor.nextElementSibling);
         if (!el.complete)
             el.addEventListener("load", () => {
                 if (storm)
                     redrawCanvasAll();
             });
-    }
+        return { ref, el };
+    });
 }
-function renderImages(imgs) {
-    return imgs
-        .map((im) => {
-        const size = im.w && im.h ? `width:${im.w}ch;height:calc(${im.h} * var(--lh));object-fit:contain;object-position:left top;` : "";
-        return `<img class="inline-img" alt="" src="data:${im.m};base64,${im.d}" style="position:absolute;left:${im.c}ch;top:calc(${im.r} * var(--lh));${size}z-index:3;pointer-events:none;">`;
-    })
-        .join("");
+function renderImage(im) {
+    const size = im.w && im.h ? `width:${im.w}ch;height:calc(${im.h} * var(--lh));object-fit:contain;object-position:left top;` : "";
+    return `<img class="inline-img" alt="" src="data:${im.m};base64,${im.d}" style="position:absolute;left:${im.c}ch;top:calc(${im.r} * var(--lh));${size}z-index:3;pointer-events:none;">`;
 }
 function decodeRow([r, l, text, style]) {
     if (typeof text === "string") {
