@@ -118,7 +118,7 @@ Flags by command:
 | `--ssh-bind <addr>` | serve, hub | also serve a read-only ANSI view over SSH here; connect with `ssh -p <port> …` |
 | `--ssh-host-key <path>` | serve, hub | OpenSSH host key for the SSH view (generated + persisted 0600 if absent) |
 | `--key <secret>` | push, print-id | secret key (or `SHELLGLASS_KEY` env var) |
-| `--hub <url>` / `--key <api-key>` | sessions | hub base URL + management-API key (or `SHELLGLASS_API_KEY`) |
+| `<url>` (positional) / `--key <api-key>` | sessions | hub base URL (like `push`'s) + management-API key (or `SHELLGLASS_API_KEY`) |
 | `--allow <id>[:<slug>]` | hub | a session id permitted to push, optionally aliased to a view-URL slug; repeat per client. Others get `403` |
 | `--api-allow <api-id>` | hub | an API id permitted to call the session-management API; repeat per caller. Without it, `/api` is off (404) |
 | `--api` | gen-key, print-id | mint/print in the API salt domain (for `--api-allow`) instead of the session domain |
@@ -152,9 +152,9 @@ shellglass hub --bind 0.0.0.0:8080 --api-allow <API_ID>
 
 # the built-in client (key via --key or SHELLGLASS_API_KEY):
 export SHELLGLASS_API_KEY=<API_KEY>
-shellglass sessions --hub https://hub add <session-id> --slug demo
-shellglass sessions --hub https://hub list
-shellglass sessions --hub https://hub remove --slug demo   # or: remove --id <session-id>
+shellglass sessions https://hub add <session-id> --slug demo
+shellglass sessions https://hub list
+shellglass sessions https://hub remove --slug demo   # or: remove --id <session-id>
 
 # or any HTTP client (Authorization: Bearer <API_KEY>):
 curl -X POST -H "Authorization: Bearer $SHELLGLASS_API_KEY" \

@@ -63,9 +63,8 @@ impl Cli {
 #[cfg(feature = "sessions")]
 #[derive(clap::Args, Debug)]
 pub struct SessionsArgs {
-    /// Hub base URL (e.g. `https://hub.example.com`).
-    #[arg(long)]
-    hub: String,
+    /// Hub base URL (e.g. `https://hub.example.com`) — positional, like `push`'s.
+    url: String,
 
     /// Management-API key (or the `SHELLGLASS_API_KEY` env var). Its API id
     /// (`print-id --key K --api`) must be on the hub's `--api-allow`.
@@ -121,16 +120,16 @@ impl SessionsArgs {
     /// message where it provides one.
     pub async fn run(self) -> Result<()> {
         match &self.cmd {
-            SessionsCmd::List => crate::apictl::list(&self.hub, &self.key).await,
+            SessionsCmd::List => crate::apictl::list(&self.url, &self.key).await,
             SessionsCmd::Add { id, slug } => {
-                crate::apictl::add(&self.hub, &self.key, id, slug.as_deref()).await
+                crate::apictl::add(&self.url, &self.key, id, slug.as_deref()).await
             }
             SessionsCmd::Remove { id: Some(id), .. } => {
-                crate::apictl::remove_by_id(&self.hub, &self.key, id).await
+                crate::apictl::remove_by_id(&self.url, &self.key, id).await
             }
             SessionsCmd::Remove {
                 slug: Some(slug), ..
-            } => crate::apictl::remove_by_slug(&self.hub, &self.key, slug).await,
+            } => crate::apictl::remove_by_slug(&self.url, &self.key, slug).await,
             SessionsCmd::Remove { .. } => unreachable!("clap group requires --id or --slug"),
         }
     }
