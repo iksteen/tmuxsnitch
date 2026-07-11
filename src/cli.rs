@@ -305,8 +305,8 @@ pub struct HubArgs {
     acme_production: bool,
 
     /// Also serve a read-only ANSI view over SSH on this address (e.g.
-    /// `0.0.0.0:2222`). Connect with the session id as the username:
-    /// `ssh -p 2222 <session-id>@host`.
+    /// `0.0.0.0:2222`). Connect with the session's view handle — its slug, which
+    /// defaults to the session id — as the username: `ssh -p 2222 <slug>@host`.
     #[arg(long)]
     ssh_bind: Option<String>,
 
@@ -627,10 +627,11 @@ async fn serve_hub(
         // so a crash before the first API call still leaves a valid store.
         hub_state.persist().context("writing the sessions file")?;
     }
-    // Optional read-only SSH view: the session id is the SSH username. A setup failure
-    // must not abort the hub's HTTP service — log and continue without the SSH view.
+    // Optional read-only SSH view: the view handle (the slug; = the id when
+    // un-aliased) is the SSH username. A setup failure must not abort the hub's
+    // HTTP service — log and continue without the SSH view.
     if let Some(ssh_addr) = &ssh_bind {
-        match prepare_ssh(ssh_addr, ssh_host_key.as_deref(), "<session-id>") {
+        match prepare_ssh(ssh_addr, ssh_host_key.as_deref(), "<slug>") {
             Ok((l, key)) => {
                 let target = ssh::Target::Hub(hub_state.clone());
                 // ponytail: unsupervised — an SSH runtime failure logs and dies; HTTP

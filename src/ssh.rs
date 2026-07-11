@@ -1,10 +1,11 @@
-//! Read-only SSH viewer: `ssh <session-id>@host -p 2222` renders a mirrored
+//! Read-only SSH viewer: `ssh <slug>@host -p 2222` renders a mirrored
 //! session as a live ANSI terminal, no browser needed.
 //!
-//! The session id in the SSH **username** is the authorization — it's already the
-//! public read capability (same one that goes in `/s/<id>`), so there's nothing to
-//! prompt for. All auth methods accept; an unknown id is reported in-band after the
-//! shell opens rather than as a cryptic "Permission denied". Input is dropped except
+//! The view handle in the SSH **username** is the authorization — it's already the
+//! public read capability (the same slug that goes in `/s/<slug>`, defaulting to
+//! the session id when un-aliased), so there's nothing to prompt for. All auth
+//! methods accept; an unknown handle is reported in-band after the shell opens
+//! rather than as a cryptic "Permission denied". Input is dropped except
 //! `q` / Ctrl-C / Ctrl-D, which disconnect.
 //!
 //! The renderer ([`crate::ansi`]) is pure and tested separately; this module is the
@@ -32,7 +33,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, watch};
 
 /// Which sessions the SSH server exposes: the one standalone session (username
-/// ignored), or a hub's session table keyed by the id in the username.
+/// ignored), or a hub's session table keyed by the view handle in the username.
 #[derive(Clone)]
 pub enum Target {
     Single(Arc<diff::Live>),
@@ -71,7 +72,7 @@ impl Default for Ctl {
 /// Resolve the host key and print the connection hint + fingerprint. Called before
 /// the PTY switches the terminal to raw mode (so the lines land cleanly), given the
 /// bound SSH address and the username to show in the hint (`x` standalone, the
-/// literal `<session-id>` for a hub).
+/// literal `<slug>` for a hub).
 pub fn setup(addr: SocketAddr, key_path: Option<&Path>, hint_user: &str) -> Result<PrivateKey> {
     let key = host_key(key_path)?;
     println!(
@@ -179,9 +180,9 @@ impl SshHandler {
         }
     }
 
-    /// Accept auth: record the username (the id is the capability) and release the
-    /// pre-auth permit — the handshake is done, so this connection stops occupying a
-    /// startup slot.
+    /// Accept auth: record the username (the view handle is the capability) and
+    /// release the pre-auth permit — the handshake is done, so this connection
+    /// stops occupying a startup slot.
     fn accept(&mut self, user: &str) -> Auth {
         self.user = user.to_string();
         self.permit = None;
@@ -285,7 +286,7 @@ impl Handler for SshHandler {
         match self.target.resolve(&self.user) {
             None => {
                 let _ = session.channel_success(channel);
-                let _ = session.data(channel, b"shellglass: unknown session id\r\n".to_vec());
+                let _ = session.data(channel, b"shellglass: unknown session\r\n".to_vec());
                 let _ = session.eof(channel);
                 let _ = session.close(channel);
             }

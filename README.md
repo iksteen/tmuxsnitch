@@ -332,9 +332,9 @@ mode the client pushes its template to the hub, so custom pages work off-box too
   does not otherwise rate-limit the content. A bad-key flood is bounded
   (concurrent auth hashes are capped, each rejection logged for fail2ban), but
   don't expose an open hub to the internet.
-- The read-only SSH view authorizes by the **session id in the username** — the
-  same read capability as the view URL. Treat exposing it like sharing the view
-  URL.
+- The read-only SSH view authorizes by the **view handle in the username** (the
+  slug, which defaults to the session id) — the same read capability as the view
+  URL. Treat exposing it like sharing the view URL.
 
 ## Status
 
