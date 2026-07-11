@@ -535,7 +535,29 @@ geometry, and decoration behavior. Ground truth stays kitty. Non-goals:
 WebGL/subpixel (⊘ item below), SDF atlases (softer than the platform
 rasterizer at terminal sizes).
 
-1. **Run-shaped text: ligatures, kerning, joined scripts.** In
+1. **kitty-parity text composition (the "thin/airy text" fix).** Browsers
+   composite glyph coverage in sRGB space; kitty composites in linear space
+   with a luminance-scaled alpha adjustment (`foreground_contrast` in
+   kitty/cell_fragment.glsl: `a' = mix(a, pow(a, gamma_adj),
+   (1 − fg_lum + bg_lum) · 0.5) · contrast`; Linux platform defaults
+   gamma 1.0 / contrast 0 — the linear blend itself is the thickening).
+   Light-on-dark AA edges come out darker in sRGB, so the mirror's strokes
+   read underweight vs the local kitty — the reported "thin, airy, almost
+   sickly". The canvas knows every cell's solid bg, so the correct
+   coverage remap `a → a'` is closed-form per (fg, bg) pair. Technique
+   candidates, in order of preference: (a) an SVG `feComponentTransfer`
+   gamma filter on the text draws (`ctx.filter = "url(#sg-weight)"`,
+   Firefox supports SVG filters on canvas), quantized to a few
+   fg/bg-luminance buckets; (b) double-draw — second `fillText` at
+   `globalAlpha k` gives `a' = a + k·a(1−a)`, a tunable midtone boost;
+   (c) a corrected-alpha glyph atlas (exact math per pixel, amortized,
+   biggest build). Verify numerically, no kitty screenshot needed: the
+   linear-blend target is computable from our own rasterized coverage —
+   assert the rendered mid-intensity histogram matches the linear-blend
+   prediction within ε, and eyeball on the dogfood session. DOM mode
+   cannot be fixed (CSS exposes no text blend math) — document as a
+   canvas-mode advantage.
+2. **Run-shaped text: ligatures, kerning, joined scripts.** In
    `drawRowStorm`, coalesce contiguous same-style text cells (same resolved
    font + fg, no geometric/fill/overwide/cursor cells) into ONE
    `fillText(run, x0, baseY)` — the browser shapes whole runs (FiraCode
@@ -549,7 +571,7 @@ rasterizer at terminal sizes).
    asserting the canvas ink differs from forced per-cell rendering AND the
    run's advance matches the grid; re-run `bench.py` (rain's per-cell
    styles fall back, typing/editor should coalesce).
-2. **Integer device-pixel cell grid (stem evenness).** Kitty sizes the
+3. **Integer device-pixel cell grid (stem evenness).** Kitty sizes the
    cell in whole device pixels; our `cellW` is fractional (1ch ≈ 8.43px at
    14px), so per-cell `Math.round` edges make cells alternate 8/9 device px
    and glyph spacing jitters ±0.5px — visible as uneven stems in columns a
@@ -560,7 +582,7 @@ rasterizer at terminal sizes).
    px instead of `ch`) so ghost text, selection hit-testing and the fit
    script stay in agreement. Verify: the histogram collapses to one bucket;
    full parity rig unchanged.
-3. **Underline skip-ink (kitty's exclusion zones).** `drawUnderline` draws
+4. **Underline skip-ink (kitty's exclusion zones).** `drawUnderline` draws
    straight through descenders; kitty carves exclusion zones
    (`calculate_underline_exclusion_zones` in kitty/fonts.c) and Firefox's
    DOM does `text-decoration-skip-ink` — both leave gaps around g/j/p tails.
@@ -571,7 +593,7 @@ rasterizer at terminal sizes).
    source: straight vs curly/dotted/dashed) before implementing. Verify:
    extend the decoration-continuity rig check to assert canvas gap positions
    at descenders line up with the DOM's skip-ink gaps.
-4. **Pinch-zoom sharpness.** The visual viewport scales the canvas raster
+5. **Pinch-zoom sharpness.** The visual viewport scales the canvas raster
    with no event our ResizeObserver/dpr-media hooks see — but
    `visualViewport` fires `resize` on pinch. Listen next to `watchZoom`,
    fold `visualViewport.scale` (capped ~3× to bound backing-store memory)
@@ -580,7 +602,7 @@ rasterizer at terminal sizes).
    math via a bench hook; visual check on a touch device (headless can't
    pinch).
 
-5. ⊘ **WebGL subpixel text.** Researched and rejected 2026-07-11. The
+6. ⊘ **WebGL subpixel text.** Researched and rejected 2026-07-11. The
    hypothesis was that WebGL subpixel rendering (astiopin/webgl_fonts —
    SDF atlas, pseudo-hinting via x-height snapping, per-channel coverage
    through a `CONSTANT_COLOR/ONE_MINUS_SRC_COLOR` blend trick) could close
