@@ -53,6 +53,14 @@ const INPUT_MODES_OFF: &[u8] =
 enum Msg {
     Data(Vec<u8>),
     Resize(u16, u16), // rows, cols
+    /// A deferred image's payload, decoded/encoded by the worker thread —
+    /// fills the pending [`Placed`] with the same `id` (dropped if the
+    /// placement was already overwritten/evicted).
+    ImageReady {
+        id: std::num::NonZeroU32,
+        hash: String,
+        blob: crate::model::ImageBlob,
+    },
     HubDown(String),
     HubUp,
     Shutdown,
@@ -213,12 +221,16 @@ pub fn start(command: &[String]) -> Result<(watch::Receiver<Arc<Frame>>, Notifie
         (geom.px_w / geom.cols.max(1)).max(1),
         (geom.px_h / geom.rows.max(1)).max(1),
     );
+    // The decode worker answers back through the screen thread's own channel.
+    let ready_tx = msg_tx.clone();
     std::thread::spawn(move || {
         // The real session parser records its blind spots for the exit report
         // (`new_parser`'s throwaway SeqLog handles the tests/initial frame).
         let (seqlog, seq_seen) = SeqLog::new();
         let parser = vt100::Parser::new_with_callbacks(rows, cols, 0, seqlog);
-        screen_thread(msg_rx, frame_tx, raw, parser, seq_seen, cell, intercept);
+        screen_thread(
+            msg_rx, ready_tx, frame_tx, raw, parser, seq_seen, cell, intercept,
+        );
     });
 
     // When the command exits, tell the screen thread to restore the terminal + quit.
@@ -233,8 +245,10 @@ pub fn start(command: &[String]) -> Result<(watch::Receiver<Arc<Frame>>, Notifie
     Ok((frame_rx, Notifier(msg_tx)))
 }
 
+#[allow(clippy::too_many_arguments)] // ponytail: one call site, private
 fn screen_thread(
     msg_rx: mpsc::Receiver<Msg>,
+    ready_tx: mpsc::Sender<Msg>,
     frame_tx: watch::Sender<Arc<Frame>>,
     raw: RawMode,
     mut parser: SgParser,
@@ -246,6 +260,44 @@ fn screen_thread(
     let mut connected = true; // teeing shell output to the terminal
     let mut last_frame = Instant::now();
     let mut dirty = false;
+    // Deferred-image decode worker: sixel/kitty-raw payloads decode + PNG-
+    // encode OFF this thread, so the tee to the local terminal never stalls
+    // behind a deflate (a sixel video would otherwise slow the terminal
+    // itself, 4–12× measured). Newest wins: jobs superseded while one was
+    // being processed are drained and dropped — their placements stay
+    // pending until cell overwrite evicts them — and having skipped ANY job
+    // is the backpressure signal that switches PNG encoding to the fast
+    // compression level until the worker catches up.
+    let (job_tx, job_rx) =
+        mpsc::channel::<(std::num::NonZeroU32, crate::images::DeferredPayload)>();
+    std::thread::spawn(move || {
+        while let Ok(mut job) = job_rx.recv() {
+            let mut superseded = false;
+            while let Ok(newer) = job_rx.try_recv() {
+                job = newer;
+                superseded = true;
+            }
+            let Some((png, _px)) = crate::images::finish_deferred(&job.1, superseded) else {
+                continue; // undecodable payload: the placement stays pending → evicted
+            };
+            let mime = "image/png".to_string();
+            let hash = crate::proto::content_key(&mime, &png);
+            let blob = crate::model::ImageBlob {
+                mime,
+                bytes: png.into(),
+            };
+            if ready_tx
+                .send(Msg::ImageReady {
+                    id: job.0,
+                    hash,
+                    blob,
+                })
+                .is_err()
+            {
+                break; // screen thread gone
+            }
+        }
+    });
     // Inline images live outside vt100's byte stream (it drops the sequences).
     // The interceptor pulls them out; each is placed at the cursor by stamping
     // per-cell image tags into the parser grid (`place_data`), which then ride
@@ -282,66 +334,55 @@ fn screen_thread(
                     match seg {
                         Segment::Pass(bytes) => parser.process(&bytes),
                         Segment::Image(img) => {
-                            let (row, col) = parser.screen().cursor_position();
-                            // App-given cell size, else derived from pixel size ÷ cell
-                            // size so a natural-size image still advances the cursor.
-                            let cells = img.cells.or_else(|| {
-                                img.px.map(|(w, h)| {
-                                    (
-                                        (w.div_ceil(u32::from(cell.0)) as u16).max(1),
-                                        (h.div_ceil(u32::from(cell.1)) as u16).max(1),
-                                    )
-                                })
-                            });
-                            let (cols, rows) =
-                                cells.map_or((None, None), |(c, r)| (Some(c), Some(r)));
-                            // Track the image by stamping per-cell tags into the parser
-                            // grid (`place_data`): vt100's own scroll/erase/reflow then
-                            // manage the image's lifetime cell by cell, exactly mirroring
-                            // a cell-based sixel terminal's erase semantics — text written
-                            // over an image cell erases that cell's share of the image.
-                            // Each frame `resolve_images` finds the surviving cells and
-                            // reconstructs the top-left from the best one (each tag stores
-                            // its in-image offset, so any survivor is exact); the image is
-                            // evicted only once *every* covered cell is gone — full
-                            // repaint, clear, or scrolled fully off. A partially
-                            // scrolled-off image reconstructs a negative row, so the
-                            // viewer keeps clipping it against the top edge.
-                            // Placement leaves the cursor at col 0 of the image's last
-                            // row, where a sixel-scrolling terminal leaves it — an
-                            // emitter's own trailing newline (chafa) then lands one line
-                            // below, matching the terminal exactly.
-                            let id = image_seq;
-                            image_seq = image_seq
-                                .checked_add(1)
-                                .unwrap_or(std::num::NonZeroU32::MIN);
-                            parser.screen_mut().place_data(
-                                cols.unwrap_or(1),
-                                rows.unwrap_or(1),
-                                |row_off, col_off| ImgCell {
-                                    id,
-                                    row_off,
-                                    col_off,
-                                },
-                            );
-                            images.push(Placed {
-                                id,
-                                img: ImagePlacement {
-                                    row: i16::try_from(row).unwrap_or(0),
-                                    col,
-                                    cols,
-                                    rows,
-                                    hash: crate::proto::content_key(&img.mime, &img.bytes),
-                                },
-                                blob: crate::model::ImageBlob {
+                            // Ready payload (iTerm2 native / kitty PNG): stamp
+                            // and record in one step.
+                            let hash = crate::proto::content_key(&img.mime, &img.bytes);
+                            let ready = Some((
+                                hash,
+                                crate::model::ImageBlob {
                                     mime: img.mime,
                                     bytes: img.bytes.into(),
                                 },
-                            });
+                            ));
+                            stamp_image(
+                                &mut parser,
+                                &mut images,
+                                &mut image_seq,
+                                cell,
+                                img.cells,
+                                img.px,
+                                ready,
+                            );
+                        }
+                        Segment::Deferred(d) => {
+                            // Heavy decode (sixel / kitty raw): stamp NOW —
+                            // cursor semantics can't wait — and let the worker
+                            // owe the bytes. Newest-wins on the worker side:
+                            // video frames superseded before decoding are
+                            // never decoded (their pending placements die by
+                            // cell overwrite like any other image).
+                            let id = stamp_image(
+                                &mut parser,
+                                &mut images,
+                                &mut image_seq,
+                                cell,
+                                d.cells,
+                                Some(d.px),
+                                None,
+                            );
+                            let _ = job_tx.send((id, d.payload));
                         }
                     }
                 }
                 dirty = true;
+            }
+            Some(Msg::ImageReady { id, hash, blob }) => {
+                // Fill the pending placement; a miss means it was already
+                // evicted (overwritten/scrolled off) — drop the bytes.
+                if let Some(p) = images.iter_mut().find(|p| p.id == id) {
+                    p.ready = Some((hash, blob));
+                    dirty = true;
+                }
             }
             Some(Msg::Resize(rows, cols)) => {
                 parser.screen_mut().set_size(rows, cols);
@@ -597,11 +638,76 @@ fn report_unmirrored(seen: &SeqSeen) {
 /// cell; `resolve_images` reads the survivors back each frame.
 struct Placed {
     id: std::num::NonZeroU32,
-    img: ImagePlacement,
-    /// The payload behind `img.hash` — rides every frame's `image_data` (by
-    /// refcount) so each frame is self-contained for the standalone server
-    /// and the push client's blob uploads.
-    blob: crate::model::ImageBlob,
+    /// Resolved top-left, updated each frame from the surviving cell tags.
+    row: i16,
+    col: u16,
+    /// Stamped display size in cells.
+    cols: Option<u16>,
+    rows: Option<u16>,
+    /// Content address + payload. `None` while the decode worker still owes
+    /// it: the placement is stamped (cursor semantics are exact from the
+    /// moment the sequence arrives) but skipped in frames until the bytes
+    /// exist — a frame must never reference an unservable hash. Rides every
+    /// frame's `image_data` (by refcount) once ready, so each frame is
+    /// self-contained for the standalone server and the push client's blob
+    /// uploads. A placement superseded before its decode simply stays
+    /// pending until vt100's cell lifetime evicts it — the "skip stale
+    /// frames" half of the worker's newest-wins queue.
+    ready: Option<(String, crate::model::ImageBlob)>,
+}
+
+/// Stamp an image at the cursor and start tracking it. Per-cell tags go into
+/// the parser grid (`place_data`): vt100's own scroll/erase/reflow then manage
+/// the image's lifetime cell by cell, exactly mirroring a cell-based sixel
+/// terminal's erase semantics — text written over an image cell erases that
+/// cell's share of the image; `resolve_images` reconstructs the top-left from
+/// the surviving tags each frame and evicts once every covered cell is gone.
+/// The cell size comes from the app's hint, else from pixel size ÷ cell size
+/// (so a natural-size image still advances the cursor); placement leaves the
+/// cursor at col 0 of the image's last row, where a sixel-scrolling terminal
+/// leaves it. `ready` is the payload when already decoded, `None` while the
+/// worker owes it.
+fn stamp_image(
+    parser: &mut SgParser,
+    images: &mut Vec<Placed>,
+    image_seq: &mut std::num::NonZeroU32,
+    cell: (u16, u16),
+    cells: Option<(u16, u16)>,
+    px: Option<(u32, u32)>,
+    ready: Option<(String, crate::model::ImageBlob)>,
+) -> std::num::NonZeroU32 {
+    let (row, col) = parser.screen().cursor_position();
+    let cells = cells.or_else(|| {
+        px.map(|(w, h)| {
+            (
+                (w.div_ceil(u32::from(cell.0)) as u16).max(1),
+                (h.div_ceil(u32::from(cell.1)) as u16).max(1),
+            )
+        })
+    });
+    let (cols, rows) = cells.map_or((None, None), |(c, r)| (Some(c), Some(r)));
+    let id = *image_seq;
+    *image_seq = image_seq
+        .checked_add(1)
+        .unwrap_or(std::num::NonZeroU32::MIN);
+    parser
+        .screen_mut()
+        .place_data(cols.unwrap_or(1), rows.unwrap_or(1), |row_off, col_off| {
+            ImgCell {
+                id,
+                row_off,
+                col_off,
+            }
+        });
+    images.push(Placed {
+        id,
+        row: i16::try_from(row).unwrap_or(0),
+        col,
+        cols,
+        rows,
+        ready,
+    });
+    id
 }
 
 /// Snapshot the PTY screen as a [`Frame`], resolving each tracked image's tagged
@@ -612,7 +718,10 @@ fn frame_from(parser: &SgParser, images: &mut Vec<Placed>) -> Arc<Frame> {
     grid.images = resolve_images(parser.screen(), images);
     grid.image_data = images
         .iter()
-        .map(|p| (p.img.hash.clone(), p.blob.clone()))
+        .filter_map(|p| {
+            let (hash, blob) = p.ready.as_ref()?;
+            Some((hash.clone(), blob.clone()))
+        })
         .collect();
     Arc::new(Frame::Screen(grid))
 }
@@ -653,13 +762,27 @@ fn resolve_images(
             let Some(Some((dr, dc, r, c))) = best.next() else {
                 return false; // every covered cell gone → evict
             };
-            p.img.row =
-                i16::try_from(r).unwrap_or(i16::MAX) - i16::try_from(dr).unwrap_or(i16::MAX);
-            p.img.col = c.saturating_sub(dc);
+            p.row = i16::try_from(r).unwrap_or(i16::MAX) - i16::try_from(dr).unwrap_or(i16::MAX);
+            p.col = c.saturating_sub(dc);
             true
         });
     }
-    images.iter().map(|p| p.img.clone()).collect()
+    // Pending placements (decode worker still owes the bytes) stay tracked —
+    // their cells live in the grid — but are not emitted: a frame must never
+    // reference a hash no server can satisfy.
+    images
+        .iter()
+        .filter_map(|p| {
+            let (hash, _) = p.ready.as_ref()?;
+            Some(ImagePlacement {
+                row: p.row,
+                col: p.col,
+                cols: p.cols,
+                rows: p.rows,
+                hash: hash.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Controlling-terminal geometry: cell counts plus the PTY's pixel dimensions.
@@ -1022,18 +1145,50 @@ mod tests {
             });
         vec![Placed {
             id,
-            img: ImagePlacement {
-                row: i16::try_from(row).unwrap_or(0),
-                col,
-                cols: Some(w),
-                rows: Some(h),
-                hash: "ab".repeat(32),
-            },
-            blob: crate::model::ImageBlob {
-                mime: "image/png".into(),
-                bytes: bytes::Bytes::new(),
-            },
+            row: i16::try_from(row).unwrap_or(0),
+            col,
+            cols: Some(w),
+            rows: Some(h),
+            ready: Some((
+                "ab".repeat(32),
+                crate::model::ImageBlob {
+                    mime: "image/png".into(),
+                    bytes: bytes::Bytes::new(),
+                },
+            )),
         }]
+    }
+
+    // A deferred placement (worker still owes the bytes) is stamped — its
+    // cells are tracked, cursor semantics exact — but INVISIBLE in frames:
+    // no placement, no image_data, because a frame must never reference a
+    // hash no server can satisfy. It appears the moment the payload lands.
+    #[test]
+    fn pending_image_invisible_until_ready() {
+        let mut parser = new_parser(24, 80);
+        let mut images = place(&mut parser, 4, 2);
+        images[0].ready = None; // decode worker still owes the payload
+        let Frame::Screen(g) = &*frame_from(&parser, &mut images) else {
+            panic!("screen frame")
+        };
+        assert!(g.images.is_empty(), "pending placement not emitted");
+        assert!(g.image_data.is_empty(), "no payload to carry");
+        assert_eq!(images.len(), 1, "but still tracked (cells live)");
+
+        // Msg::ImageReady's effect: the fill makes it visible.
+        images[0].ready = Some((
+            "cd".repeat(32),
+            crate::model::ImageBlob {
+                mime: "image/png".into(),
+                bytes: bytes::Bytes::from_static(b"png-ish"),
+            },
+        ));
+        let Frame::Screen(g) = &*frame_from(&parser, &mut images) else {
+            panic!("screen frame")
+        };
+        assert_eq!(g.images.len(), 1);
+        assert_eq!(g.images[0].hash, "cd".repeat(32));
+        assert!(g.image_data.contains_key(&"cd".repeat(32)));
     }
 
     /// The tagged cells ride vt100's own scrolling: the reported top row falls

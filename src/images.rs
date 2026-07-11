@@ -65,6 +65,59 @@ pub enum Segment {
     Pass(Vec<u8>),
     /// A fully-received inline image, to place at the current cursor cell.
     Image(Image),
+    /// An image whose pixel decode / PNG encode is DEFERRED to a worker
+    /// thread: dims are known up front, so the placement is stamped
+    /// immediately (exact cursor semantics), but the heavy work must not run
+    /// on the screen thread — a sixel video would stall the tee to the local
+    /// terminal behind a deflate per frame (measured 4–12× slowdown).
+    Deferred(DeferredImage),
+}
+
+/// The stamp-now, decode-later form of an image (see [`Segment::Deferred`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeferredImage {
+    pub payload: DeferredPayload,
+    /// App-given cell size, if any (else derive from `px`).
+    pub cells: Option<(u16, u16)>,
+    /// Pixel dimensions, from cheap metadata (sixel raster attributes, kitty
+    /// transmission params) — NOT from decoding.
+    pub px: (u32, u32),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeferredPayload {
+    /// A raw sixel DCS (`ESC P … q … ST`), still to decode + PNG-encode.
+    Sixel(Vec<u8>),
+    /// A kitty raw framebuffer (RGB/RGBA), still to PNG-encode.
+    Raw {
+        pixels: Vec<u8>,
+        channels: u8,
+        w: u32,
+        h: u32,
+    },
+}
+
+/// The worker half of a deferred image: decode/encode to browser-native PNG
+/// bytes (+ actual pixel dims). `fast` picks the cheap deflate level — the
+/// worker sets it under backpressure (jobs superseded while this one waited),
+/// trading a few percent of size for keeping up with video-rate frames.
+pub fn finish_deferred(payload: &DeferredPayload, fast: bool) -> Option<(Vec<u8>, (u32, u32))> {
+    match payload {
+        DeferredPayload::Sixel(seq) => {
+            let img = icy_sixel::SixelImage::decode(seq).ok()?;
+            let (w, h) = (
+                u32::try_from(img.width).ok()?,
+                u32::try_from(img.height).ok()?,
+            );
+            Some((encode_png(w, h, 4, &img.pixels, fast)?, (w, h)))
+        }
+        DeferredPayload::Raw {
+            pixels,
+            channels,
+            w,
+            h,
+        } => Some((encode_png(*w, *h, *channels, pixels, fast)?, (*w, *h))),
+    }
 }
 
 const ITERM: &[u8] = b"\x1b]1337;";
@@ -522,13 +575,17 @@ impl Interceptor {
         if bytes.len() as u64 > MAX_IMAGE_BYTES {
             return None;
         }
-        let image = match acc.fmt {
-            KittyFmt::Png => Image {
+        match acc.fmt {
+            // PNG passes through undecoded — cheap, stays inline.
+            KittyFmt::Png => Some(Segment::Image(Image {
                 mime: sniff_mime(&bytes)?.to_string(),
                 px: dims(&bytes),
                 bytes,
                 cells: acc.cells,
-            },
+            })),
+            // Raw framebuffers need a PNG encode — deferred to the worker
+            // (dims come from the transmission params, so the placement can
+            // be stamped immediately).
             KittyFmt::Rgba | KittyFmt::Rgb => {
                 let (w, h) = acc.px?;
                 let channels = if matches!(acc.fmt, KittyFmt::Rgba) {
@@ -536,17 +593,19 @@ impl Interceptor {
                 } else {
                     3
                 };
-                let png = encode_png(w, h, channels, &bytes)?;
-                Image {
-                    mime: "image/png".to_string(),
-                    bytes: png,
+                Some(Segment::Deferred(DeferredImage {
+                    payload: DeferredPayload::Raw {
+                        pixels: bytes,
+                        channels,
+                        w,
+                        h,
+                    },
                     cells: acc.cells,
-                    px: Some((w, h)),
-                }
+                    px: (w, h),
+                }))
             }
-            KittyFmt::Unsupported => return None,
-        };
-        Some(Segment::Image(image))
+            KittyFmt::Unsupported => None,
+        }
     }
 }
 
@@ -606,7 +665,7 @@ fn zlib_inflate(data: &[u8]) -> Option<Vec<u8>> {
 
 /// Encode a raw pixel buffer as PNG (via the `png` crate). `channels` is 3 (RGB) or
 /// 4 (RGBA); the buffer must hold at least `width*height*channels` bytes.
-fn encode_png(width: u32, height: u32, channels: u8, pixels: &[u8]) -> Option<Vec<u8>> {
+fn encode_png(width: u32, height: u32, channels: u8, pixels: &[u8], fast: bool) -> Option<Vec<u8>> {
     let color = match channels {
         3 => png::ColorType::Rgb,
         4 => png::ColorType::Rgba,
@@ -622,6 +681,11 @@ fn encode_png(width: u32, height: u32, channels: u8, pixels: &[u8]) -> Option<Ve
     let mut enc = png::Encoder::new(&mut out, width, height);
     enc.set_color(color);
     enc.set_depth(png::BitDepth::Eight);
+    // Backpressure trades bytes for speed: Fast deflate keeps video-rate
+    // frames flowing; the default level is for stills, where size wins.
+    if fast {
+        enc.set_compression(png::Compression::Fast);
+    }
     let mut writer = enc.write_header().ok()?;
     // Slice to the exact expected length — a sender may pad the buffer.
     writer.write_image_data(&pixels[..need]).ok()?;
@@ -651,22 +715,63 @@ fn sixel_dcs(s: &[u8]) -> Option<bool> {
     }
 }
 
-/// Decode a sixel DCS (`ESC P … q … ST`) to RGBA (via `icy_sixel`), then re-encode
-/// as PNG the browser can render. Sixel carries no cell size, so `pty.rs` derives
-/// one from the pixel dimensions.
+/// Package a sixel DCS (`ESC P … q … ST`). The full decode + PNG encode is
+/// expensive (this is the video path), so when the sequence declares its
+/// dimensions in raster attributes — every mainstream emitter does — it is
+/// DEFERRED: the placement stamps now, a worker decodes later. A sequence
+/// without raster attributes falls back to the old inline decode (rare, and
+/// only that emitter pays). Sixel carries no cell size either way; `pty.rs`
+/// derives one from the pixel dimensions.
 fn parse_sixel(seq: &[u8]) -> Option<Segment> {
+    if let Some(px) = sixel_raster_dims(seq) {
+        return Some(Segment::Deferred(DeferredImage {
+            payload: DeferredPayload::Sixel(seq.to_vec()),
+            cells: None,
+            px,
+        }));
+    }
     let img = icy_sixel::SixelImage::decode(seq).ok()?;
     let (w, h) = (
         u32::try_from(img.width).ok()?,
         u32::try_from(img.height).ok()?,
     );
-    let png = encode_png(w, h, 4, &img.pixels)?;
+    let png = encode_png(w, h, 4, &img.pixels, false)?;
     Some(Segment::Image(Image {
         mime: "image/png".to_string(),
         bytes: png,
         cells: None,
         px: Some((w, h)),
     }))
+}
+
+/// Pixel dimensions from a sixel sequence's raster attributes — the `"` item
+/// (`" Pan;Pad;Ph;Pv`) directly after the `q`, giving Ph×Pv without decoding
+/// a single pixel. `None` when absent (or zero-sized): the caller decodes
+/// inline. The declared size is trusted like a real sixel terminal trusts it
+/// (it allots the scroll region from these before pixels arrive).
+fn sixel_raster_dims(seq: &[u8]) -> Option<(u32, u32)> {
+    let q = seq.iter().position(|&b| b == b'q')?;
+    let rest = &seq[q + 1..];
+    if rest.first() != Some(&b'"') {
+        return None;
+    }
+    let mut params: [u32; 4] = [0; 4];
+    let mut i = 0; // param index
+    for &b in &rest[1..] {
+        match b {
+            b'0'..=b'9' => {
+                params[i] = params[i].saturating_mul(10) + u32::from(b - b'0');
+            }
+            b';' => {
+                i += 1;
+                if i >= 4 {
+                    break;
+                }
+            }
+            _ => break, // first sixel data byte ends the raster attributes
+        }
+    }
+    (params[2] > 0 && params[3] > 0).then_some((params[2], params[3]))
 }
 
 /// A single-shot iTerm2 `File=<k=v>;…:<base64>` payload (verb and terminator
@@ -806,9 +911,66 @@ mod tests {
         segs.into_iter()
             .filter_map(|s| match s {
                 Segment::Image(i) => Some(i),
-                _ => None,
+                // Materialize deferred payloads exactly like the pty worker
+                // does, so the decode round-trip assertions keep covering
+                // the sixel / kitty-raw paths.
+                Segment::Deferred(d) => {
+                    let (bytes, px) = finish_deferred(&d.payload, false)?;
+                    Some(Image {
+                        mime: "image/png".to_string(),
+                        bytes,
+                        cells: d.cells,
+                        px: Some(px),
+                    })
+                }
+                Segment::Pass(_) => None,
             })
             .collect()
+    }
+
+    // The heavy paths must come out DEFERRED (stamp now, decode on the
+    // worker): sixel with raster attributes carries its dims up front; a
+    // kitty raw framebuffer carries them in the transmission params. The
+    // fast-compression variant must still be a valid PNG.
+    #[test]
+    fn heavy_paths_defer_with_upfront_dims() {
+        let mut it = Interceptor::new();
+        let sixel = b"\x1bPq\"1;1;4;2#0;2;100;0;0#0~~~~$-\x1b\\";
+        let segs = it.feed(sixel);
+        let d = segs
+            .iter()
+            .find_map(|s| match s {
+                Segment::Deferred(d) => Some(d.clone()),
+                _ => None,
+            })
+            .expect("sixel with raster attributes defers");
+        assert_eq!(d.px, (4, 2), "dims from raster attributes, no decode");
+        assert!(matches!(d.payload, DeferredPayload::Sixel(_)));
+        // Both compression levels produce decodable PNGs of the same size.
+        let (norm, px) = finish_deferred(&d.payload, false).expect("decodes");
+        let (fast, px2) = finish_deferred(&d.payload, true).expect("decodes fast");
+        assert_eq!(px, px2);
+        for png_bytes in [&norm, &fast] {
+            let dec = png::Decoder::new(std::io::Cursor::new(png_bytes));
+            let reader = dec.read_info().expect("valid PNG");
+            assert_eq!((reader.info().width, reader.info().height), (px.0, px.1));
+        }
+
+        let mut it = Interceptor::new();
+        let raw = [0u8; 2 * 2 * 4];
+        let s = format!("\x1b_Ga=T,f=32,t=d,s=2,v=2;{}\x1b\\", B64.encode(raw));
+        let kitty = it.feed(s.as_bytes());
+        assert!(
+            kitty.iter().any(|s| matches!(
+                s,
+                Segment::Deferred(DeferredImage {
+                    payload: DeferredPayload::Raw { .. },
+                    px: (2, 2),
+                    ..
+                })
+            )),
+            "kitty raw framebuffer defers with metadata dims"
+        );
     }
 
     #[test]
@@ -870,7 +1032,7 @@ mod tests {
             .into_iter()
             .filter_map(|seg| match seg {
                 Segment::Pass(b) => Some(b),
-                Segment::Image(_) => None,
+                _ => None,
             })
             .flatten()
             .collect();
@@ -1027,7 +1189,7 @@ mod tests {
         segs.iter()
             .filter_map(|s| match s {
                 Segment::Pass(b) => Some(b.clone()),
-                Segment::Image(_) => None,
+                _ => None,
             })
             .flatten()
             .collect()
@@ -1302,7 +1464,7 @@ mod tests {
             .into_iter()
             .filter_map(|s| match s {
                 Segment::Pass(b) => Some(b),
-                Segment::Image(_) => None,
+                _ => None,
             })
             .flatten()
             .collect();
