@@ -243,6 +243,69 @@ export function resolveRgb(c: Color | undefined): RGB | null {
   return c;
 }
 
+// ── kitty-parity text composition (canvas track D.1) ──────────────────────────
+//
+// Browsers composite glyph coverage in sRGB space; kitty composites in linear
+// space (cell_fragment.glsl runs before sRGB encode — its Linux 'platform'
+// strategy adds no further fudge, the linear blend IS the difference). For
+// light-on-dark text the sRGB blend darkens every antialiased edge pixel, and
+// at terminal sizes most glyph ink is edge — strokes read thin and airy. The
+// canvas knows each draw's fg and effective bg, so the coverage remap that
+// makes the browser's sRGB blend land on kitty's linear result is closed-form:
+//   target(a) = lin2srgb( lin(fgLum)·a + lin(bgLum)·(1−a) )
+//   a′(a)     = (target(a) − bgLum) / (fgLum − bgLum)
+// It is exact for monochrome pairs (the default gray-on-black) and a
+// luminance approximation for colored text. Applied per draw as an SVG
+// feComponentTransfer alpha table — identity at a=0 and a=1, so solid fills
+// (backgrounds, bars, straight underlines) pass through untouched and the
+// filter can stay set across a row. DOM mode cannot express this at all (CSS
+// has no text blend math) — canvas-mode only by nature.
+export function srgb2lin(c: number): number {
+  return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+}
+export function lin2srgb(c: number): number {
+  return c <= 0.003_130_8 ? c * 12.92 : 1.055 * c ** (1 / 2.4) - 0.055;
+}
+function lum(c: RGB): number {
+  return (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]) / 255;
+}
+// The remap itself, exported for the verify rig's numeric check.
+export function weightCurve(fgLum: number, bgLum: number, a: number): number {
+  const t = lin2srgb(srgb2lin(fgLum) * a + srgb2lin(bgLum) * (1 - a));
+  return Math.min(1, Math.max(0, (t - bgLum) / (fgLum - bgLum)));
+}
+
+// The remap ships as a DOUBLE-DRAW: a second fillText at globalAlpha k
+// composites source-over to a′ = a + k·a(1−a) — same rasterization path, no
+// per-draw filter surface (an exact SVG feComponentTransfer table filter was
+// measured 5× slower under storm: every filtered draw pays an intermediate
+// surface). k is fitted per (fg,bg)-luminance bucket so the boosted curve
+// meets the exact linear-blend target at half coverage. Thickening only:
+// dark-on-light would need thinning, which overdraw cannot express — kitty's
+// own platform fudge also only thickens, so parity holds where it matters.
+// ponytail: a corrected-alpha glyph sprite atlas (kitty's architecture) is
+// the exact-per-pixel upgrade path if the midtone fit ever shows.
+let weightOn = true;
+const weightBoosts = new Map<string, number>(); // luminance bucket → k
+export function weightBoost(fg: RGB, bg: RGB): number {
+  if (!weightOn) return 0;
+  // quantized to 1/8 luminance steps — close pairs share one k; k derives
+  // FROM the quantized pair so a bucket is exact for its representative
+  // point (and deterministic for the verify rig)
+  const fl = Math.round(lum(fg) * 8) / 8;
+  const bl = Math.round(lum(bg) * 8) / 8;
+  const key = `${fl}:${bl}`;
+  const hit = weightBoosts.get(key);
+  if (hit !== undefined) return hit;
+  // a′(0.5) = 0.5 + k·0.25 must meet the linear-blend target at a = 0.5
+  const k =
+    Math.abs(fl - bl) < 0.05
+      ? 0 // near-invisible text: leave it
+      : Math.min(1, Math.max(0, (weightCurve(fl, bl, 0.5) - 0.5) / 0.25));
+  weightBoosts.set(key, k);
+  return k;
+}
+
 // ── cell → CSS (port of render.rs:cell_box_style) ─────────────────────────────
 
 export function cellStyle(cell: Cell, isCursor: boolean): string {
@@ -1156,6 +1219,7 @@ function drawRowStorm(r: number): void {
   ctx.textBaseline = "alphabetic";
   const baseY = rowBaseline(r);
   const defBg = cfg.defBg.toLowerCase();
+  const defBgRgb = parseHex(defBg);
   // Decoration metrics, sized like the DOM's text-decoration: thickness ~6%
   // of the em, underline just below the baseline, strike through the x-height.
   const th = Math.max(1, Math.round(fontPx * 0.06));
@@ -1253,26 +1317,39 @@ function drawRowStorm(r: number): void {
         ctx.font = font;
         curFont = font;
       }
-      const fg = hex(cellFg(cell, curBlock));
+      const fgRgb = cellFg(cell, curBlock);
+      const fg = hex(fgRgb);
       ctx.fillStyle = fg;
       const ink = isFillGlyph(cp) ? inkBox(font, cell.t) : null;
-      if (ink !== null) {
-        // Fill glyphs tile the cell like the DOM's stretched SVG: map the
-        // glyph's ink box onto the exact cell rect, so separators and block
-        // fills leave no hairline gaps.
-        const sx = (x1 - x0) / (ink.l + ink.r);
-        const sy = (y1 - y0) / (ink.a + ink.d);
-        ctx.save();
-        ctx.translate(x0 + ink.l * sx, y0 + ink.a * sy);
-        ctx.scale(sx, sy);
-        ctx.fillText(cell.t, 0, 0);
-        ctx.restore();
-      } else if (cp && glyphOverflowsCell(cell.t, w) && !symbolFamily(cp)) {
-        // Over-wide fallback glyphs overflow their cell, like the DOM's
-        // own-cell quarantine with overflow:visible — no maxWidth squeeze.
-        ctx.fillText(cell.t, x0, baseY);
-      } else {
-        ctx.fillText(cell.t, x0, baseY, x1 - x0);
+      const drawText = (): void => {
+        if (!ctx) return;
+        if (ink !== null) {
+          // Fill glyphs tile the cell like the DOM's stretched SVG: map the
+          // glyph's ink box onto the exact cell rect, so separators and block
+          // fills leave no hairline gaps.
+          const sx = (x1 - x0) / (ink.l + ink.r);
+          const sy = (y1 - y0) / (ink.a + ink.d);
+          ctx.save();
+          ctx.translate(x0 + ink.l * sx, y0 + ink.a * sy);
+          ctx.scale(sx, sy);
+          ctx.fillText(cell.t!, 0, 0);
+          ctx.restore();
+        } else if (cp && glyphOverflowsCell(cell.t!, w) && !symbolFamily(cp)) {
+          // Over-wide fallback glyphs overflow their cell, like the DOM's
+          // own-cell quarantine with overflow:visible — no maxWidth squeeze.
+          ctx.fillText(cell.t!, x0, baseY);
+        } else {
+          ctx.fillText(cell.t!, x0, baseY, x1 - x0);
+        }
+      };
+      drawText();
+      // kitty-parity composition (D.1): second pass boosts AA midtones toward
+      // the linear-blend weight — see weightBoost.
+      const k = weightBoost(fgRgb, bg ?? defBgRgb);
+      if (k > 0) {
+        ctx.globalAlpha = k;
+        drawText();
+        ctx.globalAlpha = 1;
       }
     }
     // Decorations: underline in the cell's style and SGR 58 color,
@@ -2263,6 +2340,12 @@ export function benchCursorStep(): void {
 export function benchBlinkPhase(on: boolean): void {
   blinkPhase = on;
   for (const r of [...blinkRows]) redrawCanvasRow(r);
+}
+// Toggle the kitty-parity composition remap (verify.py compares coverage
+// with the filter off against the weightCurve prediction with it on).
+export function benchWeight(on: boolean): void {
+  weightOn = on;
+  redrawCanvasAll();
 }
 
 function main(): void {

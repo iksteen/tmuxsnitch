@@ -535,7 +535,18 @@ geometry, and decoration behavior. Ground truth stays kitty. Non-goals:
 WebGL/subpixel (⊘ item below), SDF atlases (softer than the platform
 rasterizer at terminal sizes).
 
-1. **kitty-parity text composition (the "thin/airy text" fix).** Browsers
+1. ✅ **kitty-parity text composition (the "thin/airy text" fix)** (landed
+   2026-07-11, `canvas-track-d`): shipped as the double-draw (technique b) —
+   the exact SVG feComponentTransfer table filter (technique a) verified
+   numerically but measured 5× slower under storm (an intermediate surface
+   per filtered draw: 41 → 7.8fps at rain 320×100). The boost k is fitted
+   per (fg,bg)-luminance bucket so `a + k·a(1−a)` meets the linear-blend
+   target at half coverage; thickening only (kitty's own fudge also only
+   thickens). Verified: `?mode=weight` numeric check (p50 < 0.01 vs the
+   source-over algebra, solids untouched); cost 41→25fps at the synthetic
+   ceiling, 59fps at rain 200×60 (server cap 30). Sprite-atlas exact math
+   stays the named upgrade path. Original sketch below.
+   Browsers
    composite glyph coverage in sRGB space; kitty composites in linear space
    with a luminance-scaled alpha adjustment (`foreground_contrast` in
    kitty/cell_fragment.glsl: `a' = mix(a, pow(a, gamma_adj),

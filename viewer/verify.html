@@ -18,7 +18,7 @@
 <input type="checkbox" id="crt" hidden>
 <div id="screen"></div>
 <script type="module">
-import { setConfig, apply, benchInit, benchStorm, benchFlush, benchCursorStep, benchBlinkPhase } from "./viewer.js";
+import { setConfig, apply, benchInit, benchStorm, benchFlush, benchCursorStep, benchBlinkPhase, benchWeight, weightBoost } from "./viewer.js";
 
 const PARAMS = new URLSearchParams(location.search);
 const MODE = PARAMS.get("mode") ?? "dom";
@@ -303,6 +303,54 @@ if (MODE === "hold") {
   const pass = heldOk && releasedOk;
   document.getElementById("screen").style.display = "none";
   document.body.style.background = pass ? "#00ff00" : "#ff0000";
+}
+
+// ?mode=weight: kitty-parity text composition — with the boost ON, every
+// antialiased glyph pixel's alpha must equal a + k·a(1−a) for the coverage a
+// measured with it OFF (the double-draw's source-over algebra, k from
+// weightBoost); solid and empty pixels must be untouched; midtones must move
+// heavier (light-on-dark). Green/red convention.
+if (MODE === "weight") {
+  const d9 = [];
+  for (let i = 0; i < ROWS; i++) d9.push([[pad("")]]);
+  d9[2] = [[pad("weight probe mille illuminated Willi 0123456789")]];
+  apply({ d: d9, w: COLS, h: ROWS });
+  benchFlush();
+  benchStorm(true);
+  const canvas = document.querySelector("#screen canvas");
+  const g = canvas.getContext("2d");
+  const lh = 17 * devicePixelRatio;
+  const band = () =>
+    g.getImageData(0, Math.round(2 * lh), canvas.width, Math.round(lh)).data;
+  benchWeight(false);
+  const raw = band(); // plain platform coverage in the alpha channel
+  benchWeight(true);
+  const adj = band();
+  // default pair: fg #d0d0d0 (lum ~0.816) on bg #000000, but the filter is
+  // built from 1/8-quantized luminances — recompute the same quantized pair
+  const k = weightBoost([0xd0, 0xd0, 0xd0], [0, 0, 0]);
+  let checked = 0, moved = 0, solidBad = 0;
+  const errs = [];
+  for (let i = 3; i < raw.length; i += 4) {
+    const a = raw[i] / 255;
+    const b = adj[i] / 255;
+    if (a === 0 || a === 1) {
+      if (Math.abs(b - a) > 1 / 255) solidBad++; // solid/empty: untouched ±rounding
+      continue;
+    }
+    checked++;
+    const want = a + k * a * (1 - a); // the double-draw's source-over algebra
+    errs.push(Math.abs(b - want));
+    if (b > a) moved++;
+  }
+  errs.sort((x, y) => x - y);
+  const p95 = errs[Math.floor(errs.length * 0.95)] ?? 1;
+  const p50 = errs[Math.floor(errs.length * 0.5)] ?? 1;
+  const pass = k > 0.5 && solidBad === 0 && checked > 200 && p50 < 0.01 && p95 < 0.02
+    && moved / checked > 0.95;
+  document.getElementById("screen").style.display = "none";
+  document.body.style.background = pass ? "#00ff00"
+    : `rgb(${Math.min(255, Math.round(p95 * 1000))}, ${Math.min(255, Math.round(p50 * 1000))}, ${Math.min(255, solidBad)})`;
 }
 
 // ?mode=crt: canvas phosphor self-check — flipping the #crt toggle on must

@@ -88,6 +88,36 @@ export function resolveRgb(c) {
         return palette(c);
     return c;
 }
+export function srgb2lin(c) {
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+}
+export function lin2srgb(c) {
+    return c <= 0.0031308 ? c * 12.92 : 1.055 * c ** (1 / 2.4) - 0.055;
+}
+function lum(c) {
+    return (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]) / 255;
+}
+export function weightCurve(fgLum, bgLum, a) {
+    const t = lin2srgb(srgb2lin(fgLum) * a + srgb2lin(bgLum) * (1 - a));
+    return Math.min(1, Math.max(0, (t - bgLum) / (fgLum - bgLum)));
+}
+let weightOn = true;
+const weightBoosts = new Map();
+export function weightBoost(fg, bg) {
+    if (!weightOn)
+        return 0;
+    const fl = Math.round(lum(fg) * 8) / 8;
+    const bl = Math.round(lum(bg) * 8) / 8;
+    const key = `${fl}:${bl}`;
+    const hit = weightBoosts.get(key);
+    if (hit !== undefined)
+        return hit;
+    const k = Math.abs(fl - bl) < 0.05
+        ? 0
+        : Math.min(1, Math.max(0, (weightCurve(fl, bl, 0.5) - 0.5) / 0.25));
+    weightBoosts.set(key, k);
+    return k;
+}
 export function cellStyle(cell, isCursor) {
     let fg = resolveRgb(cell.f);
     let bg = resolveRgb(cell.g);
@@ -827,6 +857,7 @@ function drawRowStorm(r) {
     ctx.textBaseline = "alphabetic";
     const baseY = rowBaseline(r);
     const defBg = cfg.defBg.toLowerCase();
+    const defBgRgb = parseHex(defBg);
     const th = Math.max(1, Math.round(fontPx * 0.06));
     const ulOff = Math.max(th, Math.round(fontPx * 0.065));
     const amp = Math.max(1, Math.round(fontPx * 0.045));
@@ -912,23 +943,35 @@ function drawRowStorm(r) {
                 ctx.font = font;
                 curFont = font;
             }
-            const fg = hex(cellFg(cell, curBlock));
+            const fgRgb = cellFg(cell, curBlock);
+            const fg = hex(fgRgb);
             ctx.fillStyle = fg;
             const ink = isFillGlyph(cp) ? inkBox(font, cell.t) : null;
-            if (ink !== null) {
-                const sx = (x1 - x0) / (ink.l + ink.r);
-                const sy = (y1 - y0) / (ink.a + ink.d);
-                ctx.save();
-                ctx.translate(x0 + ink.l * sx, y0 + ink.a * sy);
-                ctx.scale(sx, sy);
-                ctx.fillText(cell.t, 0, 0);
-                ctx.restore();
-            }
-            else if (cp && glyphOverflowsCell(cell.t, w) && !symbolFamily(cp)) {
-                ctx.fillText(cell.t, x0, baseY);
-            }
-            else {
-                ctx.fillText(cell.t, x0, baseY, x1 - x0);
+            const drawText = () => {
+                if (!ctx)
+                    return;
+                if (ink !== null) {
+                    const sx = (x1 - x0) / (ink.l + ink.r);
+                    const sy = (y1 - y0) / (ink.a + ink.d);
+                    ctx.save();
+                    ctx.translate(x0 + ink.l * sx, y0 + ink.a * sy);
+                    ctx.scale(sx, sy);
+                    ctx.fillText(cell.t, 0, 0);
+                    ctx.restore();
+                }
+                else if (cp && glyphOverflowsCell(cell.t, w) && !symbolFamily(cp)) {
+                    ctx.fillText(cell.t, x0, baseY);
+                }
+                else {
+                    ctx.fillText(cell.t, x0, baseY, x1 - x0);
+                }
+            };
+            drawText();
+            const k = weightBoost(fgRgb, bg ?? defBgRgb);
+            if (k > 0) {
+                ctx.globalAlpha = k;
+                drawText();
+                ctx.globalAlpha = 1;
             }
         }
         if (cell.u || cell.s) {
@@ -1642,6 +1685,10 @@ export function benchBlinkPhase(on) {
     blinkPhase = on;
     for (const r of [...blinkRows])
         redrawCanvasRow(r);
+}
+export function benchWeight(on) {
+    weightOn = on;
+    redrawCanvasAll();
 }
 function main() {
     const boot = window.SHELLGLASS;
