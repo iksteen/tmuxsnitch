@@ -218,6 +218,15 @@ function rowBaseline(r) {
     }
     return Math.round(r * cellH * dpr + base);
 }
+const GLYPH_CACHE_CAP = 4096;
+function boundedSet(m, key, val) {
+    if (m.size >= GLYPH_CACHE_CAP && !m.has(key)) {
+        const oldest = m.keys().next().value;
+        if (oldest !== undefined)
+            m.delete(oldest);
+    }
+    m.set(key, val);
+}
 let descCanvas = null;
 const descSpanCache = new Map();
 function descSpan(font, glyph, top, h) {
@@ -261,7 +270,7 @@ function descSpan(font, glyph, top, h) {
         }
     }
     const span = lo < 0 ? null : [lo - ox, hi + 1 - ox];
-    descSpanCache.set(key, span);
+    boundedSet(descSpanCache, key, span);
     return span;
 }
 const inkBoxCache = new Map();
@@ -1187,7 +1196,7 @@ function glyphOverflowsCell(t, w) {
         measOneCh = measCtx.measureText("0").width || 1;
     }
     const over = measCtx.measureText(t).width > measOneCh * w * 1.05;
-    overflowCache.set(t, over);
+    boundedSet(overflowCache, t, over);
     return over;
 }
 function svgFont(cell) {
@@ -1259,14 +1268,19 @@ function schedulePaint() {
 function flushPaint() {
     paintScheduled = false;
     paints++;
+    const held = pictureHeld();
     if (rebuildDims) {
+        if (held) {
+            frozenStale = true;
+            return;
+        }
         paintFull(rebuildDims);
         rebuildDims = null;
         dirtyRows.clear();
+        frozenStale = false;
         lastCurPos = screen.cur ? [screen.cur[0], screen.cur[1]] : null;
     }
     else {
-        const held = pictureHeld();
         const cur = screen.cur;
         if (!held && smoothCursorOn() && cur && lastCurPos &&
             (cur[0] !== lastCurPos[0] || cur[1] !== lastCurPos[1])) {
@@ -1356,6 +1370,7 @@ function paintFull(dims) {
             catch {
             }
         });
+        el.addEventListener("error", () => pruneHeld());
         return { ref, el };
     });
     heldImages = prev.filter((o) => o.el.complete &&
@@ -1390,10 +1405,14 @@ function applyPatches(cur, sty, rows) {
 function applyDiff(m) {
     if (m.t !== undefined)
         setTitle(m.t);
-    if (m.y)
+    if (m.y) {
         Object.assign(screen.links, m.y);
+        if (Object.keys(screen.links).length > MAX_LINKS)
+            screen.links = { ...m.y };
+    }
     applyPatches(m.p, m.q, (m.r ?? []).map(decodeRow));
 }
+const MAX_LINKS = 4096;
 function applyCell(m) {
     const { c: r, p: _p, q: _q, ...style } = m;
     const styled = Object.keys(style).length > 0;

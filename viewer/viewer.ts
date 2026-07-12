@@ -472,6 +472,19 @@ function rowBaseline(r: number): number {
 // amortized per (font, glyph, band): one offscreen raster + column scan,
 // returning the ink's horizontal extent within the band relative to the draw
 // origin (null = nothing descends that far).
+// Insert into a memoization map, FIFO-evicting the oldest entry past `cap` so a
+// stream of distinct graphemes (a hostile or just very diverse session) can't
+// grow a per-glyph cache without bound. These caches are also fully cleared on
+// resize/font-load; the cap only bounds growth WITHIN one layout.
+const GLYPH_CACHE_CAP = 4096;
+function boundedSet<K, V>(m: Map<K, V>, key: K, val: V): void {
+  if (m.size >= GLYPH_CACHE_CAP && !m.has(key)) {
+    const oldest = m.keys().next().value;
+    if (oldest !== undefined) m.delete(oldest);
+  }
+  m.set(key, val);
+}
+
 let descCanvas: HTMLCanvasElement | null = null;
 const descSpanCache = new Map<string, [number, number] | null>();
 function descSpan(
@@ -522,7 +535,7 @@ function descSpan(
     }
   }
   const span: [number, number] | null = lo < 0 ? null : [lo - ox, hi + 1 - ox];
-  descSpanCache.set(key, span);
+  boundedSet(descSpanCache, key, span);
   return span;
 }
 
@@ -1736,7 +1749,7 @@ function glyphOverflowsCell(t: string, w: number): boolean {
   }
   // 5% slack so ordinary rounding doesn't route normal glyphs down the SVG path.
   const over = measCtx.measureText(t).width > measOneCh * w * 1.05;
-  overflowCache.set(t, over);
+  boundedSet(overflowCache, t, over);
   return over;
 }
 
@@ -1875,15 +1888,26 @@ function schedulePaint(): void {
 function flushPaint(): void {
   paintScheduled = false;
   paints++;
+  const held = pictureHeld();
 
   if (rebuildDims) {
+    // A full frame (resize, image change, OSC 10/11, SSE reconnect) replaces
+    // #screen wholesale, which would destroy the ghost Text nodes a live
+    // selection is anchored in — so honor the hold exactly like the per-row
+    // branch does. The model is already updated and rebuildDims stays set
+    // (latest-wins across queued fulls); the release flush rebuilds from the
+    // current model, subsuming any diffs that arrived meanwhile.
+    if (held) {
+      frozenStale = true;
+      return;
+    }
     paintFull(rebuildDims);
     rebuildDims = null;
     dirtyRows.clear();
+    frozenStale = false;
     // a rebuild teleports the cursor; the NEXT move animates from here
     lastCurPos = screen.cur ? [screen.cur[0], screen.cur[1]] : null;
   } else {
-    const held = pictureHeld();
     // Smooth cursor: catch the move BEFORE painting rows, so this flush's row
     // repaints already suppress the static cursor at the target (no double
     // cursor while the rect travels). Full rebuilds teleport (layout change) —
@@ -2011,6 +2035,10 @@ function paintFull(dims: { w: number; h: number; i?: ImageRef[] }): void {
         /* tainted canvas can't happen (same-origin), but never break paint */
       }
     });
+    // A replacement that fails to load (404, decode error) never fires `load`,
+    // so release any held predecessor it was bridging — else it lingers in
+    // heldImages, drawn under the broken image, until the next full frame.
+    el.addEventListener("error", () => pruneHeld());
     return { ref, el };
   });
   // Hold the previous frame's DECODED images wherever the replacement is
@@ -2087,9 +2115,19 @@ function applyPatches(
 function applyDiff(m: DiffMsg): void {
   if (m.t !== undefined) setTitle(m.t); // two-state: absent = unchanged
   // New link-table entries merge; the next full frame prunes scrolled-off ids.
-  if (m.y) Object.assign(screen.links, m.y);
+  // A hostile stream could flood unique ids between fulls, so cap the table:
+  // past the ceiling, keep only this diff's own ids (a full frame restores the
+  // authoritative table). Legit sessions never approach it.
+  if (m.y) {
+    Object.assign(screen.links, m.y);
+    if (Object.keys(screen.links).length > MAX_LINKS) screen.links = { ...m.y };
+  }
   applyPatches(m.p, m.q, (m.r ?? []).map(decodeRow));
 }
+
+// Ceiling on the OSC-8 link table (see applyDiff). Far above any real session's
+// on-screen link count; only a flood of unique ids hits it.
+const MAX_LINKS = 4096;
 
 function applyCell(m: CellMsg): void {
   const { c: r, p: _p, q: _q, ...style } = m;

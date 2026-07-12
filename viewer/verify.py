@@ -67,7 +67,7 @@ def main():
         base = "/tmp/sg-verify-static.png"
         shot(port, "static", base)
         selfchecks = ["links", "crt", "image", "cursor&cursor=smooth", "bleed",
-                      "blink", "freeze", "hold", "weight", "liga", "pinch"]
+                      "blink", "freeze", "hold", "holdfull", "weight", "liga", "pinch"]
         paths = {}
         for m in selfchecks:
             name = m.split("&")[0]

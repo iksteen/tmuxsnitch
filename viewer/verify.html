@@ -324,6 +324,43 @@ if (MODE === "hold") {
   document.body.style.background = pass ? "#00ff00" : "#ff0000";
 }
 
+// ?mode=holdfull: a FULL frame (resize/image/reconnect) arriving during a live
+// selection must NOT rebuild #screen — that would detach the ghost Text node the
+// selection is anchored in. The rebuild is deferred until release, then applied.
+// Green/red convention.
+if (MODE === "holdfull") {
+  const df = [];
+  for (let i = 0; i < ROWS; i++) df.push([[pad(`row ${i} calm text`)]]);
+  apply({ d: df, w: COLS, h: ROWS });
+  benchFlush();
+  const spin = (ms) => { const t = performance.now(); while (performance.now() - t < ms); };
+  const rows = document.querySelectorAll("#screen .row");
+  const selNode = rows[3].firstChild;
+  const range = document.createRange();
+  range.setStart(selNode, 0);
+  range.setEnd(selNode, 10); // "row 3 calm"
+  const sel = getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+  // A FULL frame under the hold: the rebuild must be deferred, so the very
+  // Text node the selection anchors in survives and the selection is intact.
+  spin(50);
+  const dd = [];
+  for (let i = 0; i < ROWS; i++) dd.push([[pad(`ROW ${i} REPLACED WHOLESALE`)]]);
+  apply({ d: dd, w: COLS, h: ROWS });
+  benchFlush();
+  const heldOk = document.querySelectorAll("#screen .row")[3].firstChild === selNode
+    && sel.toString() === "row 3 calm";
+  // Release: the deferred full now applies (rows rebuilt with the new text).
+  sel.removeAllRanges();
+  spin(50); benchFlush();
+  const after = document.querySelectorAll("#screen .row")[3].firstChild;
+  const releasedOk = after !== selNode && after.data.startsWith("ROW 3 REPLACED");
+  const pass = heldOk && releasedOk;
+  document.getElementById("screen").style.display = "none";
+  document.body.style.background = pass ? "#00ff00" : "#ff0000";
+}
+
 // ?mode=weight: kitty-parity text composition — with the boost ON, every
 // antialiased glyph pixel's alpha must equal a + k·a(1−a) for the coverage a
 // measured with it OFF (the double-draw's source-over algebra, k from
