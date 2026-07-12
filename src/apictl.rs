@@ -31,14 +31,32 @@ fn clean(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).take(256).collect()
 }
 
-/// Turn a non-success response into a readable error: the API's own
+/// Read a hub response body into a String, capped so a hostile/MITM hub can't OOM
+/// the CLI with an unbounded (or lying-`Content-Length`) body — `Response::text`
+/// buffers the whole thing with no ceiling. API responses are tiny; the cap is
+/// generous for any real session list.
+async fn body_capped(mut res: reqwest::Response) -> Result<String> {
+    const MAX: usize = 8 << 20;
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = res.chunk().await.context("reading the hub response")? {
+        if buf.len() + chunk.len() > MAX {
+            bail!("hub response body exceeds {} MiB — refusing", MAX >> 20);
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    String::from_utf8(buf).context("hub response body is not valid UTF-8")
+}
+
+/// Read the (capped) response body, returning it on success. On a non-success
+/// status, turn the body into a readable error instead — the API's own
 /// `{"error": …}` message when present, the raw body otherwise.
-async fn check(res: reqwest::Response) -> Result<reqwest::Response> {
+async fn check(res: reqwest::Response) -> Result<String> {
     let status = res.status();
     if status.is_success() {
-        return Ok(res);
+        return body_capped(res).await;
     }
-    let body = res.text().await.unwrap_or_default();
+    // Tolerant on the error path: a body we can't read just yields the status line.
+    let body = body_capped(res).await.unwrap_or_default();
     // The hub is untrusted: neuter its message before it can reach the terminal.
     let msg = clean(
         &serde_json::from_str::<serde_json::Value>(&body)
@@ -67,7 +85,7 @@ pub async fn list(hub: &str, key: &str) -> Result<()> {
         .send()
         .await
         .context("requesting the session list")?;
-    let body = check(res).await?.text().await?;
+    let body = check(res).await?;
     let sessions: Vec<serde_json::Value> =
         serde_json::from_str(&body).context("parsing the session list")?;
     if sessions.is_empty() {
@@ -104,8 +122,8 @@ pub async fn add(hub: &str, key: &str, id: &str, slug: Option<&str>) -> Result<(
         .send()
         .await
         .context("adding the session")?;
-    let created: serde_json::Value = serde_json::from_str(&check(res).await?.text().await?)
-        .context("parsing the add response")?;
+    let created: serde_json::Value =
+        serde_json::from_str(&check(res).await?).context("parsing the add response")?;
     println!(
         "added {} — view at {}/s/{}",
         clean(created["id"].as_str().unwrap_or(id)),
