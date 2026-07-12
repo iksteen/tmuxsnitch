@@ -242,6 +242,52 @@ pub struct Interceptor {
     /// (so kitty/iTerm2 advance the cursor like sixel would). Only used with
     /// `transcode`.
     cell: (u16, u16),
+    /// EXPERIMENTAL: monotonic kitty image id for transcoded placements.
+    next_id: u32,
+    /// EXPERIMENTAL: sixel-bytes → (kitty id, cells, decoded PNG), so tmux re-emitting
+    /// the same sixel on every scroll reuses the id (no re-transmit) and the PNG (no
+    /// re-decode). Byte-capped.
+    sixel_cache: SixelCache,
+}
+
+/// EXPERIMENTAL transcode cache entry (see [`Interceptor::sixel_cache`]).
+#[derive(Default)]
+struct SixelCache {
+    map: std::collections::HashMap<u64, CachedSixel>,
+    order: std::collections::VecDeque<u64>,
+    total: usize,
+}
+
+struct CachedSixel {
+    id: u32,
+    cells: (u16, u16),
+    px: (u32, u32),
+    png: Vec<u8>,
+}
+
+impl SixelCache {
+    /// Cap the retained PNGs; a scrolling session usually holds just the one image.
+    const CAP: usize = 32 << 20;
+
+    fn get(&self, hash: &u64) -> Option<&CachedSixel> {
+        self.map.get(hash)
+    }
+
+    fn insert(&mut self, hash: u64, entry: CachedSixel) {
+        if self.map.contains_key(&hash) {
+            return;
+        }
+        self.total += entry.png.len();
+        self.map.insert(hash, entry);
+        self.order.push_back(hash);
+        while self.total > Self::CAP && self.order.len() > 1 {
+            if let Some(old) = self.order.pop_front()
+                && let Some(e) = self.map.remove(&old)
+            {
+                self.total -= e.png.len();
+            }
+        }
+    }
 }
 
 /// Concatenated iTerm2 `FilePart` base64 across a multipart transfer, with the
@@ -531,8 +577,68 @@ impl Interceptor {
         match marker {
             Marker::Iterm => self.parse_iterm(seq),
             Marker::Kitty => self.parse_kitty(seq),
-            Marker::Sixel => parse_sixel(seq, self.transcode, self.cell),
+            Marker::Sixel => self.parse_sixel(seq),
         }
+    }
+
+    /// A sixel DCS. Natively it's DEFERRED (decode on a worker, the video path).
+    /// EXPERIMENTAL: when `transcode` is set (terminal has kitty/iTerm2 but not
+    /// sixel), it is instead decoded now and re-encoded for that protocol.
+    fn parse_sixel(&mut self, seq: &[u8]) -> Segment {
+        match self.transcode {
+            Some(proto) => self.sixel_transcoded(seq, proto).unwrap_or(Segment::Drop),
+            None => sixel_image(seq).unwrap_or(Segment::Drop),
+        }
+    }
+
+    /// EXPERIMENTAL: decode a sixel and re-encode it for a non-sixel terminal.
+    /// Kitty uses UNICODE PLACEHOLDERS (a virtual placement + placeholder text
+    /// cells) so the image scrolls with content and its lifecycle is managed by the
+    /// grid — no ghosts on redraw, and it survives tmux; iTerm2 inline images flow
+    /// with text on their own. A per-session cache keyed on the sixel bytes reuses
+    /// the kitty image id (skip re-transmit) and the decoded PNG (skip re-decode)
+    /// when tmux re-emits the same sixel on every scroll. Synchronous (no worker) —
+    /// this path only runs on non-sixel terminals; the fast route is untouched.
+    fn sixel_transcoded(&mut self, seq: &[u8], proto: GfxProto) -> Option<Segment> {
+        let hash = hash_bytes(seq);
+        let (id, cells, px, png, fresh) = match self.sixel_cache.get(&hash) {
+            Some(c) => (c.id, c.cells, c.px, c.png.clone(), false),
+            None => {
+                let (png, px) = finish_deferred(&DeferredPayload::Sixel(seq.to_vec()), false)?;
+                if png.len() as u64 > MAX_IMAGE_BYTES {
+                    return None;
+                }
+                let cells = cells_for(px.0, px.1, self.cell);
+                self.next_id = self.next_id.wrapping_add(1).max(1);
+                let id = self.next_id & 0x00ff_ffff; // 24-bit: encodable in an fg color
+                self.sixel_cache.insert(
+                    hash,
+                    CachedSixel {
+                        id,
+                        cells,
+                        px,
+                        png: png.clone(),
+                    },
+                );
+                (id, cells, px, png, true)
+            }
+        };
+        let tee = match proto {
+            // Only transmit the image data on first sight; re-emissions reuse the id.
+            GfxProto::Kitty => kitty_placeholder(id, cells, fresh.then_some(png.as_slice())),
+            GfxProto::Iterm => iterm_encode(&png, cells),
+        };
+        Some(Segment::Transcoded {
+            tee,
+            // Mirror as if native sixel (cells=None → natural size from px), so the
+            // web looks the same whether or not the terminal needed the transcode.
+            image: Image {
+                mime: "image/png".to_string(),
+                bytes: png,
+                cells: None,
+                px: Some(px),
+            },
+        })
     }
 
     /// Handle one iTerm2 `\x1b]1337;` sequence: a single-shot `File=` image, or one
@@ -806,78 +912,125 @@ fn sixel_dcs(s: &[u8]) -> Option<bool> {
 /// without raster attributes falls back to the old inline decode (rare, and
 /// only that emitter pays). Sixel carries no cell size either way; `pty.rs`
 /// derives one from the pixel dimensions.
-fn parse_sixel(seq: &[u8], transcode: Option<GfxProto>, cell: (u16, u16)) -> Segment {
-    if let Some(proto) = transcode {
-        // EXPERIMENTAL: terminal lacks sixel — decode and re-encode for it.
-        return sixel_transcoded(seq, proto, cell).unwrap_or(Segment::Drop);
-    }
-    sixel_image(seq).unwrap_or(Segment::Drop)
-}
-
-/// EXPERIMENTAL: decode a sixel and re-encode it in `proto` for a terminal that
-/// can't render sixel. Synchronous (no deferral) — the tee needs real pixels, and
-/// this path only runs on non-sixel terminals where the fast route doesn't apply.
-/// The mirror still gets the PNG; the terminal gets kitty/iTerm2.
-fn sixel_transcoded(seq: &[u8], proto: GfxProto, cell: (u16, u16)) -> Option<Segment> {
-    let (png, (w, h)) = finish_deferred(&DeferredPayload::Sixel(seq.to_vec()), false)?;
-    if png.len() as u64 > MAX_IMAGE_BYTES {
-        return None;
-    }
-    let cells = cells_for(w, h, cell);
-    let tee = match proto {
-        GfxProto::Kitty => kitty_encode(&png, cells),
-        GfxProto::Iterm => iterm_encode(&png, cells),
-    };
-    Some(Segment::Transcoded {
-        tee,
-        // Mirror as if native sixel (cells=None → natural size from px), so the web
-        // looks the same whether or not the terminal needed the transcode.
-        image: Image {
-            mime: "image/png".to_string(),
-            bytes: png,
-            cells: None,
-            px: Some((w, h)),
-        },
-    })
-}
-
-/// Cell footprint of a `w`×`h` px image at cell size `cell`, so kitty/iTerm2 advance
-/// the cursor roughly as a sixel-scrolling terminal would.
+/// Cell footprint of a `w`×`h` px image at cell size `cell`, so the transcode
+/// occupies the same cells a sixel would (and advances the cursor accordingly).
+/// Clamped to the diacritics table so every cell is addressable by a placeholder.
 fn cells_for(w: u32, h: u32, cell: (u16, u16)) -> (u16, u16) {
     let (cw, ch) = (u32::from(cell.0.max(1)), u32::from(cell.1.max(1)));
-    let clamp = |n: u32| n.clamp(1, u32::from(u16::MAX)) as u16;
+    let max = DIACRITICS.len() as u32;
+    let clamp = |n: u32| n.clamp(1, max) as u16;
     (clamp(w.div_ceil(cw)), clamp(h.div_ceil(ch)))
 }
 
-/// Wrap a PNG in a kitty graphics APC (`f=100` display), chunked at 4 KiB of base64
-/// per `m=1` segment as the protocol requires, `q=2` to silence kitty's replies.
-fn kitty_encode(png: &[u8], (cols, rows): (u16, u16)) -> Vec<u8> {
-    let b64 = B64.encode(png);
-    let chunks: Vec<&[u8]> = b64.as_bytes().chunks(4096).collect();
-    let n = chunks.len().max(1);
-    let mut out = Vec::with_capacity(b64.len() + 64);
-    for (i, ch) in chunks.iter().enumerate() {
-        let more = u8::from(i + 1 < n);
-        out.extend_from_slice(KITTY);
-        if i == 0 {
-            out.extend_from_slice(format!("a=T,f=100,c={cols},r={rows},q=2,m={more}").as_bytes());
-        } else {
-            out.extend_from_slice(format!("m={more}").as_bytes());
+/// The kitty Unicode-placeholder cell character.
+const PLACEHOLDER: char = '\u{10EEEE}';
+
+/// kitty's rowcolumn diacritics: index → combining code point, encoding a
+/// placeholder cell's row/column (vendored from kitty `gen/rowcolumn-diacritics.txt`).
+#[rustfmt::skip]
+const DIACRITICS: &[u32] = &[
+    0x0305, 0x030D, 0x030E, 0x0310, 0x0312, 0x033D, 0x033E, 0x033F, 0x0346, 0x034A,
+    0x034B, 0x034C, 0x0350, 0x0351, 0x0352, 0x0357, 0x035B, 0x0363, 0x0364, 0x0365,
+    0x0366, 0x0367, 0x0368, 0x0369, 0x036A, 0x036B, 0x036C, 0x036D, 0x036E, 0x036F,
+    0x0483, 0x0484, 0x0485, 0x0486, 0x0487, 0x0592, 0x0593, 0x0594, 0x0595, 0x0597,
+    0x0598, 0x0599, 0x059C, 0x059D, 0x059E, 0x059F, 0x05A0, 0x05A1, 0x05A8, 0x05A9,
+    0x05AB, 0x05AC, 0x05AF, 0x05C4, 0x0610, 0x0611, 0x0612, 0x0613, 0x0614, 0x0615,
+    0x0616, 0x0617, 0x0657, 0x0658, 0x0659, 0x065A, 0x065B, 0x065D, 0x065E, 0x06D6,
+    0x06D7, 0x06D8, 0x06D9, 0x06DA, 0x06DB, 0x06DC, 0x06DF, 0x06E0, 0x06E1, 0x06E2,
+    0x06E4, 0x06E7, 0x06E8, 0x06EB, 0x06EC, 0x0730, 0x0732, 0x0733, 0x0735, 0x0736,
+    0x073A, 0x073D, 0x073F, 0x0740, 0x0741, 0x0743, 0x0745, 0x0747, 0x0749, 0x074A,
+    0x07EB, 0x07EC, 0x07ED, 0x07EE, 0x07EF, 0x07F0, 0x07F1, 0x07F3, 0x0816, 0x0817,
+    0x0818, 0x0819, 0x081B, 0x081C, 0x081D, 0x081E, 0x081F, 0x0820, 0x0821, 0x0822,
+    0x0823, 0x0825, 0x0826, 0x0827, 0x0829, 0x082A, 0x082B, 0x082C, 0x082D, 0x0951,
+    0x0953, 0x0954, 0x0F82, 0x0F83, 0x0F86, 0x0F87, 0x135D, 0x135E, 0x135F, 0x17DD,
+    0x193A, 0x1A17, 0x1A75, 0x1A76, 0x1A77, 0x1A78, 0x1A79, 0x1A7A, 0x1A7B, 0x1A7C,
+    0x1B6B, 0x1B6D, 0x1B6E, 0x1B6F, 0x1B70, 0x1B71, 0x1B72, 0x1B73, 0x1CD0, 0x1CD1,
+    0x1CD2, 0x1CDA, 0x1CDB, 0x1CE0, 0x1DC0, 0x1DC1, 0x1DC3, 0x1DC4, 0x1DC5, 0x1DC6,
+    0x1DC7, 0x1DC8, 0x1DC9, 0x1DCB, 0x1DCC, 0x1DD1, 0x1DD2, 0x1DD3, 0x1DD4, 0x1DD5,
+    0x1DD6, 0x1DD7, 0x1DD8, 0x1DD9, 0x1DDA, 0x1DDB, 0x1DDC, 0x1DDD, 0x1DDE, 0x1DDF,
+    0x1DE0, 0x1DE1, 0x1DE2, 0x1DE3, 0x1DE4, 0x1DE5, 0x1DE6, 0x1DFE, 0x20D0, 0x20D1,
+    0x20D4, 0x20D5, 0x20D6, 0x20D7, 0x20DB, 0x20DC, 0x20E1, 0x20E7, 0x20E9, 0x20F0,
+    0x2CEF, 0x2CF0, 0x2CF1, 0x2DE0, 0x2DE1, 0x2DE2, 0x2DE3, 0x2DE4, 0x2DE5, 0x2DE6,
+    0x2DE7, 0x2DE8, 0x2DE9, 0x2DEA, 0x2DEB, 0x2DEC, 0x2DED, 0x2DEE, 0x2DEF, 0x2DF0,
+    0x2DF1, 0x2DF2, 0x2DF3, 0x2DF4, 0x2DF5, 0x2DF6, 0x2DF7, 0x2DF8, 0x2DF9, 0x2DFA,
+    0x2DFB, 0x2DFC, 0x2DFD, 0x2DFE, 0x2DFF, 0xA66F, 0xA67C, 0xA67D, 0xA6F0, 0xA6F1,
+    0xA8E0, 0xA8E1, 0xA8E2, 0xA8E3, 0xA8E4, 0xA8E5, 0xA8E6, 0xA8E7, 0xA8E8, 0xA8E9,
+    0xA8EA, 0xA8EB, 0xA8EC, 0xA8ED, 0xA8EE, 0xA8EF, 0xA8F0, 0xA8F1, 0xAAB0, 0xAAB2,
+    0xAAB3, 0xAAB7, 0xAAB8, 0xAABE, 0xAABF, 0xAAC1, 0xFE20, 0xFE21, 0xFE22, 0xFE23,
+    0xFE24, 0xFE25, 0xFE26, 0x10A0F, 0x10A38, 0x1D185, 0x1D186, 0x1D187, 0x1D188,
+    0x1D189, 0x1D1AA, 0x1D1AB, 0x1D1AC, 0x1D1AD, 0x1D242, 0x1D243, 0x1D244,
+];
+
+/// EXPERIMENTAL: encode a PNG as a kitty image the terminal renders on UNICODE
+/// PLACEHOLDER cells, so it lives in the grid — scrolls with text, is cleared when
+/// the cells are overwritten (no ghosts), and survives tmux. On first sight `png`
+/// is transmitted as a virtual placement `i=id` (chunked); re-emissions pass `None`
+/// and just re-lay the placeholder cells for the same id. The cells carry the id in
+/// a 24-bit fg colour and each cell's row/col via diacritics; row transitions use
+/// relative moves so the block lands wherever the cursor is.
+fn kitty_placeholder(id: u32, (cols, rows): (u16, u16), png: Option<&[u8]>) -> Vec<u8> {
+    let mut out = Vec::new();
+    if let Some(png) = png {
+        let b64 = B64.encode(png);
+        let chunks: Vec<&[u8]> = b64.as_bytes().chunks(4096).collect();
+        let n = chunks.len().max(1);
+        for (i, ch) in chunks.iter().enumerate() {
+            let more = u8::from(i + 1 < n);
+            out.extend_from_slice(KITTY);
+            if i == 0 {
+                out.extend_from_slice(
+                    format!("a=T,U=1,i={id},f=100,c={cols},r={rows},q=2,m={more}").as_bytes(),
+                );
+            } else {
+                out.extend_from_slice(format!("m={more}").as_bytes());
+            }
+            out.push(b';');
+            out.extend_from_slice(ch);
+            out.extend_from_slice(b"\x1b\\");
         }
-        out.push(b';');
-        out.extend_from_slice(ch);
-        out.extend_from_slice(b"\x1b\\");
     }
+    // fg colour = the 24-bit image id, so kitty maps the placeholders to `i=id`.
+    let (r, g, b) = ((id >> 16) & 0xff, (id >> 8) & 0xff, id & 0xff);
+    out.extend_from_slice(format!("\x1b[38;2;{r};{g};{b}m").as_bytes());
+    let mut buf = [0u8; 4];
+    for row in 0..rows {
+        for col in 0..cols {
+            out.extend_from_slice(PLACEHOLDER.encode_utf8(&mut buf).as_bytes());
+            push_char(&mut out, DIACRITICS[row as usize], &mut buf);
+            push_char(&mut out, DIACRITICS[col as usize], &mut buf);
+        }
+        // Back to the start column and down one — position-independent layout.
+        out.extend_from_slice(format!("\x1b[{cols}D\x1b[1B").as_bytes());
+    }
+    // Leave the cursor at the image's bottom-left (a following newline drops below).
+    out.extend_from_slice(b"\x1b[1A\x1b[39m");
     out
 }
 
-/// Wrap a PNG in an iTerm2 inline-image OSC 1337 (single-shot, cell-sized).
+/// Append a Unicode scalar (a rowcolumn diacritic) as UTF-8.
+fn push_char(out: &mut Vec<u8>, cp: u32, buf: &mut [u8; 4]) {
+    if let Some(c) = char::from_u32(cp) {
+        out.extend_from_slice(c.encode_utf8(buf).as_bytes());
+    }
+}
+
+/// Wrap a PNG in an iTerm2 inline-image OSC 1337. iTerm2 inline images already flow
+/// with the text grid (scroll, clear on overwrite), so no placeholder trick needed.
 fn iterm_encode(png: &[u8], (cols, rows): (u16, u16)) -> Vec<u8> {
     format!(
         "\x1b]1337;File=inline=1;width={cols};height={rows}:{}\x07",
         B64.encode(png)
     )
     .into_bytes()
+}
+
+/// A fast content hash of a sixel DCS, to recognise the same image re-emitted by
+/// tmux on every redraw (reuse the kitty id + decoded PNG instead of redoing both).
+fn hash_bytes(b: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    b.hash(&mut h);
+    h.finish()
 }
 
 /// Decode a sixel DCS into an image segment, or `None` when malformed (the caller
@@ -1268,23 +1421,47 @@ mod tests {
     }
 
     #[test]
-    fn sixel_transcodes_to_kitty_when_terminal_lacks_sixel() {
+    fn sixel_transcodes_to_kitty_placeholders_when_terminal_lacks_sixel() {
         // EXPERIMENTAL: kitty-graphics terminal, no native sixel → the sixel is
-        // decoded and re-teed as a kitty APC, while the mirror still gets a PNG.
+        // decoded and re-teed as a kitty VIRTUAL PLACEMENT + Unicode placeholder
+        // cells (so it scrolls with the grid), while the mirror still gets a PNG.
         let sixel = sample_sixel();
         let mut it = Interceptor::with(true, false, true, Some(GfxProto::Kitty), (10, 20));
         let steps = it.feed(&sixel);
         let tee = tee_bytes(&steps);
+        assert!(contains(&tee, b"\x1b_G"), "transmits a kitty image");
         assert!(
-            tee.starts_with(b"\x1b_G"),
-            "tee re-encoded as kitty graphics"
+            contains(&tee, b"U=1"),
+            "as a virtual placement (Unicode placeholder)"
         );
-        assert!(tee.ends_with(b"\x1b\\"));
+        assert!(
+            contains(&tee, "\u{10EEEE}".as_bytes()),
+            "lays down placeholder cells"
+        );
         assert!(
             !contains(&tee, DCS),
             "no raw sixel DCS reaches the terminal"
         );
         assert_eq!(only_images(steps).len(), 1, "mirror still gets one image");
+    }
+
+    #[test]
+    fn kitty_transcode_reuses_id_on_reemission() {
+        // tmux re-emits the same sixel on every scroll: the second time carries the
+        // placeholder cells but NOT another image transmission (id + PNG are reused).
+        let sixel = sample_sixel();
+        let mut it = Interceptor::with(true, false, true, Some(GfxProto::Kitty), (10, 20));
+        let first = tee_bytes(&it.feed(&sixel));
+        assert!(contains(&first, b"a=T,U=1"), "first sight transmits");
+        let again = tee_bytes(&it.feed(&sixel));
+        assert!(
+            !contains(&again, b"\x1b_G"),
+            "re-emission does not re-transmit"
+        );
+        assert!(
+            contains(&again, "\u{10EEEE}".as_bytes()),
+            "re-emission still lays placeholders"
+        );
     }
 
     #[test]
