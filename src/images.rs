@@ -4,8 +4,8 @@
 //! DCS/APC/OSC-1337 handler), so the images would otherwise be lost.
 //!
 //! We only *extract* image sequences; every other byte passes straight through as
-//! [`Segment::Pass`] to vt100, which is a streaming parser and reassembles partial
-//! escape sequences across calls on its own. So the only thing this scanner has to
+//! a [`Step::Passthrough`] to vt100, which is a streaming parser and
+//! reassembles partial escape sequences across calls on its own. So the only thing this scanner has to
 //! reassemble across PTY read boundaries is an image sequence itself. Like vte and
 //! real terminals, an in-flight sequence is *cancelled* by CAN/SUB or an ESC that
 //! doesn't form ST (a Ctrl-C'd transfer recovers at the next prompt repaint rather
@@ -63,19 +63,64 @@ fn dims(bytes: &[u8]) -> Option<(u32, u32)> {
     Some((s.width as u32, s.height as u32))
 }
 
-/// What the interceptor emits for a run of input.
+/// One unit of `feed` output. The screen thread matches on it to fan the read out
+/// to the local terminal, vt100, the mirror, and (for a rejection) back to the
+/// app. Each variant names exactly which sinks it touches — there is no implicit
+/// "this also goes to the parser" convention. Use [`Step::tee`] for the single
+/// question the tee cares about: which bytes (if any) reach the terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Segment {
-    /// Non-image bytes — feed to vt100 (and tee to the local terminal).
-    Pass(Vec<u8>),
+pub enum Step {
+    /// Plain bytes → the local terminal AND vt100 (the mirror's parser input).
+    Passthrough(Vec<u8>),
+    /// Bytes the local terminal renders natively but the mirror ignores and vt100
+    /// never sees: a mid-flight transfer chunk, a non-display action, an
+    /// oversized-for-the-wire image, an unsupported format.
+    TerminalOnly(Vec<u8>),
+    /// An inline image: `.0` → the local terminal (which renders it natively), `.1`
+    /// is the ready placement stamped into the mirror at the cursor.
+    Image(Vec<u8>, Image),
+    /// An image whose pixel decode / PNG encode is DEFERRED to a worker thread:
+    /// `.0` → the terminal, `.1` is stamped now (dims known up front) and filled
+    /// when the worker answers — the screen thread never blocks on a deflate.
+    Deferred(Vec<u8>, DeferredImage),
+    /// A kitty file/shm transmission we refuse (its payload is a filesystem path /
+    /// shm name and the stream is untrusted — the exfiltration vector). SUPPRESSED
+    /// from the local terminal (nothing teed); `.0` is a kitty error echoing the
+    /// request id, injected to the APP so a detect-mode client (e.g. `kitten icat`)
+    /// falls back to direct transmission — which we DO mirror. Hole closed, image
+    /// kept on the web.
+    Reject(Vec<u8>),
+}
+
+impl Step {
+    /// The bytes to write to the local terminal, or `None` for a rejection (which
+    /// is suppressed so the terminal never services the refused transmission). The
+    /// one place the tee logic lives.
+    #[must_use]
+    pub fn tee(&self) -> Option<&[u8]> {
+        match self {
+            Step::Passthrough(b)
+            | Step::TerminalOnly(b)
+            | Step::Image(b, _)
+            | Step::Deferred(b, _) => Some(b),
+            Step::Reject(_) => None,
+        }
+    }
+}
+
+/// What a parsed image sequence became, before `push_tee` routes it into a
+/// [`Step`]. Internal to the parsers — the screen thread only ever sees `Step`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Segment {
     /// A fully-received inline image, to place at the current cursor cell.
     Image(Image),
-    /// An image whose pixel decode / PNG encode is DEFERRED to a worker
-    /// thread: dims are known up front, so the placement is stamped
-    /// immediately (exact cursor semantics), but the heavy work must not run
-    /// on the screen thread — a sixel video would stall the tee to the local
-    /// terminal behind a deflate per frame (measured 4–12× slowdown).
+    /// An image whose pixel decode / PNG encode is deferred to a worker thread.
     Deferred(DeferredImage),
+    /// Rendered by the local terminal but not mirrored (a non-display action, a
+    /// mid-flight chunk, an oversized image, an unsupported format).
+    Drop,
+    /// A refused kitty file/shm transmission — carries the app-bound error response.
+    Reject(Vec<u8>),
 }
 
 /// The stamp-now, decode-later form of an image (see [`Segment::Deferred`]).
@@ -272,8 +317,12 @@ impl Interceptor {
                 || (self.do_sixel && s.len() < DCS.len() && DCS.starts_with(s)))
     }
 
-    /// Feed one PTY read; returns the segments to apply in order.
-    pub fn feed(&mut self, chunk: &[u8]) -> Vec<Segment> {
+    /// Feed one PTY read; returns the ordered [`Step`]s to apply. Bytes of a
+    /// sequence still being reassembled are NOT emitted until it completes, so an
+    /// image sequence reaches the local terminal one reassembly late (plain text
+    /// flushes immediately as passthrough) — the price of being able to suppress a
+    /// sequence we reject before the terminal ever sees it.
+    pub fn feed(&mut self, chunk: &[u8]) -> Vec<Step> {
         let mut out = Vec::new();
         if let Some(marker) = self.inflight {
             // Continue an in-flight sequence: append and resume the end-scan where
@@ -289,9 +338,13 @@ impl Interceptor {
                     let overflowed = std::mem::take(&mut self.overflow);
                     let buf = self.finish_inflight();
                     if overflowed {
+                        // Over-cap: dropped from the mirror, but the local terminal
+                        // still gets the raw bytes (it renders what it can).
+                        push_tee(&mut out, &buf[..end], Segment::Drop);
                         self.cancel_accum(marker);
-                    } else if let Some(seg) = self.parse_sequence(marker, &buf[..end]) {
-                        out.push(seg);
+                    } else {
+                        let seg = self.parse_sequence(marker, &buf[..end]);
+                        push_tee(&mut out, &buf[..end], seg);
                     }
                     self.scan(&buf[end..], &mut out);
                 }
@@ -301,9 +354,11 @@ impl Interceptor {
                     // vt100's own vte state machine would have done the same had
                     // we not intercepted — so drop it and resume at the cancel
                     // point: the bytes that cancelled it (e.g. the prompt repaint
-                    // after a Ctrl-C'd transfer) must reach vt100.
+                    // after a Ctrl-C'd transfer) must reach vt100. The cancelled
+                    // bytes still tee to the terminal, which saw them too.
                     self.overflow = false;
                     let buf = self.finish_inflight();
+                    push_tee(&mut out, &buf[..resume], Segment::Drop);
                     self.cancel_accum(marker);
                     self.scan(&buf[resume..], &mut out);
                 }
@@ -323,9 +378,10 @@ impl Interceptor {
     }
 
     /// Scan plain bytes for image-sequence markers; non-image bytes become
-    /// [`Segment::Pass`] runs. An unterminated sequence or split marker is carried
-    /// in `self.seq` for the next read.
-    fn scan(&mut self, data: &[u8], out: &mut Vec<Segment>) {
+    /// passthrough [`Step`]s (`None` action). An unterminated sequence or split
+    /// marker is carried in `self.seq` for the next read (and NOT teed until it
+    /// completes, so a rejected one can be suppressed).
+    fn scan(&mut self, data: &[u8], out: &mut Vec<Step>) {
         let mut pass_start = 0usize;
         let mut i = 0usize;
 
@@ -369,16 +425,17 @@ impl Interceptor {
                 StringEnd::End(end) => {
                     // Whole sequence is `rest[..end]`.
                     push_pass(out, &data[pass_start..i]);
-                    if let Some(seg) = self.parse_sequence(marker, &rest[..end]) {
-                        out.push(seg);
-                    }
+                    let seg = self.parse_sequence(marker, &rest[..end]);
+                    push_tee(out, &rest[..end], seg);
                     i += end;
                     pass_start = i;
                 }
                 StringEnd::Abort(resume) => {
-                    // Cancelled string — discard it (see `feed`'s Abort arm) and
-                    // resume at the cancel point.
+                    // Cancelled string — dropped from the mirror but still teed to
+                    // the terminal (which saw and discarded it); resume at the
+                    // cancel point.
                     push_pass(out, &data[pass_start..i]);
+                    push_tee(out, &rest[..resume], Segment::Drop);
                     self.cancel_accum(marker);
                     i += resume;
                     pass_start = i;
@@ -436,8 +493,11 @@ impl Interceptor {
         self.seq.len()
     }
 
-    /// Parse a complete image sequence (marker .. terminator inclusive).
-    fn parse_sequence(&mut self, marker: Marker, seq: &[u8]) -> Option<Segment> {
+    /// Parse a complete image sequence (marker .. terminator inclusive). Every
+    /// sequence maps to a [`Segment`]: an image, a [`Segment::Reject`] (refused
+    /// file/shm), or [`Segment::Drop`] (rendered by the local terminal but not
+    /// mirrored — a mid-flight chunk, a non-display action, an over-cap image).
+    fn parse_sequence(&mut self, marker: Marker, seq: &[u8]) -> Segment {
         match marker {
             Marker::Iterm => self.parse_iterm(seq),
             Marker::Kitty => self.parse_kitty(seq),
@@ -447,26 +507,26 @@ impl Interceptor {
 
     /// Handle one iTerm2 `\x1b]1337;` sequence: a single-shot `File=` image, or one
     /// verb of a multipart transfer (`MultipartFile=` opens, `FilePart=` appends,
-    /// `FileEnd` flushes).
-    fn parse_iterm(&mut self, seq: &[u8]) -> Option<Segment> {
+    /// `FileEnd` flushes). A verb that yields no image is [`Segment::Drop`] — the
+    /// local terminal still processes it (renders, accumulates, or saves a download).
+    fn parse_iterm(&mut self, seq: &[u8]) -> Segment {
         let body = strip_terminator(&seq[ITERM.len()..]);
         if let Some(args) = body.strip_prefix(b"File=") {
-            return iterm_single(args).map(Segment::Image);
+            return iterm_single(args).map_or(Segment::Drop, Segment::Image);
         }
         if let Some(args) = body.strip_prefix(b"MultipartFile=") {
             let kv = parse_kv(args, b';');
             // `inline=0` (the default) is a *download* — iTerm2 saves the file and
             // renders nothing, so neither do we. No accumulator ⇒ the transfer's
             // FilePart/FileEnd verbs fall through as no-ops.
-            if kv.get("inline").map(String::as_str) != Some("1") {
-                return None;
+            if kv.get("inline").map(String::as_str) == Some("1") {
+                self.iterm = Some(ItermAccum {
+                    payload: String::new(),
+                    cells: cells_from(kv.get("width"), kv.get("height")),
+                    over: false,
+                });
             }
-            self.iterm = Some(ItermAccum {
-                payload: String::new(),
-                cells: cells_from(kv.get("width"), kv.get("height")),
-                over: false,
-            });
-            return None;
+            return Segment::Drop;
         }
         if let Some(part) = body.strip_prefix(b"FilePart=") {
             if let Some(acc) = self.iterm.as_mut() {
@@ -480,20 +540,22 @@ impl Interceptor {
                     acc.payload.push_str(part);
                 }
             }
-            return None;
+            return Segment::Drop;
         }
         if body.starts_with(b"FileEnd") {
-            let acc = self.iterm.take()?;
-            if acc.over {
-                return None;
+            if let Some(acc) = self.iterm.take()
+                && !acc.over
+                && let Some(img) = image_from_b64(acc.payload, acc.cells)
+            {
+                return Segment::Image(img);
             }
-            return image_from_b64(acc.payload, acc.cells).map(Segment::Image);
+            return Segment::Drop;
         }
-        None
+        Segment::Drop
     }
 
     /// Handle one kitty `_G` sequence, accumulating `m=1` chunks.
-    fn parse_kitty(&mut self, seq: &[u8]) -> Option<Segment> {
+    fn parse_kitty(&mut self, seq: &[u8]) -> Segment {
         // Strip `\x1b_G` prefix and `\x1b\\` suffix.
         let body = &seq[KITTY.len()..seq.len().saturating_sub(2)];
         let (control, payload) = match body.iter().position(|&b| b == b';') {
@@ -545,73 +607,104 @@ impl Interceptor {
             }
         }
         if more {
-            return None; // wait for the rest
+            // Mid-flight chunk: the local terminal reassembles it; we wait for the
+            // rest. Its bytes still tee to the terminal (Drop), nothing stamped yet.
+            return Segment::Drop;
         }
-        // Last chunk — flush. A non-display action ends here: consumed, never
-        // rendered. Mirror fidelity: the local kitty drew nothing for it either.
-        let acc = self.kitty.take()?;
-        // SECURITY: the file/shm mediums carry a filesystem path / shm name in the
-        // payload, and this stream is UNTRUSTED (an injected control sequence — a
-        // malicious MOTD, a tainted tarball, a booby-trapped README). Reading it
-        // would hand any file the broadcaster can read to every viewer: the raw
-        // framebuffer path (`f=24`/`f=32`) needs no image header, so arbitrary file
-        // bytes become pixels, and `S`/`O` pages a large file across sequences. We
-        // never open a path from stream content. The local terminal still renders
-        // these natively (its own read of its own files); commit 2 makes detect-mode
-        // clients fall back to direct so the mirror recovers the image in-band.
-        if !acc.display
-            || acc.over
-            || matches!(acc.fmt, KittyFmt::Unsupported)
-            || !matches!(acc.medium, KittyMedium::Direct)
-        {
-            return None;
+        let Some(acc) = self.kitty.take() else {
+            return Segment::Drop;
+        };
+        // SECURITY / fallback: the file/shm mediums carry a filesystem path / shm
+        // name, and the stream is UNTRUSTED (an injected sequence — hostile MOTD,
+        // tainted tarball, booby-trapped README). Reading it would exfiltrate any
+        // file the broadcaster can read (raw framebuffer needs no image header, and
+        // S/O pages a big file across sequences). We never open a path from the
+        // stream — instead we REJECT the transmission: suppress it from the local
+        // terminal and answer the app with a kitty error, so a detect-mode client
+        // (kitten icat) concludes the medium is unsupported and resends via direct
+        // transmission, which we DO mirror. See `kitty_reject` for the response.
+        if matches!(acc.medium, KittyMedium::File | KittyMedium::Shm) {
+            return Segment::Reject(kitty_reject(&ctrl));
         }
-        // Direct: the base64 payload is the image itself.
-        let mut bytes = B64.decode(acc.payload.trim()).ok()?;
-        // `S`/`O`: the transmitted data may be a window into the payload.
-        if let Some(sz) = acc.size {
-            bytes = bytes.get(acc.offset..acc.offset.checked_add(sz)?)?.to_vec();
+        // A non-display action, an over-cap image, or an unsupported/non-direct
+        // medium is rendered (or ignored) by the local terminal but not mirrored.
+        if !acc.display || acc.over || !matches!(acc.medium, KittyMedium::Direct) {
+            return Segment::Drop;
         }
-        if acc.zlib {
-            bytes = zlib_inflate(&bytes)?;
-        }
-        // Re-check after the S/O window and inflate: a zlib bomb (or any payload
-        // the wire could never carry) stops here, whatever medium it rode in on.
-        if bytes.len() as u64 > MAX_IMAGE_BYTES {
-            return None;
-        }
-        match acc.fmt {
-            // PNG passes through undecoded — cheap, stays inline.
-            KittyFmt::Png => Some(Segment::Image(Image {
-                mime: sniff_mime(&bytes)?.to_string(),
-                px: dims(&bytes),
-                bytes,
-                cells: acc.cells,
-            })),
-            // Raw framebuffers need a PNG encode — deferred to the worker
-            // (dims come from the transmission params, so the placement can
-            // be stamped immediately).
-            KittyFmt::Rgba | KittyFmt::Rgb => {
-                let (w, h) = acc.px?;
-                let channels = if matches!(acc.fmt, KittyFmt::Rgba) {
-                    4
-                } else {
-                    3
-                };
-                Some(Segment::Deferred(DeferredImage {
-                    payload: DeferredPayload::Raw {
-                        pixels: bytes,
-                        channels,
-                        w,
-                        h,
-                    },
-                    cells: acc.cells,
-                    px: (w, h),
-                }))
-            }
-            KittyFmt::Unsupported => None,
-        }
+        kitty_direct_image(acc).unwrap_or(Segment::Drop)
     }
+}
+
+/// Decode a completed kitty DIRECT transmission into an image segment, or `None`
+/// on any malformed/over-cap payload (the caller renders it as [`Segment::Drop`]).
+fn kitty_direct_image(acc: KittyAccum) -> Option<Segment> {
+    if matches!(acc.fmt, KittyFmt::Unsupported) {
+        return None;
+    }
+    // Direct: the base64 payload is the image itself.
+    let mut bytes = B64.decode(acc.payload.trim()).ok()?;
+    // `S`/`O`: the transmitted data may be a window into the payload.
+    if let Some(sz) = acc.size {
+        bytes = bytes.get(acc.offset..acc.offset.checked_add(sz)?)?.to_vec();
+    }
+    if acc.zlib {
+        bytes = zlib_inflate(&bytes)?;
+    }
+    // Re-check after the S/O window and inflate: a zlib bomb (or any payload the
+    // wire could never carry) stops here.
+    if bytes.len() as u64 > MAX_IMAGE_BYTES {
+        return None;
+    }
+    match acc.fmt {
+        // PNG passes through undecoded — cheap, stays inline.
+        KittyFmt::Png => Some(Segment::Image(Image {
+            mime: sniff_mime(&bytes)?.to_string(),
+            px: dims(&bytes),
+            bytes,
+            cells: acc.cells,
+        })),
+        // Raw framebuffers need a PNG encode — deferred to the worker (dims come
+        // from the transmission params, so the placement can be stamped immediately).
+        KittyFmt::Rgba | KittyFmt::Rgb => {
+            let (w, h) = acc.px?;
+            let channels = if matches!(acc.fmt, KittyFmt::Rgba) {
+                4
+            } else {
+                3
+            };
+            Some(Segment::Deferred(DeferredImage {
+                payload: DeferredPayload::Raw {
+                    pixels: bytes,
+                    channels,
+                    w,
+                    h,
+                },
+                cells: acc.cells,
+                px: (w, h),
+            }))
+        }
+        KittyFmt::Unsupported => None,
+    }
+}
+
+/// Build the kitty error response for a refused file/shm transmission, echoing the
+/// request's image id (`i`) and/or number (`I`) so the client correlates it. Any
+/// error code makes a detect-mode client treat the medium as unsupported and fall
+/// back to direct transmission; `EBADF` (the code kitty uses for an unreadable
+/// transmission) is the honest one. A query (`a=q`) and a real transmit are
+/// answered the same — either way we decline the medium.
+fn kitty_reject(ctrl: &std::collections::HashMap<String, String>) -> Vec<u8> {
+    let mut keys = String::new();
+    if let Some(i) = ctrl.get("i") {
+        keys.push_str(&format!("i={i}"));
+    }
+    if let Some(n) = ctrl.get("I") {
+        if !keys.is_empty() {
+            keys.push(',');
+        }
+        keys.push_str(&format!("I={n}"));
+    }
+    format!("\x1b_G{keys};EBADF:file transmission not supported\x1b\\").into_bytes()
 }
 
 /// Inflate a zlib stream (kitty `o=z` payloads).
@@ -683,7 +776,13 @@ fn sixel_dcs(s: &[u8]) -> Option<bool> {
 /// without raster attributes falls back to the old inline decode (rare, and
 /// only that emitter pays). Sixel carries no cell size either way; `pty.rs`
 /// derives one from the pixel dimensions.
-fn parse_sixel(seq: &[u8]) -> Option<Segment> {
+fn parse_sixel(seq: &[u8]) -> Segment {
+    sixel_image(seq).unwrap_or(Segment::Drop)
+}
+
+/// Decode a sixel DCS into an image segment, or `None` when malformed (the caller
+/// renders it as [`Segment::Drop`] — the local terminal still drew it).
+fn sixel_image(seq: &[u8]) -> Option<Segment> {
     if let Some(px) = sixel_raster_dims(seq) {
         return Some(Segment::Deferred(DeferredImage {
             payload: DeferredPayload::Sixel(seq.to_vec()),
@@ -847,10 +946,24 @@ fn strip_terminator(body: &[u8]) -> &[u8] {
     }
 }
 
-fn push_pass(out: &mut Vec<Segment>, bytes: &[u8]) {
+/// Emit a passthrough [`Step`]: non-image bytes that tee to the local terminal
+/// AND feed vt100.
+fn push_pass(out: &mut Vec<Step>, bytes: &[u8]) {
     if !bytes.is_empty() {
-        out.push(Segment::Pass(bytes.to_vec()));
+        out.push(Step::Passthrough(bytes.to_vec()));
     }
+}
+
+/// Route a parsed sequence into a [`Step`]: its original bytes tee to the local
+/// terminal (which renders it natively) — EXCEPT a [`Segment::Reject`], which is
+/// suppressed (no tee) so the terminal never services the refused file/shm transfer.
+fn push_tee(out: &mut Vec<Step>, bytes: &[u8], seg: Segment) {
+    out.push(match seg {
+        Segment::Image(i) => Step::Image(bytes.to_vec(), i),
+        Segment::Deferred(d) => Step::Deferred(bytes.to_vec(), d),
+        Segment::Drop => Step::TerminalOnly(bytes.to_vec()),
+        Segment::Reject(r) => Step::Reject(r),
+    });
 }
 
 #[cfg(test)]
@@ -868,14 +981,15 @@ mod tests {
         ])
     }
 
-    fn only_images(segs: Vec<Segment>) -> Vec<Image> {
-        segs.into_iter()
+    fn only_images(steps: Vec<Step>) -> Vec<Image> {
+        steps
+            .into_iter()
             .filter_map(|s| match s {
-                Segment::Image(i) => Some(i),
+                Step::Image(_, i) => Some(i),
                 // Materialize deferred payloads exactly like the pty worker
                 // does, so the decode round-trip assertions keep covering
                 // the sixel / kitty-raw paths.
-                Segment::Deferred(d) => {
+                Step::Deferred(_, d) => {
                     let (bytes, px) = finish_deferred(&d.payload, false)?;
                     Some(Image {
                         mime: "image/png".to_string(),
@@ -884,7 +998,29 @@ mod tests {
                         px: Some(px),
                     })
                 }
-                Segment::Pass(_) => None,
+                Step::Passthrough(_) | Step::TerminalOnly(_) | Step::Reject(_) => None,
+            })
+            .collect()
+    }
+
+    /// Concatenate the local-terminal tee bytes across steps — what the operator's
+    /// terminal sees (passthrough + rendered sequences, minus rejected ones).
+    fn tee_bytes(steps: &[Step]) -> Vec<u8> {
+        steps
+            .iter()
+            .filter_map(Step::tee)
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    /// The injected app-bound responses (kitty rejections) across steps.
+    fn rejections(steps: &[Step]) -> Vec<Vec<u8>> {
+        steps
+            .iter()
+            .filter_map(|s| match s {
+                Step::Reject(r) => Some(r.clone()),
+                _ => None,
             })
             .collect()
     }
@@ -901,7 +1037,7 @@ mod tests {
         let d = segs
             .iter()
             .find_map(|s| match s {
-                Segment::Deferred(d) => Some(d.clone()),
+                Step::Deferred(_, d) => Some(d.clone()),
                 _ => None,
             })
             .expect("sixel with raster attributes defers");
@@ -924,11 +1060,14 @@ mod tests {
         assert!(
             kitty.iter().any(|s| matches!(
                 s,
-                Segment::Deferred(DeferredImage {
-                    payload: DeferredPayload::Raw { .. },
-                    px: (2, 2),
-                    ..
-                })
+                Step::Deferred(
+                    _,
+                    DeferredImage {
+                        payload: DeferredPayload::Raw { .. },
+                        px: (2, 2),
+                        ..
+                    }
+                )
             )),
             "kitty raw framebuffer defers with metadata dims"
         );
@@ -942,15 +1081,7 @@ mod tests {
         let segs = it.feed(stream.as_bytes());
 
         // Text before and after passes through; image pulled out with size hint.
-        let passed: Vec<u8> = segs
-            .iter()
-            .filter_map(|s| match s {
-                Segment::Pass(b) => Some(b.clone()),
-                _ => None,
-            })
-            .flatten()
-            .collect();
-        assert_eq!(passed, b"hibye");
+        assert_eq!(only_pass(&segs), b"hibye");
         let imgs = only_images(segs);
         assert_eq!(imgs.len(), 1);
         assert_eq!(imgs[0].mime, "image/png");
@@ -989,14 +1120,7 @@ mod tests {
         let stream = format!("{s}{sixel}");
         let segs = it.feed(stream.as_bytes());
         assert!(only_images(segs.clone()).is_empty());
-        let passed: Vec<u8> = segs
-            .into_iter()
-            .filter_map(|seg| match seg {
-                Segment::Pass(b) => Some(b),
-                _ => None,
-            })
-            .flatten()
-            .collect();
+        let passed = only_pass(&segs);
         assert_eq!(
             passed,
             stream.as_bytes(),
@@ -1128,10 +1252,13 @@ mod tests {
         assert!(only_images(it.feed(s.as_bytes())).is_empty());
     }
 
-    fn only_pass(segs: &[Segment]) -> Vec<u8> {
-        segs.iter()
+    /// The bytes vt100 sees — [`Step::Passthrough`] only, NOT the original bytes of
+    /// rendered sequences (those tee to the terminal but never reach the parser).
+    fn only_pass(steps: &[Step]) -> Vec<u8> {
+        steps
+            .iter()
             .filter_map(|s| match s {
-                Segment::Pass(b) => Some(b.clone()),
+                Step::Passthrough(b) => Some(b.clone()),
                 _ => None,
             })
             .flatten()
@@ -1312,11 +1439,60 @@ mod tests {
             let seq = format!("\x1b_Ga=T,f=24,t={medium},s=2,v=2;{p64}\x1b\\");
             let segs = it.feed(seq.as_bytes());
             assert!(
-                only_images(segs).is_empty(),
+                only_images(segs.clone()).is_empty(),
                 "t={medium} must produce no image (no file read)"
             );
+            // And it is SUPPRESSED from the local terminal (empty tee) — so a
+            // detect-mode client's fallback resend won't double-render — and a
+            // kitty error is injected to the app to trigger that fallback.
+            assert!(
+                tee_bytes(&segs).is_empty(),
+                "t={medium} must not reach the local terminal"
+            );
+            assert_eq!(rejections(&segs).len(), 1, "t={medium} rejected to the app");
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn kitty_file_query_echoes_id_for_fallback() {
+        // A detect-mode client tests file/shm support with an `a=q` query carrying
+        // an image id. We must answer with a kitty error ECHOING that id so the
+        // client correlates it, concludes the medium is unsupported, and falls back
+        // to direct transmission (which we mirror). The query path never touches
+        // the filesystem (payload is a bogus name — irrelevant, we don't read it).
+        let mut it = Interceptor::new();
+        let name = B64.encode("/some/shm-name");
+        let segs = it.feed(format!("\x1b_Gi=31,s=1,v=1,a=q,t=s;{name}\x1b\\").as_bytes());
+        let rej = rejections(&segs);
+        assert_eq!(rej.len(), 1);
+        let resp = String::from_utf8(rej[0].clone()).unwrap();
+        assert!(
+            resp.starts_with("\x1b_Gi=31;E"),
+            "echoes id, error code: {resp:?}"
+        );
+        assert!(resp.ends_with("\x1b\\"));
+        assert!(
+            tee_bytes(&segs).is_empty(),
+            "query suppressed from terminal"
+        );
+        assert!(only_images(segs).is_empty());
+    }
+
+    #[test]
+    fn kitty_direct_still_mirrors_and_tees() {
+        // The allowed path is unchanged: a direct image is mirrored AND its original
+        // bytes tee to the local terminal (which renders it natively).
+        let mut it = Interceptor::new();
+        let s = format!("\x1b_Ga=T,f=100,t=d;{}\x1b\\", png_b64());
+        let segs = it.feed(s.as_bytes());
+        assert_eq!(only_images(segs.clone()).len(), 1, "mirrored");
+        assert_eq!(
+            tee_bytes(&segs),
+            s.as_bytes(),
+            "teed verbatim to the terminal"
+        );
+        assert!(rejections(&segs).is_empty());
     }
 
     #[test]
@@ -1397,15 +1573,7 @@ mod tests {
         // its concern (image eviction rides the grid's per-cell tags now), so it
         // must pass straight through to vt100.
         let mut it = Interceptor::new();
-        let passed: Vec<u8> = it
-            .feed(b"abc\x1b[2Jdef")
-            .into_iter()
-            .filter_map(|s| match s {
-                Segment::Pass(b) => Some(b),
-                _ => None,
-            })
-            .flatten()
-            .collect();
+        let passed = only_pass(&it.feed(b"abc\x1b[2Jdef"));
         assert_eq!(passed, b"abc\x1b[2Jdef");
     }
 }

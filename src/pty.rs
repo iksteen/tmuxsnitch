@@ -11,7 +11,7 @@
 //! parser (`contents_formatted`), rather than the client's `eprintln!`s corrupting
 //! the live session.
 
-use crate::images::{Interceptor, Segment};
+use crate::images::{Interceptor, Step};
 use crate::model::{Frame, ImagePlacement};
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -122,7 +122,12 @@ pub fn start(command: &[String]) -> Result<(watch::Receiver<Arc<Frame>>, Notifie
 
     let master = pair.master;
     let mut reader = master.try_clone_reader().context("cloning pty reader")?;
-    let mut writer = master.take_writer().context("taking pty writer")?;
+    // Shared so BOTH the stdin bridge (keystrokes + the local terminal's own query
+    // replies) and the screen thread (synthetic kitty rejections, see `Segment::Reject`)
+    // can write to the app. Contention is nil — injections are rare and tiny.
+    let writer: Arc<std::sync::Mutex<Box<dyn Write + Send>>> = Arc::new(std::sync::Mutex::new(
+        master.take_writer().context("taking pty writer")?,
+    ));
 
     // Raw mode now, before the child draws anything.
     let raw = RawMode::acquire();
@@ -167,21 +172,25 @@ pub fn start(command: &[String]) -> Result<(watch::Receiver<Arc<Frame>>, Notifie
     }
 
     // Our stdin → PTY.
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        let mut stdin = std::io::stdin();
-        loop {
-            match stdin.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if writer.write_all(&buf[..n]).is_err() {
-                        break;
+    {
+        let writer = writer.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            let mut stdin = std::io::stdin();
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let Ok(mut w) = writer.lock() else { break };
+                        if w.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                        let _ = w.flush();
                     }
-                    let _ = writer.flush();
                 }
             }
-        }
-    });
+        });
+    }
 
     // Size watcher: reflect terminal resizes into the PTY + parser on SIGWINCH.
     // `master` isn't `Sync`, so it stays in this one thread rather than being shared
@@ -227,13 +236,14 @@ pub fn start(command: &[String]) -> Result<(watch::Receiver<Arc<Frame>>, Notifie
     );
     // The decode worker answers back through the screen thread's own channel.
     let ready_tx = msg_tx.clone();
+    let inject = writer.clone();
     std::thread::spawn(move || {
         // The real session parser records its blind spots for the exit report
         // (`new_parser`'s throwaway SeqLog handles the tests/initial frame).
         let (seqlog, seq_seen) = SeqLog::new();
         let parser = vt100::Parser::new_with_callbacks(rows, cols, 0, seqlog);
         screen_thread(
-            msg_rx, ready_tx, frame_tx, raw, parser, seq_seen, cell, intercept,
+            msg_rx, ready_tx, frame_tx, raw, parser, seq_seen, cell, intercept, inject,
         );
     });
 
@@ -259,6 +269,7 @@ fn screen_thread(
     seq_seen: SeqSeen,
     cell: (u16, u16),
     intercept: (bool, bool, bool),
+    inject: Arc<std::sync::Mutex<Box<dyn Write + Send>>>,
 ) {
     let mut out = std::io::stdout();
     let mut connected = true; // teeing shell output to the terminal
@@ -329,18 +340,19 @@ fn screen_thread(
         };
         match msg {
             Some(Msg::Data(b)) => {
-                // Tee the *raw* stream to the local terminal first — it renders
-                // sixel/kitty/iTerm2 natively, so the operator keeps seeing images.
-                if connected {
-                    let _ = out.write_all(&b); // immediate, not rate-limited
-                    let _ = out.flush();
-                }
-                // vt100 only sees non-image bytes; images become placements at the
-                // cursor position reached after the preceding text in this chunk.
-                for seg in interceptor.feed(&b) {
-                    match seg {
-                        Segment::Pass(bytes) => parser.process(&bytes),
-                        Segment::Image(img) => {
+                // The interceptor splits the read into routed steps. Every step
+                // except a rejection tees its bytes to the local terminal (which
+                // renders sixel/kitty/iTerm2 natively); the match then handles the
+                // mirror/app effect. `Step::tee` is the one place the tee lives.
+                for step in interceptor.feed(&b) {
+                    if let Some(bytes) = step.tee().filter(|_| connected) {
+                        let _ = out.write_all(bytes); // immediate, not rate-limited
+                        let _ = out.flush();
+                    }
+                    match step {
+                        Step::Passthrough(x) => parser.process(&x), // → vt100 too
+                        Step::TerminalOnly(_) => {}                 // already teed
+                        Step::Image(_, img) => {
                             // Ready payload (iTerm2 native / kitty PNG): stamp
                             // and record in one step.
                             let hash = crate::proto::content_key(&img.mime, &img.bytes);
@@ -361,7 +373,7 @@ fn screen_thread(
                                 ready,
                             );
                         }
-                        Segment::Deferred(d) => {
+                        Step::Deferred(_, d) => {
                             // Heavy decode (sixel / kitty raw): stamp NOW —
                             // cursor semantics can't wait — and let the worker
                             // owe the bytes. Newest-wins on the worker side:
@@ -378,6 +390,15 @@ fn screen_thread(
                                 None,
                             );
                             let _ = job_tx.send((id, d.payload));
+                        }
+                        Step::Reject(resp) => {
+                            // Suppressed from the terminal (tee() was None), so it
+                            // never services the refused transmission; answer the app
+                            // ourselves to provoke a fallback to direct.
+                            if let Ok(mut w) = inject.lock() {
+                                let _ = w.write_all(&resp);
+                                let _ = w.flush();
+                            }
                         }
                     }
                 }
