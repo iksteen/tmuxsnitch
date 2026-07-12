@@ -20,6 +20,17 @@ fn base(hub: &str) -> String {
     format!("{}/api/sessions", hub.trim_end_matches('/'))
 }
 
+/// Make a hub-supplied string safe to print to the operator's terminal. The hub
+/// (or a MITM) is untrusted here: an error body or a session id/slug could embed
+/// terminal control sequences — including via JSON unicode escapes — and inject
+/// into the operator's terminal. Unlike a transport error (whose *kind* is the
+/// signal, so we drop the text), these strings ARE the content the operator wants,
+/// so we neuter rather than discard: strip control characters and bound the length
+/// so a giant body can't flood the screen.
+fn clean(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).take(256).collect()
+}
+
 /// Turn a non-success response into a readable error: the API's own
 /// `{"error": …}` message when present, the raw body otherwise.
 async fn check(res: reqwest::Response) -> Result<reqwest::Response> {
@@ -28,10 +39,13 @@ async fn check(res: reqwest::Response) -> Result<reqwest::Response> {
         return Ok(res);
     }
     let body = res.text().await.unwrap_or_default();
-    let msg = serde_json::from_str::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
-        .unwrap_or(body);
+    // The hub is untrusted: neuter its message before it can reach the terminal.
+    let msg = clean(
+        &serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
+            .unwrap_or(body),
+    );
     match status {
         StatusCode::NOT_FOUND if msg.is_empty() => {
             bail!("{status}: not found — is the hub's management API enabled (--api-allow)?")
@@ -64,13 +78,13 @@ pub async fn list(hub: &str, key: &str) -> Result<()> {
     for s in sessions {
         println!(
             "{:<24} {:<8} {}",
-            s["slug"].as_str().unwrap_or("?"),
+            clean(s["slug"].as_str().unwrap_or("?")),
             if s["live"].as_bool().unwrap_or(false) {
                 "live"
             } else {
                 "offline"
             },
-            s["id"].as_str().unwrap_or("?"),
+            clean(s["id"].as_str().unwrap_or("?")),
         );
     }
     Ok(())
@@ -94,9 +108,9 @@ pub async fn add(hub: &str, key: &str, id: &str, slug: Option<&str>) -> Result<(
         .context("parsing the add response")?;
     println!(
         "added {} — view at {}/s/{}",
-        created["id"].as_str().unwrap_or(id),
+        clean(created["id"].as_str().unwrap_or(id)),
         hub.trim_end_matches('/'),
-        created["slug"].as_str().unwrap_or(id),
+        clean(created["slug"].as_str().unwrap_or(id)),
     );
     Ok(())
 }
@@ -125,4 +139,25 @@ pub async fn remove_by_slug(hub: &str, key: &str, slug: &str) -> Result<()> {
     check(res).await?;
     println!("removed session with slug {slug}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean;
+
+    #[test]
+    fn clean_neuters_and_bounds_hub_text() {
+        assert_eq!(clean("slug-ok"), "slug-ok", "ordinary text is untouched");
+        // Control characters (here a CSI clear-screen) are stripped — no escape
+        // sequence can survive to reach the operator's terminal.
+        let evil = "\x1b[2J\x1b[1;1Hgotcha";
+        let out = clean(evil);
+        assert!(
+            !out.chars().any(char::is_control),
+            "no controls survive: {out:?}"
+        );
+        assert_eq!(out, "[2J[1;1Hgotcha");
+        // A giant body can't flood the screen.
+        assert!(clean(&"x".repeat(10_000)).chars().count() <= 256);
+    }
 }
