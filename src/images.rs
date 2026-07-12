@@ -108,6 +108,15 @@ impl Step {
     }
 }
 
+/// EXPERIMENTAL: the graphics protocol to transcode sixel INTO, for a terminal
+/// that renders kitty/iTerm2 graphics but not sixel (see `pty.rs`'s capability
+/// decision). `None` = the terminal does sixel natively, keep the fast raw path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GfxProto {
+    Kitty,
+    Iterm,
+}
+
 /// What a parsed image sequence became, before `push_tee` routes it into a
 /// [`Step`]. Internal to the parsers — the screen thread only ever sees `Step`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +130,10 @@ enum Segment {
     Drop,
     /// A refused kitty file/shm transmission — carries the app-bound error response.
     Reject(Vec<u8>),
+    /// EXPERIMENTAL sixel transcode: `tee` is the sixel re-encoded in the terminal's
+    /// native graphics protocol (kitty/iTerm2), `image` is the PNG for the mirror.
+    /// Routes to a `Step::Image` whose tee bytes are the transcode, not the sixel.
+    Transcoded { tee: Vec<u8>, image: Image },
 }
 
 /// The stamp-now, decode-later form of an image (see [`Segment::Deferred`]).
@@ -221,6 +234,14 @@ pub struct Interceptor {
     do_kitty: bool,
     do_iterm: bool,
     do_sixel: bool,
+    /// EXPERIMENTAL: when set, an intercepted sixel is decoded and re-encoded into
+    /// this protocol for the local terminal (which lacks native sixel). `None` =
+    /// pass sixel through raw (the fast deferred path for a sixel-native terminal).
+    transcode: Option<GfxProto>,
+    /// Pixel size of one cell, for deriving the transcoded image's cell footprint
+    /// (so kitty/iTerm2 advance the cursor like sixel would). Only used with
+    /// `transcode`.
+    cell: (u16, u16),
 }
 
 /// Concatenated iTerm2 `FilePart` base64 across a multipart transfer, with the
@@ -295,15 +316,24 @@ impl Interceptor {
     /// Intercept all protocols — for tests and when capabilities are unknown.
     #[cfg(test)]
     pub fn new() -> Self {
-        Self::with(true, true, true)
+        Self::with(true, true, true, None, (8, 16))
     }
 
     /// Intercept only the protocols the terminal supports (per the handshake).
-    pub fn with(do_kitty: bool, do_iterm: bool, do_sixel: bool) -> Self {
+    /// `transcode`/`cell` drive the EXPERIMENTAL sixel→kitty/iTerm2 transcode.
+    pub fn with(
+        do_kitty: bool,
+        do_iterm: bool,
+        do_sixel: bool,
+        transcode: Option<GfxProto>,
+        cell: (u16, u16),
+    ) -> Self {
         Self {
             do_kitty,
             do_iterm,
             do_sixel,
+            transcode,
+            cell,
             ..Default::default()
         }
     }
@@ -501,7 +531,7 @@ impl Interceptor {
         match marker {
             Marker::Iterm => self.parse_iterm(seq),
             Marker::Kitty => self.parse_kitty(seq),
-            Marker::Sixel => parse_sixel(seq),
+            Marker::Sixel => parse_sixel(seq, self.transcode, self.cell),
         }
     }
 
@@ -776,8 +806,78 @@ fn sixel_dcs(s: &[u8]) -> Option<bool> {
 /// without raster attributes falls back to the old inline decode (rare, and
 /// only that emitter pays). Sixel carries no cell size either way; `pty.rs`
 /// derives one from the pixel dimensions.
-fn parse_sixel(seq: &[u8]) -> Segment {
+fn parse_sixel(seq: &[u8], transcode: Option<GfxProto>, cell: (u16, u16)) -> Segment {
+    if let Some(proto) = transcode {
+        // EXPERIMENTAL: terminal lacks sixel — decode and re-encode for it.
+        return sixel_transcoded(seq, proto, cell).unwrap_or(Segment::Drop);
+    }
     sixel_image(seq).unwrap_or(Segment::Drop)
+}
+
+/// EXPERIMENTAL: decode a sixel and re-encode it in `proto` for a terminal that
+/// can't render sixel. Synchronous (no deferral) — the tee needs real pixels, and
+/// this path only runs on non-sixel terminals where the fast route doesn't apply.
+/// The mirror still gets the PNG; the terminal gets kitty/iTerm2.
+fn sixel_transcoded(seq: &[u8], proto: GfxProto, cell: (u16, u16)) -> Option<Segment> {
+    let (png, (w, h)) = finish_deferred(&DeferredPayload::Sixel(seq.to_vec()), false)?;
+    if png.len() as u64 > MAX_IMAGE_BYTES {
+        return None;
+    }
+    let cells = cells_for(w, h, cell);
+    let tee = match proto {
+        GfxProto::Kitty => kitty_encode(&png, cells),
+        GfxProto::Iterm => iterm_encode(&png, cells),
+    };
+    Some(Segment::Transcoded {
+        tee,
+        // Mirror as if native sixel (cells=None → natural size from px), so the web
+        // looks the same whether or not the terminal needed the transcode.
+        image: Image {
+            mime: "image/png".to_string(),
+            bytes: png,
+            cells: None,
+            px: Some((w, h)),
+        },
+    })
+}
+
+/// Cell footprint of a `w`×`h` px image at cell size `cell`, so kitty/iTerm2 advance
+/// the cursor roughly as a sixel-scrolling terminal would.
+fn cells_for(w: u32, h: u32, cell: (u16, u16)) -> (u16, u16) {
+    let (cw, ch) = (u32::from(cell.0.max(1)), u32::from(cell.1.max(1)));
+    let clamp = |n: u32| n.clamp(1, u32::from(u16::MAX)) as u16;
+    (clamp(w.div_ceil(cw)), clamp(h.div_ceil(ch)))
+}
+
+/// Wrap a PNG in a kitty graphics APC (`f=100` display), chunked at 4 KiB of base64
+/// per `m=1` segment as the protocol requires, `q=2` to silence kitty's replies.
+fn kitty_encode(png: &[u8], (cols, rows): (u16, u16)) -> Vec<u8> {
+    let b64 = B64.encode(png);
+    let chunks: Vec<&[u8]> = b64.as_bytes().chunks(4096).collect();
+    let n = chunks.len().max(1);
+    let mut out = Vec::with_capacity(b64.len() + 64);
+    for (i, ch) in chunks.iter().enumerate() {
+        let more = u8::from(i + 1 < n);
+        out.extend_from_slice(KITTY);
+        if i == 0 {
+            out.extend_from_slice(format!("a=T,f=100,c={cols},r={rows},q=2,m={more}").as_bytes());
+        } else {
+            out.extend_from_slice(format!("m={more}").as_bytes());
+        }
+        out.push(b';');
+        out.extend_from_slice(ch);
+        out.extend_from_slice(b"\x1b\\");
+    }
+    out
+}
+
+/// Wrap a PNG in an iTerm2 inline-image OSC 1337 (single-shot, cell-sized).
+fn iterm_encode(png: &[u8], (cols, rows): (u16, u16)) -> Vec<u8> {
+    format!(
+        "\x1b]1337;File=inline=1;width={cols};height={rows}:{}\x07",
+        B64.encode(png)
+    )
+    .into_bytes()
 }
 
 /// Decode a sixel DCS into an image segment, or `None` when malformed (the caller
@@ -963,6 +1063,8 @@ fn push_tee(out: &mut Vec<Step>, bytes: &[u8], seg: Segment) {
         Segment::Deferred(d) => Step::Deferred(bytes.to_vec(), d),
         Segment::Drop => Step::TerminalOnly(bytes.to_vec()),
         Segment::Reject(r) => Step::Reject(r),
+        // Transcode: the tee is the re-encoded bytes, NOT the original sixel.
+        Segment::Transcoded { tee, image } => Step::Image(tee, image),
     });
 }
 
@@ -1112,7 +1214,7 @@ mod tests {
     fn gated_off_protocol_passes_through() {
         // Kitty + sixel off (terminal doesn't support them): those sequences are not
         // consumed — they pass through to vt100, matching what the terminal shows.
-        let mut it = Interceptor::with(false, true, false);
+        let mut it = Interceptor::with(false, true, false, None, (10, 20));
         let s = format!("\x1b_Ga=T,f=100,t=d;{}\x1b\\", png_b64());
         let sixel = icy_sixel::SixelImage::from_rgba(vec![255, 0, 0, 255], 1, 1)
             .encode()
@@ -1127,7 +1229,7 @@ mod tests {
             "gated-off bytes reach vt100 verbatim"
         );
         // iTerm2 is still intercepted (its flag is on).
-        let mut it2 = Interceptor::with(false, true, false);
+        let mut it2 = Interceptor::with(false, true, false, None, (10, 20));
         let s2 = format!("\x1b]1337;File=inline=1:{}\x07", png_b64());
         assert_eq!(only_images(it2.feed(s2.as_bytes())).len(), 1);
     }
@@ -1153,6 +1255,60 @@ mod tests {
         assert_eq!(w, 2);
         assert!(h >= 2);
         assert_eq!(imgs[0].cells, None);
+    }
+
+    fn sample_sixel() -> Vec<u8> {
+        let rgba = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+        ];
+        icy_sixel::SixelImage::from_rgba(rgba, 2, 2)
+            .encode()
+            .unwrap()
+            .into_bytes()
+    }
+
+    #[test]
+    fn sixel_transcodes_to_kitty_when_terminal_lacks_sixel() {
+        // EXPERIMENTAL: kitty-graphics terminal, no native sixel → the sixel is
+        // decoded and re-teed as a kitty APC, while the mirror still gets a PNG.
+        let sixel = sample_sixel();
+        let mut it = Interceptor::with(true, false, true, Some(GfxProto::Kitty), (10, 20));
+        let steps = it.feed(&sixel);
+        let tee = tee_bytes(&steps);
+        assert!(
+            tee.starts_with(b"\x1b_G"),
+            "tee re-encoded as kitty graphics"
+        );
+        assert!(tee.ends_with(b"\x1b\\"));
+        assert!(
+            !contains(&tee, DCS),
+            "no raw sixel DCS reaches the terminal"
+        );
+        assert_eq!(only_images(steps).len(), 1, "mirror still gets one image");
+    }
+
+    #[test]
+    fn sixel_transcodes_to_iterm_when_terminal_lacks_sixel() {
+        let sixel = sample_sixel();
+        let mut it = Interceptor::with(false, true, true, Some(GfxProto::Iterm), (10, 20));
+        let tee = tee_bytes(&it.feed(&sixel));
+        assert!(
+            contains(&tee, b"\x1b]1337;File=inline=1"),
+            "tee is an iTerm2 OSC"
+        );
+        assert!(!contains(&tee, DCS));
+    }
+
+    #[test]
+    fn native_sixel_terminal_keeps_the_raw_fast_path() {
+        // transcode=None: the deferred path stays, tee is the sixel verbatim.
+        let sixel = sample_sixel();
+        let mut it = Interceptor::with(false, false, true, None, (10, 20));
+        assert_eq!(tee_bytes(&it.feed(&sixel)), sixel, "sixel teed unchanged");
+    }
+
+    fn contains(hay: &[u8], needle: &[u8]) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle)
     }
 
     #[test]

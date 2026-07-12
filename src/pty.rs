@@ -136,7 +136,22 @@ pub fn start(command: &[String]) -> Result<(watch::Receiver<Arc<Frame>>, Notifie
     // the terminal supports, so the web mirror matches what's on the local screen
     // rather than eating a sequence into a web image the terminal never showed.
     let caps = probe_caps();
-    let intercept = (caps.kitty, iterm_supported(), caps.sixel);
+    let iterm = iterm_supported();
+    // EXPERIMENTAL: terminal renders kitty/iTerm2 graphics but NOT sixel → transcode
+    // sixel into that protocol so sixel-emitting tools (esp. through tmux, which
+    // carries sixel in its grid model) show up locally and mirror to the web. When
+    // sixel is native, `transcode` is None and the fast raw path is kept untouched.
+    let transcode = if caps.sixel {
+        None
+    } else if caps.kitty {
+        Some(crate::images::GfxProto::Kitty)
+    } else if iterm {
+        Some(crate::images::GfxProto::Iterm)
+    } else {
+        None
+    };
+    // Intercept sixel if the terminal renders it natively OR we're transcoding it.
+    let intercept = (caps.kitty, iterm, caps.sixel || transcode.is_some());
     // Clear the local terminal so the mirrored session starts from a blank screen,
     // matching the fresh (blank) parser that viewers see (also wipes any handshake
     // reply artifacts).
@@ -171,9 +186,13 @@ pub fn start(command: &[String]) -> Result<(watch::Receiver<Arc<Frame>>, Notifie
         });
     }
 
-    // Our stdin → PTY.
+    // Our stdin → PTY. EXPERIMENTAL: when transcoding sixel, also advertise sixel to
+    // the child by adding feature `4` to the terminal's Primary DA reply as it passes
+    // through — so sixel-aware tools (and tmux) actually emit sixel, which we then
+    // transcode. `None` keeps the original verbatim, zero-overhead bridge.
     {
         let writer = writer.clone();
+        let mut da = transcode.map(|_| DaRewriter::default());
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
             let mut stdin = std::io::stdin();
@@ -182,7 +201,11 @@ pub fn start(command: &[String]) -> Result<(watch::Receiver<Arc<Frame>>, Notifie
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         let Ok(mut w) = writer.lock() else { break };
-                        if w.write_all(&buf[..n]).is_err() {
+                        let ok = match &mut da {
+                            Some(da) => w.write_all(&da.advertise_sixel(&buf[..n])),
+                            None => w.write_all(&buf[..n]),
+                        };
+                        if ok.is_err() {
                             break;
                         }
                         let _ = w.flush();
@@ -243,7 +266,7 @@ pub fn start(command: &[String]) -> Result<(watch::Receiver<Arc<Frame>>, Notifie
         let (seqlog, seq_seen) = SeqLog::new();
         let parser = vt100::Parser::new_with_callbacks(rows, cols, 0, seqlog);
         screen_thread(
-            msg_rx, ready_tx, frame_tx, raw, parser, seq_seen, cell, intercept, inject,
+            msg_rx, ready_tx, frame_tx, raw, parser, seq_seen, cell, intercept, transcode, inject,
         );
     });
 
@@ -269,6 +292,7 @@ fn screen_thread(
     seq_seen: SeqSeen,
     cell: (u16, u16),
     intercept: (bool, bool, bool),
+    transcode: Option<crate::images::GfxProto>,
     inject: Arc<std::sync::Mutex<Box<dyn Write + Send>>>,
 ) {
     let mut out = std::io::stdout();
@@ -318,7 +342,7 @@ fn screen_thread(
     // per-cell image tags into the parser grid (`place_data`), which then ride
     // vt100's own scrolling/eviction/reflow — each frame we just read the
     // surviving tags back (see `resolve_images`), no scroll heuristics.
-    let mut interceptor = Interceptor::with(intercept.0, intercept.1, intercept.2);
+    let mut interceptor = Interceptor::with(intercept.0, intercept.1, intercept.2, transcode, cell);
     let mut sync = SyncGate::new();
     let mut images: Vec<Placed> = Vec::new();
     // Ready-but-overwritten placements held for the double-buffer swap
@@ -1025,6 +1049,82 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
+/// EXPERIMENTAL: rewrites the terminal→child input stream so a Primary DA reply
+/// (`ESC [ ? <params> c`) advertises sixel (feature `4`) even though the real
+/// terminal doesn't — the child (and tmux) then emit sixel, which we transcode.
+/// Conservative: only a fully-formed `ESC [ ? <digits/;> c` is touched; anything
+/// else (keystrokes, other reports) passes verbatim. A DA reply split across reads
+/// is carried; the carry is bounded so a stray `ESC [ ?` can't wedge input.
+#[derive(Default)]
+struct DaRewriter {
+    carry: Vec<u8>,
+}
+
+impl DaRewriter {
+    /// Longest DA reply we'll wait to complete before giving up and flushing.
+    const MAX_CARRY: usize = 64;
+
+    fn advertise_sixel(&mut self, input: &[u8]) -> Vec<u8> {
+        let mut data = std::mem::take(&mut self.carry);
+        data.extend_from_slice(input);
+        let mut out = Vec::with_capacity(data.len() + 2);
+        let mut i = 0;
+        while i < data.len() {
+            // Only `ESC [ ?` can begin a DA reply; everything else is verbatim.
+            if data[i] != 0x1b {
+                out.push(data[i]);
+                i += 1;
+                continue;
+            }
+            let rest = &data[i..];
+            if !rest.starts_with(b"\x1b[?") {
+                // Not a DA start. If it's a truncated prefix of one at the buffer
+                // end, carry it; else emit the ESC and rescan.
+                if b"\x1b[?".starts_with(rest) {
+                    self.carry = rest.to_vec();
+                    return out;
+                }
+                out.push(data[i]);
+                i += 1;
+                continue;
+            }
+            // Scan params (digits and ';') to the terminator.
+            let mut j = i + 3;
+            while j < data.len() && (data[j].is_ascii_digit() || data[j] == b';') {
+                j += 1;
+            }
+            match data.get(j) {
+                Some(b'c') => {
+                    let params = &data[i + 3..j];
+                    out.extend_from_slice(&data[i..j]); // ESC [ ? params
+                    if !params.split(|&b| b == b';').any(|f| f == b"4") {
+                        out.extend_from_slice(b";4");
+                    }
+                    out.push(b'c');
+                    i = j + 1;
+                }
+                // A `?`-CSI that isn't DA (e.g. DECRPM `…$y`): emit the params and
+                // rescan from the terminator byte (it may be an ESC starting the
+                // next sequence), so we never swallow a following DA reply.
+                Some(_) => {
+                    out.extend_from_slice(&data[i..j]);
+                    i = j;
+                }
+                // Terminator not here yet — carry, unless it's grown implausibly.
+                None => {
+                    if data.len() - i <= Self::MAX_CARRY {
+                        self.carry = data[i..].to_vec();
+                    } else {
+                        out.extend_from_slice(&data[i..]);
+                    }
+                    return out;
+                }
+            }
+        }
+        out
+    }
+}
+
 /// Owns the terminal's raw-mode state: `acquire` enters raw and remembers the
 /// original settings; `leave`/`enter` toggle between them for the hub-outage pause.
 struct RawMode {
@@ -1075,6 +1175,28 @@ impl RawMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn da_rewriter_advertises_sixel() {
+        let mut da = DaRewriter::default();
+        // Adds feature 4 to a DA reply that lacks it, verbatim otherwise.
+        assert_eq!(da.advertise_sixel(b"\x1b[?62;22c"), b"\x1b[?62;22;4c");
+        // Already advertises sixel → untouched.
+        assert_eq!(da.advertise_sixel(b"\x1b[?62;4;22c"), b"\x1b[?62;4;22c");
+        // Non-DA input (keystrokes, a cursor-position report) passes verbatim.
+        assert_eq!(da.advertise_sixel(b"ls -la\r"), b"ls -la\r");
+        assert_eq!(da.advertise_sixel(b"\x1b[10;5R"), b"\x1b[10;5R");
+        // A DECRPM `?`-CSI (ends in $y, not c) is left alone.
+        assert_eq!(da.advertise_sixel(b"\x1b[?2026;2$y"), b"\x1b[?2026;2$y");
+    }
+
+    #[test]
+    fn da_rewriter_reassembles_a_split_reply() {
+        let mut da = DaRewriter::default();
+        // DA reply split across two reads — carried, then completed and rewritten.
+        assert_eq!(da.advertise_sixel(b"\x1b[?62;"), b"");
+        assert_eq!(da.advertise_sixel(b"22c rest"), b"\x1b[?62;22;4c rest");
+    }
 
     #[test]
     fn handshake_replies_parse_to_caps() {
