@@ -335,6 +335,11 @@ pub struct HubState {
     /// in. `None` = memory-only: runtime changes die with the process and
     /// `--allow` re-seeds every start.
     persist_path: Option<Arc<std::path::PathBuf>>,
+    /// Serializes `persist()` so two concurrent management-API mutations can't
+    /// interleave into the shared `.tmp` path (a torn write renamed into place
+    /// hard-errors on next startup). Held across snapshot+write+rename, so the
+    /// last mutation's snapshot is what lands on disk.
+    persist_lock: Arc<Mutex<()>>,
     /// Public base URL (`scheme://host:port`, no trailing slash) for logging the
     /// view URL when a new session connects.
     base: Arc<str>,
@@ -358,6 +363,7 @@ impl HubState {
             registry: Arc::new(std::sync::RwLock::new(allow)),
             api_allowed: Arc::new(std::collections::HashSet::new()),
             persist_path: None,
+            persist_lock: Arc::new(Mutex::new(())),
             base: base.into(),
             id_salt: "".into(),
             hash_slots: Arc::new(Semaphore::new(HASH_SLOTS)),
@@ -437,6 +443,9 @@ impl HubState {
         let Some(path) = &self.persist_path else {
             return Ok(());
         };
+        // Serialize the whole snapshot→write→rename so concurrent mutations
+        // can't clobber the shared temp path or land a stale snapshot last.
+        let _guard = self.persist_lock.lock().unwrap();
         let mut sessions: Vec<PersistEntry> = {
             let reg = self.registry.read().unwrap();
             reg.by_id

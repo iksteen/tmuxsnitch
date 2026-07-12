@@ -300,11 +300,14 @@ impl Live {
 
 /// Server-side store for content-addressed inline-image payloads, serving the
 /// page-relative `images/<content_key>` route (per session on the hub, one for
-/// the standalone server). Byte-capped FIFO: when over cap, the oldest entries
-/// go first — EXCEPT protected ones (keys the current frame still references),
-/// which must stay servable however large the on-screen set is. The slack
-/// beyond the current frame is the grace window for viewers fetching against
-/// a frame that just changed.
+/// the standalone server). Byte-capped FIFO: past the soft cap the oldest
+/// entries go first — EXCEPT protected ones (keys the current frame still
+/// references), which must stay servable so the on-screen set never 404s. The
+/// slack beyond the current frame is the grace window for viewers fetching
+/// against a frame that just changed. A HARD ceiling (2× the soft cap) bounds
+/// memory absolutely: if the on-screen set alone exceeds it, even protected
+/// entries are dropped (that image 404s) so a hostile pusher can't grow the
+/// store without limit by keeping everything "on screen".
 pub struct ImageStore {
     map: HashMap<String, (String, bytes::Bytes)>,
     /// Insertion order, oldest first (an entry appears once; re-inserts are no-ops).
@@ -324,9 +327,11 @@ impl ImageStore {
         }
     }
 
-    /// Insert a payload under its content key, then evict oldest unprotected
-    /// entries until back under the byte cap. A key already present is a no-op
-    /// (content-addressed: same key = same bytes).
+    /// Insert a payload under its content key, then evict to fit the caps. A
+    /// key already present is a no-op (content-addressed: same key = same
+    /// bytes). The JUST-INSERTED key is never evicted in this call — a blob
+    /// arrives before the frame that references it, so it may not yet be in
+    /// `protected`; evicting it here would 404 that image when its frame lands.
     pub fn insert(
         &mut self,
         hash: String,
@@ -339,13 +344,14 @@ impl ImageStore {
         }
         self.total += bytes.len();
         self.map.insert(hash.clone(), (mime, bytes));
-        self.order.push_back(hash);
+        self.order.push_back(hash.clone());
+        // Pass 1 (soft cap): drop oldest UNPROTECTED, never the just-inserted.
         let mut kept = std::collections::VecDeque::new();
         while self.total > self.cap {
             let Some(old) = self.order.pop_front() else {
-                break; // everything left is protected: over-cap by on-screen content
+                break; // everything left is protected or the just-inserted key
             };
-            if protected.contains(&old) {
+            if old == hash || protected.contains(&old) {
                 kept.push_back(old);
                 continue;
             }
@@ -353,7 +359,25 @@ impl ImageStore {
                 self.total -= b.len();
             }
         }
-        // Protected survivors keep their relative age at the front.
+        while let Some(k) = kept.pop_back() {
+            self.order.push_front(k);
+        }
+        // Pass 2 (hard ceiling): if on-screen content alone blows past 2× cap,
+        // drop oldest regardless of protection (except the just-inserted) so
+        // memory is bounded absolutely.
+        let hard = self.cap.saturating_mul(2);
+        while self.total > hard {
+            let Some(old) = self.order.pop_front() else {
+                break;
+            };
+            if old == hash {
+                kept.push_back(old);
+                continue;
+            }
+            if let Some((_, b)) = self.map.remove(&old) {
+                self.total -= b.len();
+            }
+        }
         while let Some(k) = kept.pop_back() {
             self.order.push_front(k);
         }
@@ -367,6 +391,11 @@ impl ImageStore {
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.map.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn total(&self) -> usize {
+        self.total
     }
 }
 
@@ -1623,6 +1652,35 @@ mod tests {
         assert!(store.get("b").is_some(), "on-screen key immune");
         assert!(store.get("c").is_none(), "next-oldest evicted instead");
         assert!(store.get("d").is_some());
+    }
+
+    // The just-inserted key is never evicted in its own insert call, even when
+    // it isn't yet in `protected` (blob arrives before its frame). And the hard
+    // ceiling (2× cap) bounds memory when the protected/on-screen set is huge.
+    #[test]
+    fn image_store_self_protects_and_hard_caps() {
+        let mut store = ImageStore::new(10);
+        let bytes = |n: usize| bytes::Bytes::from(vec![0u8; n]);
+        // Fill to cap with unprotected entries, then insert one bigger than the
+        // whole cap while it is NOT protected: it must survive its own insert.
+        store.insert("a".into(), "png".into(), bytes(8), &Default::default());
+        store.insert("big".into(), "png".into(), bytes(12), &Default::default());
+        assert!(
+            store.get("big").is_some(),
+            "just-inserted never self-evicts"
+        );
+        assert!(store.get("a").is_none(), "older unprotected went instead");
+
+        // Hard ceiling: keep everything protected/on-screen so the soft cap
+        // can't evict; total must still be bounded by 2× cap.
+        let mut store = ImageStore::new(10);
+        let mut protect = std::collections::HashSet::new();
+        for i in 0..10 {
+            let k = format!("k{i}");
+            protect.insert(k.clone());
+            store.insert(k, "png".into(), bytes(5), &protect);
+        }
+        assert!(store.total() <= 20, "hard ceiling bounds protected growth");
     }
 
     fn cell(c: char) -> StyledCell {
