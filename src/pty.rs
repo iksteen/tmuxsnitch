@@ -85,7 +85,11 @@ impl Notifier {
 /// Start an interactive PTY session running `command`. Returns a receiver of the
 /// latest screen [`Frame`] plus a [`Notifier`] for hub status. Puts the terminal in
 /// raw mode, bridges stdin/stdout, and exits the process when the command exits.
-pub fn start(command: &[String]) -> Result<(watch::Receiver<Arc<Frame>>, Notifier)> {
+/// `sixel_compat` opts into the EXPERIMENTAL sixel→kitty/iTerm2 transcode.
+pub fn start(
+    command: &[String],
+    sixel_compat: bool,
+) -> Result<(watch::Receiver<Arc<Frame>>, Notifier)> {
     let geom = term_geom().unwrap_or(TermGeom {
         cols: 80,
         rows: 24,
@@ -137,11 +141,12 @@ pub fn start(command: &[String]) -> Result<(watch::Receiver<Arc<Frame>>, Notifie
     // rather than eating a sequence into a web image the terminal never showed.
     let caps = probe_caps();
     let iterm = iterm_supported();
-    // EXPERIMENTAL: terminal renders kitty/iTerm2 graphics but NOT sixel → transcode
-    // sixel into that protocol so sixel-emitting tools (esp. through tmux, which
-    // carries sixel in its grid model) show up locally and mirror to the web. When
-    // sixel is native, `transcode` is None and the fast raw path is kept untouched.
-    let transcode = if caps.sixel {
+    // EXPERIMENTAL (opt-in via --sixel-compat): terminal renders kitty/iTerm2
+    // graphics but NOT sixel → transcode sixel into that protocol so sixel-emitting
+    // tools (esp. through tmux, which carries sixel in its grid model) show up
+    // locally and mirror to the web. When sixel is native, or the flag is off,
+    // `transcode` is None and the fast raw path is kept untouched.
+    let transcode = if !sixel_compat || caps.sixel {
         None
     } else if caps.kitty {
         Some(crate::images::GfxProto::Kitty)

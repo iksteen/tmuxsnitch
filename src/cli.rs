@@ -222,6 +222,13 @@ struct SourceArgs {
     #[arg(short, long)]
     config: Option<PathBuf>,
 
+    /// EXPERIMENTAL: on a terminal that renders kitty/iTerm2 graphics but not sixel,
+    /// transcode sixel into that protocol (via kitty Unicode placeholders) so
+    /// sixel-emitting tools — notably through tmux — show up locally and mirror to
+    /// the web. Advertises sixel to the child so it emits it. Off by default.
+    #[arg(long)]
+    sixel_compat: bool,
+
     /// Interactive command to mirror in a PTY (the `script(1)` model): it runs in
     /// your terminal, the browser watches. Put it last, after any flags — e.g.
     /// `serve -- bash -l`. Defaults to your `$SHELL` when omitted.
@@ -573,7 +580,7 @@ async fn run_serve(
         describe_source(&source),
         listener.local_addr()?
     );
-    let (rx, _notifier) = pty::start(&source.command())?;
+    let (rx, _notifier) = pty::start(&source.command(), source.sixel_compat)?;
     // Feed the image store from a sibling subscription: every frame's payloads
     // are inserted (no-ops when already present), with the frame's own
     // placements protected from the byte-cap eviction.
@@ -643,8 +650,9 @@ async fn run_push(url: String, key: String, source: SourceArgs) -> Result<()> {
     let base = url.trim_end_matches('/');
     println!("shellglass: pushing live to {base}");
     let s = setup(&source)?;
+    let sixel_compat = source.sixel_compat;
     client::run(url, key, s.config, s.resolver, s.fonts, s.template, || {
-        pty::start(&source.command())
+        pty::start(&source.command(), sixel_compat)
     })
     .await
 }
