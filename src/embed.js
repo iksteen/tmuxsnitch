@@ -49,11 +49,15 @@
 
   // Zero-specificity defaults so ANY host rule overrides them without
   // !important; a style attribute (carried from the one-liner) beats both.
+  // inline-block + fit-content: an UNSIZED element is exactly the terminal's
+  // natural size (independent of the parent's width). Give it a width/height
+  // and it becomes the frame the terminal is scaled to fill (see fitToBox);
+  // overflow:hidden clips the letterbox margin.
   if (!document.getElementById("shellglass-embed-css")) {
     const st = document.createElement("style");
     st.id = "shellglass-embed-css";
     st.textContent =
-      ":where(shellglass-view){display:block}" +
+      ":where(shellglass-view){display:inline-block;overflow:hidden;vertical-align:top}" +
       ":where(iframe.shellglass-view){display:block;border:0;width:100%;height:24em}" +
       // Minimal operator-offline hint for the iframe-less modes (the ?embed page
       // brings its own). Dims and labels; a host rule can restyle or hide it.
@@ -89,8 +93,10 @@
       return; // hub unreachable: leave the box empty rather than throw
     }
     const cfg = boot.cfg || {};
+    // The wrap renders at the terminal's NATURAL size (fit-content); fitToBox
+    // scales it (CSS zoom) into the host element's box when the host sizes it.
     wrap.style.cssText =
-      "display:block;position:relative;width:fit-content;overflow:auto;" +
+      "display:block;position:relative;width:fit-content;" +
       `font-family:${cfg.fillFont || "monospace"};font-size:${cfg.fontPx || 14}px;` +
       `--lh:${cfg.lhPx || 16.8}px;line-height:var(--lh);` +
       `color:${cfg.defFg || "#d0d0d0"};background:${cfg.defBg || "#000"}`;
@@ -122,6 +128,33 @@
         else delete host.dataset.offline;
       },
     });
+    fitToBox(host, wrap);
+  }
+
+  // Scale the natural-size `wrap` to fill the `host` element's box via CSS zoom
+  // (which the viewer re-rasterizes crisp on "sg-zoom", like the ?embed page).
+  // The host defaults to fit-content, so an UNSIZED element measures its own
+  // natural size → z=1 → no scaling; give it a width/height and it becomes the
+  // frame. Re-fits when the host box changes or the grid (wrap's natural size)
+  // changes. Grows and shrinks, letterboxed (aspect preserved).
+  function fitToBox(host, wrap) {
+    const fit = () => {
+      wrap.style.zoom = "1"; // measure natural size (and let a fit-content host relax to it)
+      const nw = wrap.offsetWidth,
+        nh = wrap.offsetHeight;
+      const availW = host.clientWidth,
+        availH = host.clientHeight;
+      if (!nw || !nh || !availW || !availH) return;
+      let z = Math.min(availW / nw, availH / nh);
+      if (!isFinite(z) || z <= 0) return;
+      if (z < 1) z *= 0.999; // shrinking: a hair under exact so rounding can't overflow the box
+      wrap.style.zoom = String(z);
+      window.dispatchEvent(new Event("sg-zoom")); // viewer re-rasterizes the canvas at the new scale
+    };
+    const ro = new ResizeObserver(fit);
+    ro.observe(host); // the frame changed (host CSS size)
+    ro.observe(wrap); // the terminal's natural size changed (grid resize)
+    fit();
   }
 
   // The custom element. mode="light" (default) | "shadow" | "iframe".

@@ -350,6 +350,12 @@ happen inside. An embed always uses the built-in look; a custom `template`
 doesn't apply (the session's fonts and colors do). Embedding a session is
 exactly as public as its view URL — see the security notes below.
 
+**Sizing.** An unstyled `<shellglass-view>` (light or shadow) renders at the
+terminal's natural size. Give it a `width` and/or `height` in CSS and the
+terminal scales to fill that box, letterboxed (aspect preserved), staying crisp
+as it scales — so it behaves like a normal sized element. The `iframe` mode
+fills its frame (default `100%` × `24em`) the same way.
+
 **Same origin is the easy path.** Put the hub behind your reverse proxy on your
 own domain (e.g. `example.com/term/ → hub`) and point `src` at that path —
 every asset the viewer fetches is relative to `src`, so nothing is cross-origin
