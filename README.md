@@ -322,29 +322,42 @@ One line, where the terminal should appear:
         data-src="https://hub.example.com/s/demo"></script>
 ```
 
-The script replaces itself with an iframe showing just the terminal, scaled to
-fill its box — `100%` wide, `24em` tall by default. Size it with a `style`
-attribute on the script tag (it's carried onto the iframe) or by styling
-`.shellglass-view` in your CSS. Two equivalent forms for other tastes: the
-script also defines a custom element (handy for dynamic insertion, where
-`document.currentScript` doesn't exist), and the raw iframe works without any
-script — the embed page is any view URL plus `?embed`:
+By default the terminal renders **iframe-less** — straight into your page, no
+frame to fight a strict CSP or to style around. The script replaces itself with
+a `<shellglass-view>` element (also usable directly in markup):
 
 ```html
 <shellglass-view src="https://hub.example.com/s/demo"></shellglass-view>
-<!-- or -->
-<iframe src="https://hub.example.com/s/demo?embed"
-        style="border:0;width:100%;height:24em"></iframe>
 ```
 
-The terminal grows or shrinks to fit, and re-fits when the session's grid or
-the box resizes. All three snippets are **stable**: the `?embed` URL shape,
-`data-src`, and the element's `src` attribute are the whole contract —
-reconnects, upgrades, and the operator-offline state all happen inside the
-frame. Works with standalone `serve` too (`http://host:8080/?embed`). An embed
-always uses the built-in embed look; a custom `template` doesn't apply to it
-(the session's fonts and colors do). Embedding a session is exactly as public
-as its view URL — see the security notes below.
+Three render modes, via a `mode` attribute (or `data-mode` on the script tag):
+
+- **light** (default) — renders in your page's own DOM. Native selection and
+  copy, nothing sandboxed. The viewer scopes its own CSS so it won't restyle
+  your page.
+- **shadow** — `mode="shadow"` renders in a shadow root, fully style-isolated
+  from the host. (Selection across a shadow boundary is weaker on some browsers.)
+- **iframe** — `mode="iframe"` is the classic sandboxed frame onto the `?embed`
+  page. The raw form still works with no script at all:
+  ```html
+  <iframe src="https://hub.example.com/s/demo?embed"
+          style="border:0;width:100%;height:24em"></iframe>
+  ```
+
+`data-src`, the element name, its `src`, and the `?embed` URL shape are the
+**stable** contract — reconnects, upgrades and the operator-offline state all
+happen inside. An embed always uses the built-in look; a custom `template`
+doesn't apply (the session's fonts and colors do). Embedding a session is
+exactly as public as its view URL — see the security notes below.
+
+**Same origin is the easy path.** Put the hub behind your reverse proxy on your
+own domain (e.g. `example.com/term/ → hub`) and point `src` at that path —
+every asset the viewer fetches is relative to `src`, so nothing is cross-origin
+and **no CORS is needed**. For a genuinely cross-origin embed (the page and the
+hub on different origins, iframe-less), run the hub — or standalone `serve` —
+with `--cors-origin https://your-page.example` (repeat for several, or `*` for
+any); the iframe mode needs none. Multiple iframe-less embeds on one page aren't
+supported (they share one renderer instance) — use `mode="iframe"` for those.
 
 ## Security notes
 

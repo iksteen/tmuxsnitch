@@ -47,6 +47,10 @@ use tungstenite::error::CapacityError;
 
 struct Session {
     css: String,
+    /// Just the `@font-face` rules (pushed separately), served at `style.css` for
+    /// iframe-less embeds. Empty for an older client — the route then falls back
+    /// to the full `css`.
+    font_css: String,
     /// Viewer template the client pushed (empty → the hub's built-in default).
     template: String,
     /// Render config the client pushed (colors + symbol_map) for its `viewer.js`.
@@ -397,6 +401,7 @@ impl HubState {
             id.to_string(),
             Session {
                 css: String::new(),
+                font_css: String::new(),
                 template: String::new(),
                 render_cfg: String::new(),
                 live,
@@ -722,25 +727,27 @@ fn is_message_too_long(err: &(dyn std::error::Error + Send + Sync + 'static)) ->
 }
 
 pub fn app(state: HubState) -> Router {
+    app_with_cors(state, &[])
+}
+
+/// `cors_origins`: exact origins (or a single `*`) allowed to read the per-session
+/// data routes an iframe-less embed fetches cross-origin. Empty (default) =
+/// same-origin only (the nginx-same-origin embed needs nothing here). `/embed.js`
+/// keeps its own unconditional ACAO `*` and stays outside this layer.
+pub fn app_with_cors(state: HubState, cors_origins: &[String]) -> Router {
     // Compress the page + fonts, but never the SSE stream (compression buffers and
     // would defeat the realtime push). So layer per-route, not globally.
     let compress = CompressionLayer::new();
-    Router::new()
-        .route("/", get(index))
-        // The push client's single WebSocket: register-then-stream state machine,
-        // authorized once at the upgrade.
-        .route("/push", get(ws_push))
+    // The routes an iframe-less cross-origin embed fetches — per session, plus the
+    // root viewer.js. Grouped so the configurable CORS layer lands only here.
+    let mut data = Router::new()
         .route("/viewer.js", get(viewer_js).layer(compress.clone()))
-        .route("/embed.js", get(embed_js).layer(compress.clone()))
-        .route("/favicon.svg", get(favicon).layer(compress.clone()))
-        // Views are canonical at /s/<slug>/ (trailing slash): the page's URLs
-        // are all RELATIVE (events, fonts/<i>, viewer.js, favicon.svg — routed
-        // per slug below), so pages survive a subpath-mounting reverse proxy
-        // that neither the hub nor the client can know about. The slash-less
-        // form redirects RELATIVELY, which a prefixing proxy also survives.
-        .route("/s/{slug}", get(view_redirect))
-        .route("/s/{slug}/", get(view).layer(compress.clone()))
         .route("/s/{slug}/events", get(events))
+        .route("/s/{slug}/config", get(config).layer(compress.clone()))
+        .route(
+            "/s/{slug}/style.css",
+            get(style_css).layer(compress.clone()),
+        )
         .route(
             "/s/{slug}/viewer.js",
             get(viewer_js).layer(compress.clone()),
@@ -749,9 +756,26 @@ pub fn app(state: HubState) -> Router {
             "/s/{slug}/favicon.svg",
             get(favicon).layer(compress.clone()),
         )
-        .route("/s/{slug}/fonts/{key}", get(font).layer(compress))
+        .route("/s/{slug}/fonts/{key}", get(font).layer(compress.clone()))
         // No compression: image formats are already compressed.
-        .route("/s/{slug}/images/{key}", get(image))
+        .route("/s/{slug}/images/{key}", get(image));
+    if let Some(cors) = crate::server_cors(cors_origins) {
+        data = data.layer(cors);
+    }
+    Router::new()
+        .route("/", get(index))
+        // The push client's single WebSocket: register-then-stream state machine,
+        // authorized once at the upgrade.
+        .route("/push", get(ws_push))
+        .route("/embed.js", get(embed_js).layer(compress.clone()))
+        .route("/favicon.svg", get(favicon).layer(compress))
+        // Views are canonical at /s/<slug>/ (trailing slash): the page's URLs
+        // are all RELATIVE (events, fonts/<i>, viewer.js, favicon.svg — routed
+        // per slug below), so pages survive a subpath-mounting reverse proxy
+        // that neither the hub nor the client can know about. The slash-less
+        // form redirects RELATIVELY, which a prefixing proxy also survives.
+        .route("/s/{slug}", get(view_redirect))
+        .route("/s/{slug}/", get(view))
         // The management API (Bearer-authorized in the API salt domain; the
         // namespace 404s while --api-allow is unconfigured). Delete is two
         // explicit routes: an un-aliased slug IS the id, so one ambiguous
@@ -765,6 +789,7 @@ pub fn app(state: HubState) -> Router {
             "/api/sessions/by-slug/{slug}",
             axum::routing::delete(api_delete_by_slug),
         )
+        .merge(data)
         .with_state(state)
 }
 
@@ -1174,6 +1199,7 @@ fn register_session(
     // resolves for any slug and behind any subpath mount — nothing to rewrite.
     let slug = st.slug_of(id)?;
     let css = reg.css;
+    let font_css = reg.font_css;
     let mut map = st.sessions.lock().unwrap();
     if let Some(s) = map.get_mut(id) {
         // The common path: every allowed id has at least a stub (ensure_stub),
@@ -1182,6 +1208,7 @@ fn register_session(
         // stored, and viewers sitting on the placeholder page reload through
         // its operator-online hook (see the view route).
         s.css = css;
+        s.font_css = font_css;
         s.template = reg.template;
         s.render_cfg = reg.render_cfg;
         // Swap the session's font stakes: new fonts enter the shared cache,
@@ -1215,6 +1242,7 @@ fn register_session(
             id.to_string(),
             Session {
                 css,
+                font_css,
                 template: reg.template,
                 render_cfg: reg.render_cfg,
                 live: Arc::clone(&live),
@@ -1377,6 +1405,54 @@ async fn events(State(st): State<HubState>, Path(slug): Path<String>) -> Respons
         return (StatusCode::NOT_FOUND, "unknown session").into_response();
     };
     live.connect()
+}
+
+/// The iframe-less embed boot object (`window.SHELLGLASS` as JSON) for a session:
+/// the client's relayed render config, or the built-in default for an unregistered
+/// (operator-offline) stub. `events` is relative — the embed resolves it against
+/// the session base.
+async fn config(State(st): State<HubState>, Path(slug): Path<String>) -> Response {
+    let id = st.id_of_view(&slug);
+    let map = st.sessions.lock().unwrap();
+    let Some(s) = id.and_then(|id| map.get(&id)) else {
+        return (StatusCode::NOT_FOUND, "unknown session").into_response();
+    };
+    let cfg = if s.registered && !s.render_cfg.is_empty() {
+        &s.render_cfg
+    } else {
+        render::DEFAULT_RENDER_CFG
+    };
+    (
+        [
+            (CONTENT_TYPE, "application/json"),
+            (CACHE_CONTROL, "no-cache"),
+        ],
+        render::config_json("events", cfg),
+    )
+        .into_response()
+}
+
+/// The session's `@font-face` rules for an iframe-less embed to `<link>` (see the
+/// standalone `style_css`). Pushed separately by the client; an older client that
+/// didn't push `font_css` falls back to the full pushed CSS (the base rules then
+/// ride along — harmless in a shadow-DOM embed, and a light-DOM embed can opt for
+/// shadow if it matters). An unregistered stub has no fonts yet.
+async fn style_css(State(st): State<HubState>, Path(slug): Path<String>) -> Response {
+    let id = st.id_of_view(&slug);
+    let map = st.sessions.lock().unwrap();
+    let Some(s) = id.and_then(|id| map.get(&id)) else {
+        return (StatusCode::NOT_FOUND, "unknown session").into_response();
+    };
+    let css = if !s.font_css.is_empty() {
+        s.font_css.clone()
+    } else {
+        s.css.clone()
+    };
+    (
+        [(CONTENT_TYPE, "text/css"), (CACHE_CONTROL, "no-cache")],
+        css,
+    )
+        .into_response()
 }
 
 /// Serve the baked renderer (see [`crate::server`] for the caching rationale:
@@ -1646,6 +1722,7 @@ mod tests {
     fn reg(css: &str) -> proto::RegisterBody {
         proto::RegisterBody {
             css: css.into(),
+            font_css: String::new(),
             template: String::new(),
             render_cfg: String::new(),
             fonts: vec![],
@@ -1656,6 +1733,7 @@ mod tests {
         use base64::Engine as _;
         proto::RegisterBody {
             css: css.into(),
+            font_css: String::new(),
             template: String::new(),
             render_cfg: String::new(),
             fonts: fonts
@@ -2256,6 +2334,113 @@ mod tests {
         assert!(
             !html.contains("attributeFilter"),
             "no placeholder machinery on the real page"
+        );
+    }
+
+    // The iframe-less embed data routes: config (the boot object) + style.css
+    // (the pushed @font-face ONLY, so a light-DOM embed can't leak page CSS onto
+    // the host), and the configurable CORS on them.
+    #[tokio::test]
+    async fn embed_data_routes_and_cors() {
+        let sid = session_id("pusher");
+        let st = HubState::new(
+            parse_allow(&[format!("{sid}:demo")]).unwrap(),
+            "http://h".into(),
+        );
+        let reg = proto::RegisterBody {
+            css: "@font-face{BASE}\n.baseonly{color:red}".into(),
+            font_css: "@font-face{ONLYFONTS}".into(),
+            template: String::new(),
+            render_cfg: r##"{"defFg":"#111","defBg":"#222","fillFont":"Foo","fontPx":14,"lhPx":16.8,"sym":[]}"##.into(),
+            fonts: vec![],
+        };
+        register_session(&st, &sid, "http://h", reg).unwrap();
+
+        // Default (no --cors-origin): routes work, no cross-origin header.
+        let router = app(st.clone());
+        let res = router
+            .clone()
+            .oneshot(Request::get("/s/demo/config").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let json = String::from_utf8_lossy(
+            &axum::body::to_bytes(res.into_body(), 1 << 20)
+                .await
+                .unwrap(),
+        )
+        .into_owned();
+        assert!(json.contains(r#""events":"events""#), "{json}");
+        assert!(
+            json.contains(r#""fillFont":"Foo""#),
+            "pushed cfg rides: {json}"
+        );
+        assert!(json.contains(r#""proto":"#));
+
+        // style.css = the pushed @font-face only, never the base rules.
+        let res = router
+            .clone()
+            .oneshot(
+                Request::get("/s/demo/style.css")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let css = String::from_utf8_lossy(
+            &axum::body::to_bytes(res.into_body(), 1 << 20)
+                .await
+                .unwrap(),
+        )
+        .into_owned();
+        assert!(css.contains("ONLYFONTS"), "serves font_css: {css}");
+        assert!(
+            !css.contains("baseonly"),
+            "must not leak the base rules: {css}"
+        );
+
+        // Unknown slug 404s on both.
+        for p in ["/s/nope/config", "/s/nope/style.css"] {
+            let res = router
+                .clone()
+                .oneshot(Request::get(p).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "{p}");
+        }
+
+        // With --cors-origin: an allowed Origin is echoed on a data route, a
+        // disallowed one is not.
+        let router = app_with_cors(st, &["https://boss.example".to_string()]);
+        let acao = |origin: &str| {
+            let router = router.clone();
+            let origin = origin.to_string();
+            async move {
+                let res = router
+                    .oneshot(
+                        Request::get("/s/demo/config")
+                            .header("origin", origin)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                res.headers()
+                    .get("access-control-allow-origin")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string)
+            }
+        };
+        assert_eq!(
+            acao("https://boss.example").await.as_deref(),
+            Some("https://boss.example"),
+            "allowed origin echoed"
+        );
+        assert_eq!(
+            acao("https://evil.example").await,
+            None,
+            "other origin denied"
         );
     }
 

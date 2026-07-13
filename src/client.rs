@@ -78,6 +78,7 @@ pub async fn run(
     let css = render::head_css(&font_css, &config);
     let reg = RegisterBody {
         css,
+        font_css,
         template: (*template).clone(),
         render_cfg: render::render_config_json(&config, &resolver),
         fonts: fonts::font_assets(&fonts),

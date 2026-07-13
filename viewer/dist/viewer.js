@@ -756,7 +756,7 @@ function noteBlinkRow(r, has) {
 let crtBox;
 function crtOn() {
     if (crtBox === undefined) {
-        crtBox = document.getElementById("crt");
+        crtBox = uiRoot.querySelector("#crt");
         crtBox?.addEventListener("change", () => {
             if (!pictureHeld())
                 redrawCanvasAll();
@@ -1213,6 +1213,11 @@ let screen = { cells: [], cur: null, sty: 0, links: {}, rowEls: [] };
 let screenImages = [];
 let heldImages = [];
 let screenEl;
+let cssRoot = typeof document !== "undefined" ? document.head : undefined;
+let cssScope = "";
+let uiRoot = typeof document !== "undefined" ? document : undefined;
+let mountBase = "";
+let crossOriginImages = false;
 function refsOverlap(a, b) {
     const aw = a.w ?? 1, ah = a.h ?? 1, bw = b.w ?? 1, bh = b.h ?? 1;
     return a.r < b.r + bh && b.r < a.r + ah && a.c < b.c + bw && b.c < a.c + aw;
@@ -1321,13 +1326,24 @@ function applyFull(m) {
 }
 let defaultsCss = { fg: "", bg: "" };
 let bootTitle = null;
-function setTitle(t) {
+let titleFn = (t) => {
     if (typeof document === "undefined")
         return;
     if (bootTitle === null)
         bootTitle = document.title;
     document.title = t || bootTitle;
+};
+function setTitle(t) {
+    titleFn(t);
 }
+let offlineFn = (state) => {
+    if (typeof document === "undefined")
+        return;
+    if (state)
+        document.body.dataset.offline = state;
+    else
+        delete document.body.dataset.offline;
+};
 function paintFull(dims) {
     screenEl.style.color = defaultsCss.fg;
     screenEl.style.backgroundColor = defaultsCss.bg;
@@ -1384,7 +1400,8 @@ function renderImage(im) {
     const sized = im.w && im.h;
     const vars = `--sg-c:${im.c};--sg-r:${im.r}` +
         (sized ? `;--sg-w:${im.w};--sg-h:${im.h}` : "");
-    return `<img class="inline-img${sized ? " sized" : ""}" style="${vars}" alt="" src="images/${attrEscape(im.k)}">`;
+    const co = crossOriginImages ? ` crossorigin="anonymous"` : "";
+    return `<img class="inline-img${sized ? " sized" : ""}" style="${vars}" alt=""${co} src="${mountBase}images/${attrEscape(im.k)}">`;
 }
 function decodeRow([r, l, text, style]) {
     if (typeof text === "string") {
@@ -1445,10 +1462,7 @@ let sseDown = false;
 let operatorDown = false;
 function refreshLive() {
     const state = sseDown ? "hub" : operatorDown ? "operator" : "";
-    if (state)
-        document.body.dataset.offline = state;
-    else
-        delete document.body.dataset.offline;
+    offlineFn(state);
 }
 function connect(events) {
     const es = new EventSource(events);
@@ -1480,7 +1494,7 @@ function fmtRate(bytesPerSec) {
     return `${bytesPerSec.toFixed(0)} B/s`;
 }
 function startStats() {
-    const el = document.getElementById("sg-stats");
+    const el = uiRoot.querySelector("#sg-stats");
     if (!el)
         return;
     let lastBytes = 0;
@@ -1499,16 +1513,19 @@ function startStats() {
 }
 function injectViewerCss() {
     const css = document.createElement("style");
+    const s = cssScope;
     css.textContent =
-        ".row.ghost{color:transparent;text-shadow:none}" +
-            ".row.ghost::selection{background:rgba(110,170,255,.4)}" +
-            "#screen img.inline-img{position:absolute;" +
+        `${s}.screen{position:relative;white-space:pre;overflow:hidden}` +
+            `${s}.row{position:relative;height:var(--lh);contain:layout style}` +
+            `${s}.row.ghost{color:transparent;text-shadow:none}` +
+            `${s}.row.ghost::selection{background:rgba(110,170,255,.4)}` +
+            `${s}.screen img.inline-img{position:absolute;` +
             "left:calc(var(--sg-c)*1ch);top:calc(var(--sg-r)*var(--lh));" +
             "z-index:3;pointer-events:none;visibility:hidden}" +
-            "#screen img.inline-img.sized{width:calc(var(--sg-w)*1ch);" +
+            `${s}.screen img.inline-img.sized{width:calc(var(--sg-w)*1ch);` +
             "height:calc(var(--sg-h)*var(--lh));" +
             "object-fit:contain;object-position:left top}";
-    document.head.appendChild(css);
+    cssRoot.appendChild(css);
 }
 export function benchInit(el) {
     screenEl = el;
@@ -1545,11 +1562,25 @@ export function benchPinch(s) {
     sizeCanvas();
     redrawCanvasAll();
 }
-function main() {
-    const boot = window.SHELLGLASS;
+export function mount(o) {
+    screenEl = o.screen;
+    if (o.cssRoot)
+        cssRoot = o.cssRoot;
+    if (o.cssScope)
+        cssScope = o.cssScope;
+    if (o.uiRoot)
+        uiRoot = o.uiRoot;
+    if (o.base)
+        mountBase = o.base;
+    if (o.crossOriginImages)
+        crossOriginImages = true;
+    if (o.title)
+        titleFn = o.title;
+    if (o.offline)
+        offlineFn = o.offline;
+    const boot = o.boot;
     setConfig(boot.cfg);
     setProto(boot.proto, boot.js);
-    screenEl = document.getElementById("screen");
     injectViewerCss();
     attachLinkHandlers();
     connect(boot.events);
@@ -1566,5 +1597,5 @@ function main() {
     document.fonts?.ready.then(reflowGlyphs);
 }
 if (typeof document !== "undefined" && window.SHELLGLASS) {
-    main();
+    mount({ screen: document.getElementById("screen"), boot: window.SHELLGLASS });
 }

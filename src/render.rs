@@ -79,10 +79,12 @@ pub const DEFAULT_TEMPLATE: &str = include_str!("template.html");
 pub const EMBED_TEMPLATE: &str = include_str!("template_embed.html");
 
 /// The stable embedding shim served at `/embed.js`: a classic script that
-/// replaces its own `<script data-src="…">` tag with an iframe onto the
-/// `?embed` page (and defines `<shellglass-view src="…">` for markup-side
-/// use). Deliberately version-agnostic — everything live happens inside the
-/// frame.
+/// replaces its own `<script data-src="…">` tag with a `<shellglass-view>`
+/// element (also usable directly in markup). By default the terminal renders
+/// IFRAME-LESS, straight into the host page (light DOM) — `mode="shadow"` for a
+/// style-isolated shadow root, `mode="iframe"` for the classic sandboxed frame
+/// onto `?embed`. Deliberately version-agnostic; the live rendering lives in
+/// `viewer.js`, imported per element.
 pub const EMBED_JS: &str = include_str!("embed.js");
 
 /// Everything that goes inside `<style>`: the served-font `@font-face` rules plus
@@ -123,8 +125,7 @@ pub fn default_head_css() -> String {
 
 /// Render config matching [`default_head_css`] — the viewer's own defaults,
 /// spelled out (field names are viewer.ts's `Cfg`).
-pub const DEFAULT_RENDER_CFG: &str =
-    r##"{"defFg":"#d0d0d0","defBg":"#000000","fillFont":"monospace","sym":[]}"##;
+pub const DEFAULT_RENDER_CFG: &str = r##"{"defFg":"#d0d0d0","defBg":"#000000","fillFont":"monospace","fontPx":14,"lhPx":16.8,"sym":[]}"##;
 
 /// Fill a viewer `template` with the terminal `<style>`, the (empty) `#screen`
 /// div, and the updater `<script>`. Tokens: `{{style}}`, `{{screen}}`,
@@ -170,9 +171,30 @@ pub fn sse_script(events_path: &str, cfg_json: &str) -> String {
     )
 }
 
+/// The boot object an iframe-less embed fetches (`GET config`), the JSON form of
+/// the `window.SHELLGLASS` the baked page inlines: SSE path, render config, wire
+/// proto and viewer tag. `events_path` is page-relative (`events`); the embed
+/// resolves it against the session base. `cfg_json` is [`render_config_json`] or
+/// the client's, relayed by the hub.
+pub fn config_json(events_path: &str, cfg_json: &str) -> String {
+    let cfg = if cfg_json.is_empty() {
+        "null"
+    } else {
+        cfg_json
+    };
+    let events = serde_json::to_string(events_path).unwrap_or_else(|_| "\"events\"".into());
+    format!(
+        "{{\"events\":{events},\"cfg\":{cfg},\"proto\":{proto},\"js\":\"{js}\"}}",
+        proto = crate::diff::PROTO,
+        js = viewer_tag(),
+    )
+}
+
 /// Render config handed to the browser renderer: default fg/bg, the base stack for
-/// stretch-fill glyphs, and the `symbol_map` overrides as `[lo, hi, familyStack]`
-/// (each stack pre-joined, override family first). Injected once per page.
+/// stretch-fill glyphs, the cell font-size / line-height (an iframe-less embed sets
+/// them on its own container — the baked page gets them from the head CSS), and the
+/// `symbol_map` overrides as `[lo, hi, familyStack]` (each stack pre-joined,
+/// override family first). Injected once per page.
 #[cfg(feature = "mirror")]
 pub fn render_config_json(config: &Config, resolver: &Resolver) -> String {
     #[derive(Serialize)]
@@ -183,6 +205,10 @@ pub fn render_config_json(config: &Config, resolver: &Resolver) -> String {
         def_bg: String,
         #[serde(rename = "fillFont")]
         fill_font: String,
+        #[serde(rename = "fontPx")]
+        font_px: f32,
+        #[serde(rename = "lhPx")]
+        lh_px: f32,
         sym: Vec<(u32, u32, String)>,
     }
     let stack = font_stack(config);
@@ -201,6 +227,8 @@ pub fn render_config_json(config: &Config, resolver: &Resolver) -> String {
         def_fg: hex(DEFAULT_FG),
         def_bg: hex(DEFAULT_BG),
         fill_font: stack,
+        font_px: config.font_size_px,
+        lh_px: config.line_height_px(),
         sym,
     };
     serde_json::to_string(&cfg).expect("RenderConfig serializes")

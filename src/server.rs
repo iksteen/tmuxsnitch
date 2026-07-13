@@ -37,19 +37,60 @@ pub struct AppState {
 }
 
 pub fn app(state: AppState) -> Router {
+    app_with_cors(state, &[])
+}
+
+/// `cors_origins`: exact origins (or a single `*`) allowed to read the data
+/// routes an iframe-less embed fetches cross-origin. Empty (the default) = no
+/// cross-origin access, today's same-origin-only posture. `/embed.js` keeps its
+/// own unconditional ACAO `*` (the public shim loads from anywhere) and is
+/// deliberately outside this configurable layer.
+pub fn app_with_cors(state: AppState, cors_origins: &[String]) -> Router {
     // Compress the page + fonts + renderer, but never the SSE stream (compression
     // buffers and would defeat the realtime push). So layer per-route, not globally.
     let compress = CompressionLayer::new();
-    Router::new()
-        .route("/", get(index).layer(compress.clone()))
+    // The routes an iframe-less cross-origin embed fetches. Grouped so the CORS
+    // layer lands only here, never on /embed.js (its own ACAO) or the page.
+    let mut data = Router::new()
+        .route("/config", get(config).layer(compress.clone()))
+        .route("/style.css", get(style_css).layer(compress.clone()))
         .route("/events", get(events))
         .route("/viewer.js", get(viewer_js).layer(compress.clone()))
-        .route("/embed.js", get(embed_js).layer(compress.clone()))
-        .route("/favicon.svg", get(favicon).layer(compress.clone()))
-        .route("/fonts/{key}", get(font).layer(compress))
+        .route("/fonts/{key}", get(font).layer(compress.clone()))
         // No compression: image formats are already compressed.
-        .route("/images/{key}", get(image))
+        .route("/images/{key}", get(image));
+    if let Some(cors) = crate::server_cors(cors_origins) {
+        data = data.layer(cors);
+    }
+    Router::new()
+        .route("/", get(index).layer(compress.clone()))
+        .route("/embed.js", get(embed_js).layer(compress.clone()))
+        .route("/favicon.svg", get(favicon).layer(compress))
+        .merge(data)
         .with_state(state)
+}
+
+/// The iframe-less embed boot object (`window.SHELLGLASS` as JSON). Same content
+/// for `?embed` and not — an embed always uses the built-in look.
+async fn config(State(state): State<AppState>) -> Response {
+    let cfg = render::render_config_json(&state.config, &state.resolver);
+    (
+        [(CONTENT_TYPE, "application/json")],
+        render::config_json("events", &cfg),
+    )
+        .into_response()
+}
+
+/// The `@font-face` rules only, for an iframe-less embed to `<link>` (relative
+/// font URLs resolve against this stylesheet's URL, so `fonts/<key>` lands on the
+/// hub, not the host page). Kept free of the page's base rules so a light-DOM
+/// embed can't leak them onto the host.
+async fn style_css(State(state): State<AppState>) -> Response {
+    (
+        [(CONTENT_TYPE, "text/css"), (CACHE_CONTROL, "no-cache")],
+        (*state.font_css).clone(),
+    )
+        .into_response()
 }
 
 /// Serve an inline-image payload (frame placements reference `images/<key>`).

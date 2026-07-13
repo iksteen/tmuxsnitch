@@ -1110,7 +1110,7 @@ function noteBlinkRow(r: number, has: boolean): void {
 let crtBox: HTMLInputElement | null | undefined;
 function crtOn(): boolean {
   if (crtBox === undefined) {
-    crtBox = document.getElementById("crt") as HTMLInputElement | null;
+    crtBox = uiRoot.querySelector("#crt") as HTMLInputElement | null;
     // repaint when the toggle flips (the overlay layers are pure CSS)
     crtBox?.addEventListener("change", () => {
       if (!pictureHeld()) redrawCanvasAll();
@@ -1788,6 +1788,19 @@ let screenImages: { ref: ImageRef; el: HTMLImageElement }[] = [];
 let heldImages: { ref: ImageRef; el: HTMLImageElement }[] = [];
 let screenEl: HTMLElement;
 
+// Mount targets. Default to the whole document (standalone page / iframe embed /
+// the baked page inside its own frame); an iframe-less embed (embed.js) points
+// these at a host-page container or a shadow root, so the viewer never reaches
+// past its mount into the host document. `mountBase` prefixes content-addressed
+// image URLs (empty = page-relative; an embed passes the session's base so
+// `images/<k>` resolves against the hub, not the host page); `cssScope` prefixes
+// injected rules so light-DOM embeds can't restyle the host.
+let cssRoot: Node = typeof document !== "undefined" ? document.head : (undefined as unknown as Node);
+let cssScope = "";
+let uiRoot: ParentNode = typeof document !== "undefined" ? document : (undefined as unknown as ParentNode);
+let mountBase = "";
+let crossOriginImages = false;
+
 // Cell-rect overlap of two placements (unsized images conservatively count
 // as their anchor cell — the video path is always sized).
 function refsOverlap(a: ImageRef, b: ImageRef): boolean {
@@ -1963,11 +1976,23 @@ let defaultsCss = { fg: "", bg: "" };
 // The page title the document booted with; the session's OSC 0/2 title
 // replaces it while set and it comes back when the title is cleared.
 let bootTitle: string | null = null;
-function setTitle(t: string): void {
+// Title sink: the standalone/iframe page owns the tab title; an iframe-less
+// embed passes a no-op so the session can't hijack the host page's title.
+let titleFn: (t: string) => void = (t) => {
   if (typeof document === "undefined") return; // unit tests run DOM-free
   if (bootTitle === null) bootTitle = document.title;
   document.title = t || bootTitle;
+};
+function setTitle(t: string): void {
+  titleFn(t);
 }
+// Offline sink: the standalone/iframe page marks body[data-offline]; an
+// iframe-less embed marks its host container instead.
+let offlineFn: (state: string) => void = (state) => {
+  if (typeof document === "undefined") return;
+  if (state) document.body.dataset.offline = state;
+  else delete document.body.dataset.offline;
+};
 
 function paintFull(dims: { w: number; h: number; i?: ImageRef[] }): void {
   // OSC 10/11 overrides: inline style beats the config-derived head CSS;
@@ -2086,7 +2111,12 @@ function renderImage(im: ImageRef): string {
   // and reconnects. `k` is attr-escaped — untrusted, and a non-address just
   // 404s harmlessly. Coordinates are numeric (the hub drops any wire message
   // that fails typed u16/i16 deserialization), so they need no escaping.
-  return `<img class="inline-img${sized ? " sized" : ""}" style="${vars}" alt="" src="images/${attrEscape(im.k)}">`;
+  // `mountBase` is "" on the baked page (page-relative, subpath-safe) and the
+  // session base for an iframe-less embed (the host page's URL is not the hub's).
+  // `crossorigin` lets the canvas read a cross-origin embed's image without
+  // tainting (so toDataURL keeps working); harmless same-origin.
+  const co = crossOriginImages ? ` crossorigin="anonymous"` : "";
+  return `<img class="inline-img${sized ? " sized" : ""}" style="${vars}" alt=""${co} src="${mountBase}images/${attrEscape(im.k)}">`;
 }
 
 function decodeRow([r, l, text, style]: WireRow): { r: number; l: number; cells: Cell[] } {
@@ -2176,8 +2206,7 @@ let sseDown = false;
 let operatorDown = false;
 function refreshLive(): void {
   const state = sseDown ? "hub" : operatorDown ? "operator" : "";
-  if (state) document.body.dataset.offline = state;
-  else delete document.body.dataset.offline;
+  offlineFn(state);
 }
 
 function connect(events: string): void {
@@ -2214,7 +2243,7 @@ function fmtRate(bytesPerSec: number): string {
 // the last second, not a since-boot average. No-ops if the template has no
 // #sg-stats (custom templates).
 function startStats(): void {
-  const el = document.getElementById("sg-stats");
+  const el = uiRoot.querySelector("#sg-stats");
   if (!el) return;
   let lastBytes = 0;
   let lastPaints = 0;
@@ -2236,13 +2265,26 @@ function startStats(): void {
 // viewer.js).
 function injectViewerCss(): void {
   const css = document.createElement("style");
+  // `cssScope` prefixes every rule so a light-DOM embed (rules in the host's
+  // document.head) can't restyle the host page; "" for the standalone page and
+  // shadow-DOM embeds (a shadow root already scopes what's in it). The image
+  // rules key off `.screen` (the inner grid div) not `#screen`, so they hold
+  // whatever the outer mount element's id is.
+  const s = cssScope;
   css.textContent =
+    // Structural grid rules. The baked page also gets these from the served head
+    // CSS; an iframe-less embed serves only @font-face, so the viewer owns its own
+    // layout here (scoped, so a light-DOM embed can't leak them onto the host).
+    // `--lh` and the base font come from the mount container (inline on the baked
+    // #screen, or set from the render config by embed.js).
+    `${s}.screen{position:relative;white-space:pre;overflow:hidden}` +
+    `${s}.row{position:relative;height:var(--lh);contain:layout style}` +
     // Ghost rows: transparent selectable text under the canvas. The explicit
     // ::selection background is the visible highlight — the UA default is
     // unreliable over transparent text. text-shadow off so a CRT phosphor
     // bloom can't re-ink the invisible glyphs.
-    ".row.ghost{color:transparent;text-shadow:none}" +
-    ".row.ghost::selection{background:rgba(110,170,255,.4)}" +
+    `${s}.row.ghost{color:transparent;text-shadow:none}` +
+    `${s}.row.ghost::selection{background:rgba(110,170,255,.4)}` +
     // Inline-image layout, sourced from the per-element custom properties —
     // deliberately NOT inline styles, so copied fragments paste at natural
     // size instead of dragging half-parseable ch/var() sizing along (see
@@ -2251,13 +2293,13 @@ function injectViewerCss(): void {
     // needn't match the browser's, so stretching would distort. The canvas
     // paints the pixels, so the element itself is hidden — by stylesheet
     // rule, never inline, so copied fragments paste visible.
-    "#screen img.inline-img{position:absolute;" +
+    `${s}.screen img.inline-img{position:absolute;` +
     "left:calc(var(--sg-c)*1ch);top:calc(var(--sg-r)*var(--lh));" +
     "z-index:3;pointer-events:none;visibility:hidden}" +
-    "#screen img.inline-img.sized{width:calc(var(--sg-w)*1ch);" +
+    `${s}.screen img.inline-img.sized{width:calc(var(--sg-w)*1ch);` +
     "height:calc(var(--sg-h)*var(--lh));" +
     "object-fit:contain;object-position:left top}";
-  document.head.appendChild(css);
+  cssRoot.appendChild(css);
 }
 
 // ── canvas-track verification hooks (verify.html, bench.html; no SSE) ─────────
@@ -2306,13 +2348,34 @@ export function benchPinch(s: number): void {
   redrawCanvasAll();
 }
 
-function main(): void {
-  const boot = (
-    window as unknown as { SHELLGLASS: { events: string; cfg: Cfg; proto?: number; js?: string } }
-  ).SHELLGLASS;
+type Boot = { events: string; cfg: Cfg; proto?: number; js?: string };
+// Public mount entry (used by embed.js for iframe-less embeds). `screen` is the
+// container the grid renders into; the optional overrides point CSS injection,
+// image URLs, title and offline state away from the host document so an
+// iframe-less embed stays inside its box. Defaults reproduce the standalone page.
+export interface MountOpts {
+  screen: HTMLElement;
+  boot: Boot;
+  cssRoot?: Node; // where injected CSS lands (default document.head)
+  cssScope?: string; // selector prefix for light-DOM isolation (default "")
+  uiRoot?: ParentNode; // querySelector root for #crt / #sg-stats (default document)
+  base?: string; // URL base for images, e.g. "/s/demo/" (default "" = page-relative)
+  crossOriginImages?: boolean; // set crossorigin=anonymous on image <img>s
+  title?: (t: string) => void; // title sink (default sets document.title)
+  offline?: (state: string) => void; // offline sink (default body[data-offline])
+}
+export function mount(o: MountOpts): void {
+  screenEl = o.screen;
+  if (o.cssRoot) cssRoot = o.cssRoot;
+  if (o.cssScope) cssScope = o.cssScope;
+  if (o.uiRoot) uiRoot = o.uiRoot;
+  if (o.base) mountBase = o.base;
+  if (o.crossOriginImages) crossOriginImages = true;
+  if (o.title) titleFn = o.title;
+  if (o.offline) offlineFn = o.offline;
+  const boot = o.boot;
   setConfig(boot.cfg);
   setProto(boot.proto, boot.js);
-  screenEl = document.getElementById("screen")!;
   // OSC 8 anchors: inherit the terminal styling (a page template's own `a`
   // rules must not repaint terminal text) and underline on hover, like kitty.
   injectViewerCss();
@@ -2342,6 +2405,8 @@ function main(): void {
 }
 
 // Only bootstrap in the browser; importing this module in Node (tests) is inert.
-if (typeof document !== "undefined" && (window as unknown as { SHELLGLASS?: unknown }).SHELLGLASS) {
-  main();
+// The baked page sets window.SHELLGLASS and owns its whole document; an
+// iframe-less embed has no SHELLGLASS and calls mount() itself (see embed.js).
+if (typeof document !== "undefined" && (window as unknown as { SHELLGLASS?: Boot }).SHELLGLASS) {
+  mount({ screen: document.getElementById("screen")!, boot: (window as unknown as { SHELLGLASS: Boot }).SHELLGLASS });
 }

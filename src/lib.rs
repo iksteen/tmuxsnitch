@@ -5,6 +5,29 @@
 //! `Cargo.toml`). Every binary dispatches through [`cli`], so flags and
 //! behavior can't drift between the full CLI and the per-mode ones.
 
+/// Build the CORS layer for the embed data routes from configured origins, or
+/// `None` for the same-origin-only default. A single `*` allows any origin (no
+/// credentials are ever used, so `*` is safe); otherwise only the exact listed
+/// origins are echoed. Shared by the standalone server and the hub (both bring
+/// in `tower-http`).
+#[cfg(any(feature = "serve", feature = "hub"))]
+pub(crate) fn server_cors(origins: &[String]) -> Option<tower_http::cors::CorsLayer> {
+    use tower_http::cors::{AllowOrigin, CorsLayer};
+    if origins.is_empty() {
+        return None;
+    }
+    let allow = if origins.iter().any(|o| o == "*") {
+        AllowOrigin::any()
+    } else {
+        AllowOrigin::list(origins.iter().filter_map(|o| o.parse().ok()))
+    };
+    Some(
+        CorsLayer::new()
+            .allow_methods([axum::http::Method::GET])
+            .allow_origin(allow),
+    )
+}
+
 #[cfg(feature = "ssh-view")]
 pub mod ansi;
 #[cfg(feature = "sessions")]

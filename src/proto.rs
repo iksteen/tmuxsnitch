@@ -52,6 +52,13 @@ pub fn content_key(mime: &str, bytes: &[u8]) -> String {
 #[derive(Serialize, Deserialize)]
 pub struct RegisterBody {
     pub css: String,
+    /// Just the `@font-face` rules from `css`, served on its own at `style.css`
+    /// so an iframe-less embed can `<link>` the web fonts without pulling the
+    /// page-scoped base rules (which would leak onto a light-DOM host). Additive
+    /// and `default` (empty): an older client omits it, and the hub falls back to
+    /// serving the full `css` — so no protocol-skew (SALT) bump.
+    #[serde(default)]
+    pub font_css: String,
     /// Viewer HTML template with `{{style}}`/`{{screen}}`/`{{script}}` tokens.
     /// `default` (empty) so the hub falls back to its built-in for older clients.
     #[serde(default)]

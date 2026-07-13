@@ -189,6 +189,13 @@ pub struct ServeArgs {
     #[arg(short, long, default_value = "127.0.0.1:8080")]
     bind: String,
 
+    /// Origin allowed to embed this mirror iframe-lessly from another origin
+    /// (sets CORS on the data routes the embed fetches); repeat for several, or
+    /// `*` for any. Not needed when the embed is same-origin (e.g. a reverse
+    /// proxy mounts this under the host's own domain). Off by default.
+    #[arg(long = "cors-origin", value_name = "ORIGIN")]
+    cors_origin: Vec<String>,
+
     /// Also serve a read-only ANSI view over SSH on this address (e.g.
     /// `127.0.0.1:2222`). Any username connects — `ssh -p 2222 x@host`.
     #[arg(long)]
@@ -286,6 +293,13 @@ pub struct HubArgs {
     /// Address to bind the hub's HTTP(S) server.
     #[arg(short, long, default_value = "127.0.0.1:8080")]
     bind: String,
+
+    /// Origin allowed to embed a session iframe-lessly from another origin (sets
+    /// CORS on the per-session data routes the embed fetches); repeat, or `*` for
+    /// any. Not needed when the embed is same-origin (a reverse proxy mounts the
+    /// hub under the host's own domain). Off by default.
+    #[arg(long = "cors-origin", value_name = "ORIGIN")]
+    cors_origin: Vec<String>,
 
     /// A session id permitted to push, optionally with a public view-URL slug:
     /// `<id>` or `<id>:<slug>`; repeat for several. The slug is the only way to view
@@ -415,7 +429,14 @@ impl ServeArgs {
     /// # Errors
     /// Config/font/bind failures before the PTY starts; server errors after.
     pub async fn run(self) -> Result<()> {
-        run_serve(self.source, &self.bind, self.ssh_bind, self.ssh_host_key).await
+        run_serve(
+            self.source,
+            &self.bind,
+            self.cors_origin,
+            self.ssh_bind,
+            self.ssh_host_key,
+        )
+        .await
     }
 }
 
@@ -475,6 +496,7 @@ impl HubArgs {
                 api_allow,
                 id_salt: self.id_salt.id_salt,
                 sessions_file: self.sessions_file,
+                cors_origins: self.cors_origin,
             },
             &self.bind,
             tls,
@@ -556,6 +578,7 @@ fn setup(source: &SourceArgs) -> Result<Setup> {
 async fn run_serve(
     source: SourceArgs,
     bind_addr: &str,
+    cors_origins: Vec<String>,
     ssh_bind: Option<String>,
     ssh_host_key: Option<PathBuf>,
 ) -> Result<()> {
@@ -634,7 +657,7 @@ async fn run_serve(
         live,
         images,
     };
-    axum::serve(listener, server::app(state)).await?;
+    axum::serve(listener, server::app_with_cors(state, &cors_origins)).await?;
     Ok(())
 }
 
@@ -672,6 +695,7 @@ struct HubSetup {
     api_allow: std::collections::HashSet<String>,
     id_salt: String,
     sessions_file: Option<PathBuf>,
+    cors_origins: Vec<String>,
 }
 
 /// Serve the hub, terminating TLS per `tls`. Plain HTTP keeps the `SO_REUSEADDR`
@@ -729,7 +753,7 @@ async fn serve_hub(
     // Kept for the SIGTERM path: triggers a WS Close to every pusher so they detect
     // the shutdown at once (see shutdown_signal / graceful).
     let shutdown = hub_state.clone();
-    let app = hub::app(hub_state);
+    let app = hub::app_with_cors(hub_state, &setup.cors_origins);
     // ConnectInfo::<SocketAddr> so auth-failure logging can record the source IP
     // (fail2ban) — required on every serving path or the extractor 500s.
     let make = || {

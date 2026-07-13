@@ -110,7 +110,7 @@ signal-hook = { version = "0.4", default-features = false, features = ["iterator
 serde_json = "1"
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-stream = { version = "0.1.17", features = ["sync"] }
-tower-http = { version = "0.7", features = ["compression-br", "compression-gzip"], optional = true }
+tower-http = { version = "0.7", features = ["compression-br", "compression-gzip", "cors"], optional = true }
 toml = { version = "1.1.2", optional = true }
 # Vendored (upstream unmaintained) — see crates/vt100/Cargo.toml for provenance.
 vt100 = { path = "crates/vt100" }
