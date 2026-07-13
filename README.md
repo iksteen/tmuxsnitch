@@ -93,6 +93,8 @@ Flags by command:
 | `--bind <addr>` | serve, hub | HTTP listen address (default `127.0.0.1:8080`) |
 | `--ssh-bind <addr>` | serve, hub | also serve a read-only ANSI view over SSH here |
 | `--ssh-host-key <path>` | serve, hub | OpenSSH host key for the SSH view (generated + persisted 0600 if absent) |
+| `--ssh-motd-file <path>` | serve, hub | file shown as a banner to each SSH viewer before the live view — raw bytes, all control characters preserved |
+| `--ssh-motd-delay <n>` | serve, hub | seconds to show the MOTD banner (default 5) |
 | `--key <secret>` | push, print-id | secret key (or `SHELLGLASS_KEY` env var) |
 | `--key <api-key>` | sessions | management-API key (or `SHELLGLASS_API_KEY` env var) |
 | `--allow <id>[:<slug>]` | hub | a session id permitted to push, optionally aliased to a view-URL slug; repeat per client. Others get `403` |
@@ -235,7 +237,15 @@ ssh -p 2222 "$ID"@hub.example.com
 The **view handle is the SSH username** — the same one that goes in the `/s/<…>`
 URL — so there's nothing to enter. Input is dropped except `q` / Ctrl-C / Ctrl-D,
 which disconnect. A viewer terminal smaller than the session shows a top-left
-crop with a one-line status notice, and reflows on resize.
+crop with a one-line status notice; a larger one centers the session in the extra
+space (per axis); either way it reflows on resize.
+
+Set `--ssh-motd-file <path>` to greet each viewer with a banner before the live
+view starts (`--ssh-motd-delay <n>` seconds, default 5). The file is sent
+**verbatim** — every control character is preserved, so ANSI colors, cursor
+positioning, and terminal art all work; the operator authors it, so it's trusted.
+It shows on the normal screen and the live view takes over the alternate screen,
+so disconnecting restores it like a login MOTD.
 
 The SSH server uses its **own** ed25519 host key, kept separate from the
 machine's `/etc/ssh` identity on purpose — a shared key would extend the host's

@@ -206,6 +206,16 @@ pub struct ServeArgs {
     /// this path on first run; without it, a key under `$XDG_STATE_HOME` is used.
     #[arg(long)]
     ssh_host_key: Option<PathBuf>,
+
+    /// Path to a file shown as a banner (MOTD) to each SSH viewer before the live
+    /// view. Displayed VERBATIM — all control characters are preserved (ANSI
+    /// colors, cursor moves, art). Off by default.
+    #[arg(long, value_name = "PATH")]
+    ssh_motd_file: Option<PathBuf>,
+
+    /// Seconds to show the `--ssh-motd-file` banner before the live view starts.
+    #[arg(long, value_name = "N", default_value_t = 5)]
+    ssh_motd_delay: u64,
 }
 
 /// Args for `push` (and the `shellglass-push` binary).
@@ -365,6 +375,16 @@ pub struct HubArgs {
     /// this path on first run; without it, a key under `$XDG_STATE_HOME` is used.
     #[arg(long)]
     ssh_host_key: Option<PathBuf>,
+
+    /// Path to a file shown as a banner (MOTD) to each SSH viewer before the live
+    /// view. Displayed VERBATIM — all control characters are preserved (ANSI
+    /// colors, cursor moves, art). Off by default.
+    #[arg(long, value_name = "PATH")]
+    ssh_motd_file: Option<PathBuf>,
+
+    /// Seconds to show the `--ssh-motd-file` banner before the live view starts.
+    #[arg(long, value_name = "N", default_value_t = 5)]
+    ssh_motd_delay: u64,
 }
 
 /// How the hub should terminate TLS.
@@ -436,6 +456,8 @@ impl ServeArgs {
             self.cors_origin,
             self.ssh_bind,
             self.ssh_host_key,
+            self.ssh_motd_file,
+            self.ssh_motd_delay,
         )
         .await
     }
@@ -503,6 +525,8 @@ impl HubArgs {
             tls,
             self.ssh_bind,
             self.ssh_host_key,
+            self.ssh_motd_file,
+            self.ssh_motd_delay,
         )
         .await
     }
@@ -582,6 +606,8 @@ async fn run_serve(
     cors_origins: Vec<String>,
     ssh_bind: Option<String>,
     ssh_host_key: Option<PathBuf>,
+    ssh_motd_file: Option<PathBuf>,
+    ssh_motd_delay: u64,
 ) -> Result<()> {
     let listener = bind(bind_addr)?;
     let s = setup(&source)?;
@@ -640,9 +666,10 @@ async fn run_serve(
     let live = diff::Live::spawn(rx);
     if let Some((l, key)) = ssh_ready {
         let target = ssh::Target::Single(Arc::clone(&live));
+        let motd = load_ssh_motd(ssh_motd_file.as_deref(), ssh_motd_delay);
         // ponytail: unsupervised — an SSH failure logs and dies; HTTP is unaffected.
         tokio::spawn(async move {
-            if let Err(e) = ssh::serve(l, key, target).await {
+            if let Err(e) = ssh::serve(l, key, target, motd).await {
                 eprintln!("shellglass: ssh server error: {e}");
             }
         });
@@ -709,6 +736,8 @@ async fn serve_hub(
     tls: Tls,
     ssh_bind: Option<String>,
     ssh_host_key: Option<PathBuf>,
+    ssh_motd_file: Option<PathBuf>,
+    ssh_motd_delay: u64,
 ) -> Result<()> {
     let listener = bind(addr)?;
     let local = listener.local_addr()?;
@@ -740,10 +769,11 @@ async fn serve_hub(
         match prepare_ssh(ssh_addr, ssh_host_key.as_deref(), "<slug>") {
             Ok((l, key)) => {
                 let target = ssh::Target::Hub(hub_state.clone());
+                let motd = load_ssh_motd(ssh_motd_file.as_deref(), ssh_motd_delay);
                 // ponytail: unsupervised — an SSH runtime failure logs and dies; HTTP
                 // is unaffected.
                 tokio::spawn(async move {
-                    if let Err(e) = ssh::serve(l, key, target).await {
+                    if let Err(e) = ssh::serve(l, key, target, motd).await {
                         eprintln!("shellglass: ssh server error: {e}");
                     }
                 });
@@ -886,6 +916,20 @@ fn prepare_ssh(
     let l = bind(addr)?;
     let key = ssh::setup(l.local_addr()?, key_path, hint_user)?;
     Ok((l, key))
+}
+
+/// Build the SSH MOTD from `--ssh-motd-file`, or `None` if unset. A read failure
+/// logs and disables only the banner — the SSH view still runs — consistent with how
+/// a bad host key disables just the SSH view, not the whole mirror.
+#[cfg(feature = "ssh-view")]
+fn load_ssh_motd(path: Option<&std::path::Path>, delay_secs: u64) -> Option<ssh::Motd> {
+    match ssh::Motd::load(path?, delay_secs) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            eprintln!("shellglass: SSH MOTD disabled — {e:#}");
+            None
+        }
+    }
 }
 
 /// Bind with `SO_REUSEADDR` so a hub restart can rebind immediately — otherwise the

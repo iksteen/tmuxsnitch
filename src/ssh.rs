@@ -54,6 +54,32 @@ impl Target {
     }
 }
 
+/// Optional message-of-the-day shown to each SSH viewer before the live view
+/// starts: the MOTD file's RAW bytes (every control character preserved — it's
+/// operator-authored, trusted content, e.g. ANSI art with colors and cursor moves),
+/// displayed for `delay` before the alt-screen view takes over. Cheap to clone per
+/// connection (the bytes are shared).
+#[derive(Clone)]
+pub struct Motd {
+    bytes: Arc<[u8]>,
+    delay: std::time::Duration,
+}
+
+impl Motd {
+    /// Read the MOTD file; `delay_secs` is how long each viewer sees it.
+    ///
+    /// # Errors
+    /// If the file can't be read.
+    pub fn load(path: &Path, delay_secs: u64) -> Result<Motd> {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("reading --ssh-motd-file {}", path.display()))?;
+        Ok(Motd {
+            bytes: bytes.into(),
+            delay: std::time::Duration::from_secs(delay_secs),
+        })
+    }
+}
+
 /// Client terminal size, shared from the handler to the render task (updated by
 /// pty-req / window-change). Quit is detected in the render task itself, from the
 /// input it drains off the channel — see [`view_loop`].
@@ -98,8 +124,14 @@ pub fn setup(addr: SocketAddr, key_path: Option<&Path>, hint_user: &str) -> Resu
 /// stalls. ponytail: flat cap — plenty for this tool's scale.
 const MAX_PREAUTH_CONNS: usize = 1024;
 
-/// Run the SSH viewer server on an already-bound listener until it stops.
-pub async fn serve(listener: TcpListener, key: PrivateKey, target: Target) -> Result<()> {
+/// Run the SSH viewer server on an already-bound listener until it stops. `motd`,
+/// if set, is shown to every viewer before the live view (see [`Motd`]).
+pub async fn serve(
+    listener: TcpListener,
+    key: PrivateKey,
+    target: Target,
+    motd: Option<Motd>,
+) -> Result<()> {
     let config = Arc::new(Config {
         keys: vec![key],
         // Bound every connection's idle time. Its most important job is the pre-auth
@@ -142,7 +174,7 @@ pub async fn serve(listener: TcpListener, key: PrivateKey, target: Target) -> Re
         // The permit moves into the handler, which drops it on auth success (or when
         // the handler drops — a handshake that fails or stalls out — releasing the
         // pre-auth slot either way).
-        let handler = SshHandler::new(target.clone(), permit);
+        let handler = SshHandler::new(target.clone(), permit, motd.clone());
         let config = Arc::clone(&config);
         tokio::spawn(async move {
             // Handshake failure (bad SSH banner, kex) drops the connection silently —
@@ -160,6 +192,8 @@ struct SshHandler {
     channel: Option<Channel<Msg>>,
     saw_pty: bool,
     ctl: watch::Sender<Ctl>,
+    /// Shown to the viewer before the live view starts, if configured.
+    motd: Option<Motd>,
     /// Held for the pre-auth handshake; dropped on auth success (see [`accept`]) so
     /// established connections don't count against [`MAX_PREAUTH_CONNS`].
     ///
@@ -168,7 +202,7 @@ struct SshHandler {
 }
 
 impl SshHandler {
-    fn new(target: Target, permit: OwnedSemaphorePermit) -> Self {
+    fn new(target: Target, permit: OwnedSemaphorePermit, motd: Option<Motd>) -> Self {
         let (ctl, _) = watch::channel(Ctl::default());
         SshHandler {
             target,
@@ -176,6 +210,7 @@ impl SshHandler {
             channel: None,
             saw_pty: false,
             ctl,
+            motd,
             permit: Some(permit),
         }
     }
@@ -297,7 +332,12 @@ impl Handler for SshHandler {
             Some(live) => match self.channel.take() {
                 Some(chan) => {
                     session.channel_success(channel)?;
-                    tokio::spawn(view_loop(chan, live, self.ctl.subscribe()));
+                    tokio::spawn(view_loop(
+                        chan,
+                        live,
+                        self.ctl.subscribe(),
+                        self.motd.clone(),
+                    ));
                 }
                 None => {
                     let _ = session.channel_failure(channel);
@@ -342,11 +382,41 @@ async fn view_loop(
     mut channel: Channel<Msg>,
     live: Arc<diff::Live>,
     mut ctl: watch::Receiver<Ctl>,
+    motd: Option<Motd>,
 ) {
     // make_writer returns a 'static writer (owns a sender clone), so it doesn't borrow
     // `channel` — leaving `channel` free to lend `make_reader` a &mut below. Pin so the
     // AsyncWriteExt methods (which need Unpin) work.
     let mut w = Box::pin(channel.make_writer());
+    // MOTD (if configured): the file's raw bytes on the normal screen, held for its
+    // delay, before the alt-screen view takes over. Written VERBATIM — every control
+    // character survives (operator-authored, trusted content). The alt-screen enter
+    // below then hides it, and the alt-screen leave on disconnect restores it, like a
+    // login MOTD.
+    if let Some(motd) = &motd {
+        if w.write_all(&motd.bytes).await.is_err() || w.flush().await.is_err() {
+            return;
+        }
+        // Hold for the delay while still DRAINING input: leaving russh's channel
+        // buffer unread for a long delay would wedge the connection (see the module
+        // note), so read-and-discard concurrently. q / Ctrl-C / Ctrl-D still quit;
+        // EOF/error ends the session. The delay stays authoritative — other input
+        // doesn't cut it short.
+        let deadline = tokio::time::sleep(motd.delay);
+        tokio::pin!(deadline);
+        let mut reader = Box::pin(channel.make_reader());
+        let mut inbuf = [0u8; 256];
+        loop {
+            tokio::select! {
+                () = &mut deadline => break,
+                r = reader.read(&mut inbuf) => match r {
+                    Ok(0) | Err(_) => return, // client gone
+                    Ok(n) if matches!(&inbuf[..n], [b'q'] | [0x03] | [0x04]) => return,
+                    Ok(_) => {} // other input discarded (read-only viewer)
+                }
+            }
+        }
+    }
     // Alt screen + hidden cursor + clear.
     if w.write_all(b"\x1b[?1049h\x1b[?25l\x1b[2J").await.is_err() {
         return;
@@ -495,6 +565,24 @@ mod tests {
             loaded.fingerprint(HashAlg::Sha256),
             "persisted key round-trips to the same fingerprint"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn motd_loads_bytes_verbatim_including_control_chars() {
+        // Every byte must survive — ESC/CSI, NUL, BEL, raw \n without \r, high bytes.
+        let raw: &[u8] = b"\x1b[31mMOTD\x1b[0m\x00\x07\nline\xff";
+        let dir = std::env::temp_dir().join(format!("sg-motd-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("motd");
+        std::fs::write(&path, raw).unwrap();
+
+        let motd = Motd::load(&path, 7).unwrap();
+        assert_eq!(&*motd.bytes, raw, "bytes preserved with no filtering");
+        assert_eq!(motd.delay, std::time::Duration::from_secs(7));
+
+        // A missing file is an error (the operator asked for a banner that isn't there).
+        assert!(Motd::load(&dir.join("nope"), 5).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
