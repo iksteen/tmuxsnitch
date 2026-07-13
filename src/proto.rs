@@ -46,6 +46,17 @@ pub fn content_key(mime: &str, bytes: &[u8]) -> String {
         })
 }
 
+/// A tag identifying a page's rendering config (CSS/fonts/render config/template),
+/// broadcast to viewers as the `reload` SSE event. `parts` are the config-defining
+/// strings, joined with a NUL separator so no concatenation collides; the result
+/// changes iff any part does. Both serving modes set it on their [`crate::diff::Live`]
+/// (serve once at startup, the hub per register) and a viewer re-fetches when the
+/// tag it saw first stops matching. Reuses [`content_key`]'s hash — the value is
+/// opaque, only equality matters.
+pub fn config_tag(parts: &[&str]) -> String {
+    content_key("shellglass/reload-config/v1", parts.join("\0").as_bytes())
+}
+
 /// Register message: the first message on the `/push` WebSocket — the page CSS, the
 /// viewer template, and the fonts the CSS references. The client renders locally, so
 /// it owns the template too and pushes it here; the hub just fills it per request.

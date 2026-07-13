@@ -1305,6 +1305,16 @@ fn register_session(
         retarget_fonts(&mut cache, &s.fonts, &keys, incoming);
         drop(cache);
         s.fonts = keys;
+        // Tag the pushed page config so open viewers notice a font/CSS change on a
+        // re-register and re-fetch (frames carry no CSS — a live mirror can't learn
+        // the fonts changed any other way). An unchanged config hashes the same, so
+        // a plain reconnect doesn't reload anyone.
+        s.live.set_reload_tag(&proto::config_tag(&[
+            &s.css,
+            &s.font_css,
+            &s.render_cfg,
+            &s.template,
+        ]));
         if !s.registered {
             s.registered = true;
             println!("shellglass: session connected — view at {base}/s/{slug}/");

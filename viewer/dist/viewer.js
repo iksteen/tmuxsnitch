@@ -54,6 +54,16 @@ export let reloadPage = () => {
 export function setReloadPage(f) {
     reloadPage = f;
 }
+let reloadFn = () => reloadPage();
+let cfgTag;
+export function noteReloadTag(tag) {
+    if (!tag)
+        return;
+    if (cfgTag === undefined)
+        cfgTag = tag;
+    else if (tag !== cfgTag)
+        reloadFn();
+}
 const BASE16 = [
     [0x00, 0x00, 0x00], [0xcd, 0x00, 0x00], [0x00, 0xcd, 0x00], [0xcd, 0xcd, 0x00],
     [0x00, 0x00, 0xee], [0xcd, 0x00, 0xcd], [0x00, 0xcd, 0xcd], [0xe5, 0xe5, 0xe5],
@@ -1446,7 +1456,7 @@ export function apply(m) {
         const wireChanged = proto !== undefined && m.v !== proto;
         const jsChanged = jsTag !== undefined && m.js !== undefined && m.js !== jsTag;
         if (wireChanged || jsChanged)
-            reloadPage();
+            reloadFn();
         return;
     }
     if ("c" in m)
@@ -1478,6 +1488,7 @@ function connect(events) {
         operatorDown = e.data === "0";
         refreshLive();
     });
+    es.addEventListener("reload", (e) => noteReloadTag(e.data));
     es.onerror = () => {
         sseDown = true;
         refreshLive();
@@ -1578,6 +1589,8 @@ export function mount(o) {
         titleFn = o.title;
     if (o.offline)
         offlineFn = o.offline;
+    if (o.reload)
+        reloadFn = o.reload;
     const boot = o.boot;
     setConfig(boot.cfg);
     setProto(boot.proto, boot.js);

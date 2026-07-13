@@ -27,6 +27,11 @@
 // the element (event.detail = the title, "" on clear), so the host decides what
 // to do with it:  el.addEventListener("shellglass-title", e => …).
 //
+// Likewise, when the terminal's pushed CSS/fonts change or the hub upgrades, the
+// element fires a `shellglass-reload` CustomEvent (an iframe/hosted page just
+// reloads itself, but that would nuke the host). Re-mount to pick up the change:
+//   el.addEventListener("shellglass-reload", () => { el.remove(); host.append(el2); })
+//
 // A CLASSIC script on purpose: document.currentScript doesn't exist in modules,
 // and classic cross-origin loads need no CORS. This file stays tiny and
 // backward compatible: never remove or repurpose `data-src`, the element name,
@@ -139,6 +144,14 @@
         if (s) host.dataset.offline = s;
         else delete host.dataset.offline;
       },
+      // Never reload the HOST page (location.reload would nuke it). When the
+      // pushed CSS/fonts change (operator re-registered) or the hub upgrades, the
+      // baked config is stale — surface a `shellglass-reload` event so the host can
+      // re-mount the element (or ignore it). bubbles/composed like the title event.
+      reload: () =>
+        host.dispatchEvent(
+          new CustomEvent("shellglass-reload", { bubbles: true, composed: true }),
+        ),
     });
     fitToBox(host, wrap);
   }

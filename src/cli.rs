@@ -674,10 +674,22 @@ async fn run_serve(
             }
         });
     }
+    // Relative: the page lives at `/`, and relative URLs survive a
+    // subpath-mounting reverse proxy that absolute ones can't know about.
+    let font_css = render::font_face_css(&s.fonts, "fonts/");
+    // Tag the rendering config, so a viewer stays reloadable when serve is
+    // restarted with a DIFFERENT config: the process death drops the SSE, the
+    // browser reconnects on the same (now stale) page, and the new tag differing
+    // from the one it first saw triggers a re-fetch. Same config across a restart
+    // hashes identical, so an ordinary restart reloads no one.
+    let cfg_json = render::render_config_json(&s.config, &s.resolver);
+    live.set_reload_tag(&crate::proto::config_tag(&[
+        &font_css,
+        &cfg_json,
+        &s.template,
+    ]));
     let state = AppState {
-        // Relative: the page lives at `/`, and relative URLs survive a
-        // subpath-mounting reverse proxy that absolute ones can't know about.
-        font_css: Arc::new(render::font_face_css(&s.fonts, "fonts/")),
+        font_css: Arc::new(font_css),
         config: s.config,
         resolver: s.resolver,
         fonts: s.fonts,

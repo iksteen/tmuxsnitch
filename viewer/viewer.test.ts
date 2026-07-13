@@ -21,6 +21,7 @@ import {
   setConfig,
   setProto,
   setReloadPage,
+  noteReloadTag,
   apply,
   type Cfg,
   type Cell,
@@ -50,6 +51,24 @@ test("version hello reloads on wire or js mismatch, not on match", () => {
   setProto(undefined, undefined);
   apply({ v: 9, js: "zz" } as never);
   assert.equal(reloads, 2);
+});
+
+test("reload tag: baselines the first, reloads on a later mismatch, ignores empty", () => {
+  let reloads = 0;
+  setReloadPage(() => {
+    reloads += 1;
+  });
+  // Empty tags carry no config info (a hub session before its pusher registers) —
+  // never a baseline, never a reload.
+  noteReloadTag("");
+  noteReloadTag("cfg-a"); // first real tag: the baseline this DOM was built with
+  assert.equal(reloads, 0, "baselining is inert");
+  noteReloadTag("cfg-a"); // unchanged config (a plain reconnect) — no reload
+  assert.equal(reloads, 0, "same tag is inert");
+  noteReloadTag(""); // still ignored, doesn't disturb the baseline
+  assert.equal(reloads, 0);
+  noteReloadTag("cfg-b"); // config changed (serve restart / hub re-register) — reload
+  assert.equal(reloads, 1, "changed tag reloads");
 });
 
 test("palette matches the xterm-256 layout", () => {

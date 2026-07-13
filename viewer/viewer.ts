@@ -206,6 +206,29 @@ export function setReloadPage(f: () => void): void {
   reloadPage = f;
 }
 
+// Reload SINK: what to do when the page this viewer booted with goes stale — a
+// server binary/proto upgrade (version hello) or a pushed CSS/font change (the
+// `reload` SSE event). The standalone/hosted page and the iframe embed default to
+// re-fetching themselves (reloadPage). An iframe-LESS embed (light/shadow DOM)
+// mounts into the host page, where location.reload() would nuke the whole host —
+// it overrides this to surface a `shellglass-reload` event instead and let the
+// host decide, exactly like the title/offline sinks.
+let reloadFn: () => void = () => reloadPage();
+
+// Baseline config tag (the `reload` SSE event). MODULE scope, not per-connection,
+// so it survives an SSE reconnect: when `serve` is restarted with a different
+// config the stream drops and the browser reconnects on the SAME (now stale) page —
+// the baseline from before the drop then mismatches the new process's tag and the
+// page re-fetches. The hub's mid-stream re-register is the same comparison without a
+// reconnect. An empty tag (a hub session whose pusher hasn't registered yet, or a
+// standalone that never sets one) carries no config info and is ignored.
+let cfgTag: string | undefined;
+export function noteReloadTag(tag: string): void {
+  if (!tag) return;
+  if (cfgTag === undefined) cfgTag = tag;
+  else if (tag !== cfgTag) reloadFn();
+}
+
 // ── color ─────────────────────────────────────────────────────────────────────
 
 const BASE16: RGB[] = [
@@ -2178,7 +2201,7 @@ export function apply(m: Msg): void {
   if ("v" in m) {
     const wireChanged = proto !== undefined && m.v !== proto;
     const jsChanged = jsTag !== undefined && m.js !== undefined && m.js !== jsTag;
-    if (wireChanged || jsChanged) reloadPage();
+    if (wireChanged || jsChanged) reloadFn();
     return;
   }
   if ("c" in m) applyCell(m);
@@ -2223,6 +2246,10 @@ function connect(events: string): void {
     operatorDown = (e as MessageEvent).data === "0";
     refreshLive();
   });
+  // Config tag (CSS/fonts/render config). Baseline persists across reconnects at
+  // module scope (see noteReloadTag) so a serve restart is caught too, not just a
+  // hub mid-stream re-register.
+  es.addEventListener("reload", (e) => noteReloadTag((e as MessageEvent).data));
   es.onerror = () => {
     sseDown = true;
     refreshLive();
@@ -2363,6 +2390,7 @@ export interface MountOpts {
   crossOriginImages?: boolean; // set crossorigin=anonymous on image <img>s
   title?: (t: string) => void; // title sink (default sets document.title)
   offline?: (state: string) => void; // offline sink (default body[data-offline])
+  reload?: () => void; // stale-page sink (default reloads; iframe-less embeds override)
 }
 export function mount(o: MountOpts): void {
   screenEl = o.screen;
@@ -2373,6 +2401,7 @@ export function mount(o: MountOpts): void {
   if (o.crossOriginImages) crossOriginImages = true;
   if (o.title) titleFn = o.title;
   if (o.offline) offlineFn = o.offline;
+  if (o.reload) reloadFn = o.reload;
   const boot = o.boot;
   setConfig(boot.cfg);
   setProto(boot.proto, boot.js);

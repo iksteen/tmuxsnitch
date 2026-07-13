@@ -28,6 +28,15 @@
 //!   wire proto and the baked viewer.js content tag. A page that mismatches on
 //!   either reloads itself (see [`PROTO`]).
 //!
+//! Two side channels ride alongside the frame stream as NAMED SSE events (their
+//! own `event:` line, no `id:`, so they don't move `lastEventId` and need no
+//! `PROTO` bump — an old viewer ignores an unknown event): `operator` (`1`/`0`,
+//! push-source presence) and `reload` (a hash of the pushed CSS/fonts/render
+//! config — a viewer baselines the first value and re-fetches the page when a
+//! later one differs, the only way a pushed font/CSS change reaches an already-open
+//! mirror). Both are `watch`-backed: a viewer connecting mid-stream reads the
+//! current value.
+//!
 //! A block (see [`CellBlock`]) is positional `[text]` / `[text, style]`: `text` is
 //! one cell per codepoint in merged strings (`["…"]` = one multi-codepoint-grapheme
 //! cell; `0` = an empty-text cell, vestigial now that blanks are canonicalized to
@@ -129,6 +138,15 @@ pub struct Live {
     /// operator IS the process, and its death drops the SSE stream instead. A `watch`
     /// so a viewer connecting mid-outage reads the current value, not just changes.
     online: watch::Sender<bool>,
+    /// A tag identifying the pushed page config (CSS + fonts + render config),
+    /// surfaced to viewers as a named `reload` SSE event. The hub sets it on every
+    /// register (see [`set_reload_tag`](Self::set_reload_tag)); when a re-register
+    /// changes it, open viewers see a tag different from the one they booted with
+    /// and re-fetch the page — the only way pushed fonts/CSS reach an already-open
+    /// mirror (frames carry cell data only). A `watch` for the same reason `online`
+    /// is: a viewer connecting mid-stream reads the current tag as its baseline.
+    /// Empty and never bumped on standalone (config is fixed at startup).
+    reload: watch::Sender<String>,
     /// Live viewer count per [`Transport`] (index = `transport as usize`). Every
     /// transport subscribes to the same `diffs` channel, so its `receiver_count`
     /// can't tell them apart — this tracks each explicitly, bumped on connect and
@@ -186,6 +204,7 @@ impl Live {
     pub fn new(initial: Arc<Frame>) -> Arc<Live> {
         let (diffs, _) = broadcast::channel(BACKLOG);
         let (online, _) = watch::channel(true);
+        let (reload, _) = watch::channel(String::new());
         Arc::new(Live {
             state: ArcSwap::from_pointee(State {
                 seq: 0,
@@ -195,6 +214,7 @@ impl Live {
             writer: Mutex::new(()),
             diffs,
             online,
+            reload,
             #[cfg(any(feature = "serve", feature = "hub"))]
             viewers: std::array::from_fn(|_| AtomicUsize::new(0)),
         })
@@ -289,6 +309,19 @@ impl Live {
         *self.online.borrow()
     }
 
+    /// Set the config tag broadcast to viewers as a `reload` event. The hub calls
+    /// this on every register with a hash of the pushed CSS/fonts/render config; an
+    /// unchanged config yields the same tag (no viewer reload), a changed one a
+    /// different tag (open viewers re-fetch the page). Idempotent — a viewer reacts
+    /// only when the tag differs from the one it first saw. (Ungated like
+    /// [`set_online`](Self::set_online) so the `reload` field always has a reader,
+    /// even in the push-only build that never serves viewers.)
+    pub fn set_reload_tag(&self, tag: &str) {
+        if *self.reload.borrow() != tag {
+            self.reload.send_replace(tag.to_string());
+        }
+    }
+
     /// Count a viewer on `transport` for as long as the returned guard lives. Held by
     /// the SSE stream ([`Live::connect`]) / the SSH view loop ([`crate::ssh`]).
     #[cfg(any(feature = "serve", feature = "hub"))]
@@ -367,7 +400,14 @@ impl Live {
                     .data(if on { "1" } else { "0" }),
             )
         });
-        let mut resp = Sse::new(hello.chain(head).chain(tail).merge(status))
+        // Config tag, merged as a named `reload` event the same id-less way: a
+        // viewer takes the first value as its baseline and re-fetches the page when
+        // a later value differs (a re-register changed the pushed CSS/fonts). Also
+        // a watch (current value on subscribe), also no PROTO bump — an old viewer
+        // ignores the unknown event.
+        let reload = WatchStream::new(self.reload.subscribe())
+            .map(|tag| Ok::<_, Infallible>(Event::default().event("reload").data(tag)));
+        let mut resp = Sse::new(hello.chain(head).chain(tail).merge(status).merge(reload))
             .keep_alive(KeepAlive::default())
             .into_response();
         // Tell nginx (and other proxies that honor it) not to buffer this response:
@@ -2570,6 +2610,27 @@ mod tests {
         // Garbage (unparseable) messages are dropped, not forwarded.
         live.publish_wire("not json");
         assert!(rx.try_recv().is_err(), "garbage not forwarded");
+    }
+
+    #[test]
+    fn set_reload_tag_notifies_only_on_change() {
+        // The `reload` watch drives the viewers' config-change reload: a re-register
+        // with the same config must NOT bump it (no spurious reload on a plain
+        // reconnect); a different config must.
+        let live = Live::new(Arc::new(Frame::Screen(grid(&[]))));
+        let mut rx = live.reload.subscribe();
+        assert_eq!(*rx.borrow_and_update(), "", "starts empty");
+
+        live.set_reload_tag("cfg-a");
+        assert!(rx.has_changed().unwrap(), "new tag notifies");
+        assert_eq!(*rx.borrow_and_update(), "cfg-a");
+
+        live.set_reload_tag("cfg-a");
+        assert!(!rx.has_changed().unwrap(), "identical tag is inert");
+
+        live.set_reload_tag("cfg-b");
+        assert!(rx.has_changed().unwrap(), "changed tag notifies");
+        assert_eq!(*rx.borrow_and_update(), "cfg-b");
     }
 
     #[test]
