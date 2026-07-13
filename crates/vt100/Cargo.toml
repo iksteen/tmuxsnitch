@@ -82,8 +82,11 @@
 #     (`CSI > q`), XTMODKEYS (`CSI > … m`), private DSR (`CSI ? … n`), and
 #     modes 1004 (focus reporting), 2031 (color-scheme notifications) and
 #     7727 (urxvt application-ESC) — all keyboard/query protocol, zero render
-#     effect. Tests in tests/csi.rs (incl. noop_arms_round4),
-#     tests/escape.rs, tests/osc.rs.
+#     effect. Round 5 added sixel display/scroll modes 80 (DECSDM) and 8452
+#     (cursor right of graphic) to the ignored set — sixel is mirrored by
+#     shellglass's own interceptor with a fixed default-matching placement, so
+#     the parser has no way to act on them and needn't log them. Tests in
+#     tests/csi.rs (incl. noop_arms_round4), tests/escape.rs, tests/osc.rs.
 #   - screen.rs/grid.rs: hardening against hostile/degenerate input (release
 #     has no overflow-checks, so a bare u16 subtraction wraps instead of
 #     panicking). Guard the wide-char right-margin (`cols - width`,

@@ -385,6 +385,11 @@ fn noop_arms_round4() {
     vt.process(b"\x1b[?2031h\x1b[?2031l"); // color-scheme notifications
     vt.process(b"\x1b[?7727h\x1b[?7727l"); // urxvt application-ESC mode
     vt.process(b"\x1b[?6n\x1b[?15n\x1b[?25n"); // private DSR (DECXCPR, printer, UDK)
+                                               // sixel display/scroll modes — 80 (DECSDM), 8452 (cursor right of graphic).
+                                               // shellglass mirrors sixel via its own interceptor with a fixed default-
+                                               // matching placement, so the parser deliberately ignores these (both forms).
+    vt.process(b"\x1b[?80h\x1b[?80l");
+    vt.process(b"\x1b[?8452h\x1b[?8452l");
     vt.process(b"b");
     // nothing rendered, nothing moved beyond the two printed glyphs
     assert_eq!(vt.screen().contents(), "ab");

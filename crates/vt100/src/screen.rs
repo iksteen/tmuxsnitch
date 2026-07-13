@@ -1538,7 +1538,13 @@ impl<T> Screen<T> {
                 // 2031 — color-scheme-change notifications (contour spec),
                 //        a subscription the embedding terminal answers.
                 // 7727 — urxvt application-ESC mode, keyboard protocol.
-                [12 | 1004 | 2031 | 7727] => {}
+                // 80, 8452 — sixel display/scroll modes (DECSDM; sixel
+                //        scrolling leaves the cursor right of the graphic).
+                //        shellglass mirrors sixel through its own interceptor
+                //        (images.rs) with a fixed scroll + cursor-at-last-row
+                //        model — these modes' default (reset) state — so the
+                //        parser can't and needn't act on them.
+                [12 | 1004 | 2031 | 7727 | 80 | 8452] => {}
                 [25] => self.clear_mode(MODE_HIDE_CURSOR),
                 [47] => self.enter_alternate_grid(),
                 [1000] => {
@@ -1583,9 +1589,10 @@ impl<T> Screen<T> {
                 // shellglass: DECAWM — autowrap off (clamp at the margin)
                 [7] => self.set_mode(MODE_NO_AUTOWRAP),
                 [9] => self.clear_mouse_mode(MouseProtocolMode::Press),
-                // shellglass: blink / focus / scheme-notify / urxvt app-ESC
-                // off — the deliberately-ignored set, see decset
-                [12 | 1004 | 2031 | 7727] => {}
+                // shellglass: blink / focus / scheme-notify / urxvt app-ESC /
+                // sixel display+scroll (80, 8452) off — the deliberately-ignored
+                // set, see decset
+                [12 | 1004 | 2031 | 7727 | 80 | 8452] => {}
                 [25] => self.set_mode(MODE_HIDE_CURSOR),
                 [47] => {
                     self.exit_alternate_grid();
