@@ -763,6 +763,7 @@ pub fn app_with_cors(state: HubState, cors_origins: &[String]) -> Router {
     let mut data = Router::new()
         .route("/viewer.js", get(viewer_js).layer(compress.clone()))
         .route("/s/{slug}/events", get(events))
+        .route("/s/{slug}/snapshot", get(snapshot).layer(compress.clone()))
         .route("/s/{slug}/config", get(config).layer(compress.clone()))
         .route(
             "/s/{slug}/style.css",
@@ -1437,6 +1438,21 @@ async fn events(State(st): State<HubState>, Path(slug): Path<String>) -> Respons
     live.connect()
 }
 
+/// `GET /s/<slug>/snapshot` — the session's current state as a one-shot JSON blob,
+/// the same full-frame message a new SSE viewer receives first (no version hello, no
+/// stream). For a consumer that wants a point-in-time read without holding `/events`
+/// open; a stub session returns its operator-offline frame.
+async fn snapshot(State(st): State<HubState>, Path(slug): Path<String>) -> Response {
+    let Some(live) = st.live(&slug) else {
+        return (StatusCode::NOT_FOUND, "unknown session").into_response();
+    };
+    (
+        [(CONTENT_TYPE, "application/json")],
+        live.snapshot().to_string(),
+    )
+        .into_response()
+}
+
 /// The iframe-less embed boot object (`window.SHELLGLASS` as JSON) for a session:
 /// the client's relayed render config, or the built-in default for an unregistered
 /// (operator-offline) stub. `events` is relative — the embed resolves it against
@@ -1995,6 +2011,53 @@ mod tests {
             "b{}",
             "re-register refreshes the pushed CSS"
         );
+    }
+
+    #[tokio::test]
+    async fn snapshot_serves_the_current_full_frame() {
+        let id = session_id("secret");
+        let st = HubState::new(
+            parse_allow(&[format!("{id}:one")]).unwrap(),
+            "http://h".into(),
+        );
+        let (live, _kick) = register_session(&st, &id, "http://h", reg("a{}")).unwrap();
+        let want = live.snapshot().to_string();
+
+        let router = app(st);
+        let res = router
+            .clone()
+            .oneshot(Request::get("/s/one/snapshot").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get(CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json"),
+        );
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(
+            &body[..],
+            want.as_bytes(),
+            "serves the live snapshot verbatim"
+        );
+        // A valid full-frame message (carries the `d` block list) — directly usable.
+        let v: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert!(v.get("d").is_some(), "full-frame shape: {v}");
+
+        // An unknown slug 404s, like /events.
+        let res = router
+            .oneshot(
+                Request::get("/s/nope/snapshot")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
     #[test]

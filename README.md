@@ -140,7 +140,7 @@ curl -X DELETE -H "Authorization: Bearer $SHELLGLASS_API_KEY" https://hub/api/se
 | `POST /api/sessions` | register `{"id": <session-id>, "slug"?: <slug>}` — the public id from `print-id`, never a key. `201`; `409` id or slug taken; `400` malformed |
 | `DELETE /api/sessions/by-id/<id>` | remove by **session id**. `204`; `404` unknown |
 | `DELETE /api/sessions/by-slug/<slug>` | remove by **view slug**. `204`; `404` unknown |
-| `GET /api/sessions` | list `[{id, slug, live}]` — `live` means an operator is currently pushing |
+| `GET /api/sessions` | list `[{id, slug, live, webViewers, sshViewers}]` — `live` means an operator is currently pushing; `webViewers`/`sshViewers` are the current live viewer counts per transport |
 
 Removal by id and by slug are separate routes on purpose: an un-aliased session's
 slug **is** its id, so a single guessing route could delete the wrong thing.
@@ -150,6 +150,12 @@ immediately: until its pusher connects, `/s/<slug>` serves the built-in page in
 the operator-offline state and switches to the live session on the first push.
 `--allow` entries are ordinary registry entries — same placeholder, deletable
 over the API like any other.
+
+Each session also exposes `GET /s/<slug>/snapshot` — a one-shot JSON blob of the
+current screen state (the same full-frame message `/events` sends first, no
+version hello, no stream), for a consumer that wants a point-in-time read without
+holding an SSE connection open. It needs no auth — the slug is the read
+capability, same as the view page. `serve` exposes it at `/snapshot` too.
 
 **Lifetime.** By default the registry lives in memory: a restart forgets API
 changes and re-seeds from `--allow`. Pass `--sessions-file <path>` to make it

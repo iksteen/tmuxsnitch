@@ -306,6 +306,14 @@ impl Live {
         self.viewers[transport as usize].load(Ordering::Relaxed)
     }
 
+    /// The current state as a one-shot full-frame wire message — byte-identical to
+    /// the first frame [`Live::connect`] sends a new SSE viewer (memoized on the
+    /// snapshot, so repeated calls share one encode). Backs the `/snapshot` endpoint.
+    #[cfg(any(feature = "serve", feature = "hub"))]
+    pub fn snapshot(&self) -> Arc<str> {
+        self.state.load().full_msg()
+    }
+
     /// Subscribe a viewer: an SSE response that emits a full snapshot first, then
     /// each broadcast delta. **Takes no locks** — subscribe first, snapshot second,
     /// and skip deltas the snapshot already covers (seq ≤ snapshot's). On `Lagged`

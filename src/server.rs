@@ -55,6 +55,7 @@ pub fn app_with_cors(state: AppState, cors_origins: &[String]) -> Router {
         .route("/config", get(config).layer(compress.clone()))
         .route("/style.css", get(style_css).layer(compress.clone()))
         .route("/events", get(events))
+        .route("/snapshot", get(snapshot).layer(compress.clone()))
         .route("/viewer.js", get(viewer_js).layer(compress.clone()))
         .route("/fonts/{key}", get(font).layer(compress.clone()))
         // No compression: image formats are already compressed.
@@ -206,4 +207,14 @@ async fn index(
 
 async fn events(State(state): State<AppState>) -> Response {
     state.live.connect()
+}
+
+/// `GET /snapshot` — the current state as a one-shot JSON blob, the same full-frame
+/// message a new SSE viewer receives first (no version hello, no stream).
+async fn snapshot(State(state): State<AppState>) -> Response {
+    (
+        [(CONTENT_TYPE, "application/json")],
+        state.live.snapshot().to_string(),
+    )
+        .into_response()
 }
