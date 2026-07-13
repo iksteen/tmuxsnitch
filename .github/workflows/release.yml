@@ -96,20 +96,30 @@ jobs:
           fi
 
       - name: Package
-        run: tar -czf shellglass-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/dist shellglass
+        # All seven binaries: the universal `shellglass` plus the per-mode builds
+        # (thin mains over the same clap actions — a hub-only box wants just
+        # shellglass-hub). The default feature set builds every one, so they all
+        # sit in the profile dir; list them by name so the tarball holds the
+        # binaries only, not the dir's build artifacts.
+        run: |
+          tar -czf shellglass-${{ matrix.target }}.tar.gz \
+            -C target/${{ matrix.target }}/dist \
+            shellglass shellglass-serve shellglass-push shellglass-hub \
+            shellglass-sessions shellglass-gen-key shellglass-print-id
 
       - uses: softprops/action-gh-release@v3
         with:
           files: shellglass-${{ matrix.target }}.tar.gz
 
-      # Hand the raw binary to the docker job (Linux targets are the two image archs).
-      # if-no-files-found: error — a wrong path here must fail THIS job, not
-      # surface downstream as the docker job's "artifact not found" (which is
-      # exactly how the release→dist profile move slipped through).
+      # Hand the hub binary to the docker job (Linux targets are the two image
+      # archs): the published image is a hub server, so it ships shellglass-hub,
+      # not the universal binary. if-no-files-found: error — a wrong path here must
+      # fail THIS job, not surface downstream as the docker job's "artifact not
+      # found" (which is exactly how the release→dist profile move slipped through).
       - uses: actions/upload-artifact@v7
         with:
           name: bin-${{ matrix.target }}
-          path: target/${{ matrix.target }}/dist/shellglass
+          path: target/${{ matrix.target }}/dist/shellglass-hub
           if-no-files-found: error
 
   # Assemble the multi-arch image from the already-built Linux binaries — no second

@@ -316,8 +316,10 @@ provenance header.
     2026-07-10 (single commit: lib+cli restructure, features, bins, Docker,
     CI matrix). Feature-matched sizes: full 16.2MB → hub-only 12.9MB (the
     remainder is russh/acme/axum, its real dependencies), key utilities
-    0.9MB; the full CLI degrades to the compiled-in subcommands, so the
-    Docker image kept its `shellglass hub` entrypoint with just build flags.
+    0.9MB; the full CLI degrades to the compiled-in subcommands. (The Docker
+    image kept the universal binary at first; as of v0.21.1 it ships the
+    per-mode `shellglass-hub` as its entrypoint — hub flags pass straight
+    through, no subcommand — and the release tarball bundles all seven binaries.)
     Original rationale: today one
     binary carries every mode; a hub deployment ships the PTY backend, image
     interceptor, font machinery and SSH viewer it never runs (and their

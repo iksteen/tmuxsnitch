@@ -1,21 +1,24 @@
-# Release image: package a *pre-built* binary — no Rust compile. CI (the `docker`
-# job in .github/workflows/release.yml) drops the release binaries at
-# dist/<arch>/shellglass, where <arch> is buildx's TARGETARCH (amd64 / arm64), so
-# the arm64 image is assembled from the natively cross-compiled binary instead of a
-# multi-minute compile under QEMU emulation. For a from-source local image use the
-# plain ./Dockerfile.
+# Release image: a hub server from a *pre-built* binary — no Rust compile. The
+# published image runs a hub, so it ships the per-mode `shellglass-hub` binary as
+# its entrypoint: `docker run … <image> --bind 0.0.0.0:8080 --allow <id>:<slug>`
+# passes hub flags straight through, no subcommand. CI (the `docker` job in
+# .github/workflows/release.yml) drops the hub binary at dist/<arch>/shellglass-hub,
+# where <arch> is buildx's TARGETARCH (amd64 / arm64), so the arm64 image is
+# assembled from the natively cross-compiled binary instead of a multi-minute
+# compile under QEMU emulation. For a from-source local image use the plain
+# ./Dockerfile.
 FROM debian:bookworm-slim
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -r -u 10001 shellglass \
     && mkdir /data && chown shellglass /data
-COPY dist/${TARGETARCH}/shellglass /usr/local/bin/shellglass
-RUN chmod +x /usr/local/bin/shellglass
+COPY dist/${TARGETARCH}/shellglass-hub /usr/local/bin/shellglass-hub
+RUN chmod +x /usr/local/bin/shellglass-hub
 
 # ACME cache lives here — mount a named volume at /data to keep the account +
 # certificate across restarts (pass --acme-cache /data/acme).
 VOLUME /data
 USER shellglass
-ENTRYPOINT ["shellglass"]
+ENTRYPOINT ["shellglass-hub"]
 CMD ["--help"]
