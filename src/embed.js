@@ -22,6 +22,11 @@
 // needed. For a genuinely cross-origin embed, run the hub/serve with
 // --cors-origin <your-page-origin>.
 //
+// The iframe-less (light/shadow) modes don't touch the host page's tab title;
+// instead the session's window title rides a `shellglass-title` CustomEvent on
+// the element (event.detail = the title, "" on clear), so the host decides what
+// to do with it:  el.addEventListener("shellglass-title", e => …).
+//
 // A CLASSIC script on purpose: document.currentScript doesn't exist in modules,
 // and classic cross-origin loads need no CORS. This file stays tiny and
 // backward compatible: never remove or repurpose `data-src`, the element name,
@@ -122,7 +127,14 @@
       uiRoot: shadow ? cssRoot : wrap,
       base, // prefixes content-addressed image URLs onto the hub
       crossOriginImages: true,
-      title: () => {}, // never hijack the host page's tab title
+      // Never hijack the host page's tab title — instead surface the session's
+      // window title (OSC 0/2; "" on clear) as a `shellglass-title` event on the
+      // element, so the host can propagate it however it likes. bubbles/composed
+      // so a listener on an ancestor (or outside a shadow host) still catches it.
+      title: (t) =>
+        host.dispatchEvent(
+          new CustomEvent("shellglass-title", { detail: t, bubbles: true, composed: true }),
+        ),
       offline: (s) => {
         if (s) host.dataset.offline = s;
         else delete host.dataset.offline;

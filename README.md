@@ -356,6 +356,16 @@ terminal scales to fill that box, letterboxed (aspect preserved), staying crisp
 as it scales — so it behaves like a normal sized element. The `iframe` mode
 fills its frame (default `100%` × `24em`) the same way.
 
+**Window title.** The light/shadow modes don't touch your page's tab title.
+Instead the session's title (OSC 0/2) rides a `shellglass-title` event on the
+element, so you decide what to do with it:
+
+```js
+el.addEventListener("shellglass-title", (e) => {
+  console.log("terminal title:", e.detail); // "" when the session clears it
+});
+```
+
 **Same origin is the easy path.** Put the hub behind your reverse proxy on your
 own domain (e.g. `example.com/term/ → hub`) and point `src` at that path —
 every asset the viewer fetches is relative to `src`, so nothing is cross-origin
