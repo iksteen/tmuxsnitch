@@ -5,6 +5,17 @@
 //! `Cargo.toml`). Every binary dispatches through [`cli`], so flags and
 //! behavior can't drift between the full CLI and the per-mode ones.
 
+// musl's default allocator serializes multithreaded allocation on one lock — a
+// large regression for our threaded workload (tokio, the screen thread, the
+// newest-wins image-encode worker, per-viewer broadcast buffers). Swap in
+// mimalloc, but ONLY for the static musl release artifacts: glibc, macOS, and
+// every dev/test build keep the system allocator, byte-for-byte unchanged.
+// Defined here in the lib so all binaries (multi-call + per-mode) inherit it.
+// https://nickb.dev/blog/default-musl-allocator-considered-harmful-to-performance/
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// Build the CORS layer for the embed data routes from configured origins, or
 /// `None` for the same-origin-only default. A single `*` allows any origin (no
 /// credentials are ever used, so `*` is safe); otherwise only the exact listed

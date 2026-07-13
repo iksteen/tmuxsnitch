@@ -52,8 +52,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: x86_64-unknown-linux-gnu,  os: ubuntu-latest, cross: true  }
-          - { target: aarch64-unknown-linux-gnu, os: ubuntu-latest, cross: true  }
+          # Linux targets are musl → fully static binaries (no libc dependency,
+          # run anywhere incl. Alpine/distroless). cross's containers carry the
+          # musl toolchain + cmake that aws-lc-rs/ring need; mimalloc replaces
+          # musl's slow default allocator (see src/lib.rs).
+          - { target: x86_64-unknown-linux-musl,  os: ubuntu-latest, cross: true  }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest, cross: true  }
           # Both macOS targets build on an arm64 runner; x86_64 cross-compiles
           # (avoids the retiring Intel macos-13 image, no Docker needed).
           - { target: x86_64-apple-darwin,       os: macos-14,      cross: false }
@@ -119,11 +123,11 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: bin-x86_64-unknown-linux-gnu
+          name: bin-x86_64-unknown-linux-musl
           path: dist/amd64
       - uses: actions/download-artifact@v8
         with:
-          name: bin-aarch64-unknown-linux-gnu
+          name: bin-aarch64-unknown-linux-musl
           path: dist/arm64
 
       - uses: docker/setup-qemu-action@v4
