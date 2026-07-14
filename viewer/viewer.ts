@@ -153,6 +153,7 @@ export interface Cfg {
   defBg: string;
   fillFont: string; // base font stack for stretch-fill glyphs
   sym: [number, number, string][]; // [lo, hi, family-stack] symbol_map overrides
+  noBoost?: string[]; // families (by primary name) with the weight-boost double-draw off
 }
 
 type RGB = [number, number, number];
@@ -165,10 +166,23 @@ let cfg: Cfg;
 // math, cell fills, canvas line colors) reads cfg live — and reverted on reset.
 let baseFg = "";
 let baseBg = "";
+let noBoostSet = new Set<string>();
 export function setConfig(c: Cfg): void {
   cfg = c;
   baseFg = c.defFg;
   baseBg = c.defBg;
+  noBoostSet = new Set((c.noBoost ?? []).map((f) => f.toLowerCase()));
+}
+
+// The first family in a CSS font stack, unquoted and lowercased — the family the
+// browser tries first, and the one a per-font setting keys on.
+export function primaryFamily(stack: string): string {
+  return stack.split(",", 1)[0].trim().replace(/^["']|["']$/g, "").toLowerCase();
+}
+// Whether the weight-boost double-draw is turned off for text in this stack's
+// primary family (config `[fonts."…"] weight_boost = false`).
+function boostDisabled(stack: string): boolean {
+  return noBoostSet.size > 0 && noBoostSet.has(primaryFamily(stack));
 }
 
 // Apply a full frame's default-color overrides ([fg, bg], null = configured
@@ -1316,7 +1330,8 @@ function drawCellText(
   const font = `${cell.i ? "italic " : ""}${cell.b ? "bold " : ""}${fontPx}px ${fam}`;
   const fgRgb = cellFg(cell, curBlock);
   const fg = hex(fgRgb);
-  const k = weightBoost(fgRgb, bg ?? p.defBgRgb);
+  // Per-font opt-out: skip the double-draw for a family flagged weight_boost=false.
+  const k = boostDisabled(fam) ? 0 : weightBoost(fgRgb, bg ?? p.defBgRgb);
   const ink = isFillGlyph(cp) ? inkBox(font, cell.t!) : null;
   const overflow = ink === null && glyphOverflowsCell(cell.t!, w) && !symbolFamily(cp);
   if (ink !== null || overflow || mapped !== null || !runsOn) {

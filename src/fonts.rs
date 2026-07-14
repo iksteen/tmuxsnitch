@@ -624,6 +624,7 @@ mod tests {
             FontSource {
                 path: Some("/no/such/font.ttf".into()),
                 system: None,
+                ..Default::default()
             },
         );
         cfg.symbol_map = vec![SymbolMap {

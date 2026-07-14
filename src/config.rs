@@ -59,6 +59,12 @@ pub struct SymbolMap {
 pub struct FontSource {
     pub path: Option<PathBuf>,
     pub system: Option<String>,
+    /// Disable the renderer's weight boost (the kitty-parity double-draw that
+    /// thickens AA midtones) for text in this family. `None`/absent = boosted,
+    /// like every other font; `false` turns it off, for fonts whose hinting
+    /// already looks right and where the double-draw reads as too heavy.
+    #[serde(default)]
+    pub weight_boost: Option<bool>,
 }
 
 /// Family assumed installed system-wide for Nerd-Font symbol glyphs. It's part of

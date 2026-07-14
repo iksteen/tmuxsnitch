@@ -210,6 +210,11 @@ pub fn render_config_json(config: &Config, resolver: &Resolver) -> String {
         #[serde(rename = "lhPx")]
         lh_px: f32,
         sym: Vec<(u32, u32, String)>,
+        /// Families whose `[fonts]` entry set `weight_boost = false` — the viewer
+        /// skips the double-draw for cells whose primary family is one of these.
+        /// Omitted when none, so the common config carries nothing extra.
+        #[serde(rename = "noBoost", skip_serializing_if = "Vec::is_empty")]
+        no_boost: Vec<String>,
     }
     let stack = font_stack(config);
     let sym = resolver
@@ -223,6 +228,13 @@ pub fn render_config_json(config: &Config, resolver: &Resolver) -> String {
             )
         })
         .collect();
+    let mut no_boost: Vec<String> = config
+        .fonts
+        .iter()
+        .filter(|(_, f)| f.weight_boost == Some(false))
+        .map(|(k, _)| k.clone())
+        .collect();
+    no_boost.sort(); // HashMap order is nondeterministic; keep the emitted JSON stable
     let cfg = RenderConfig {
         def_fg: hex(DEFAULT_FG),
         def_bg: hex(DEFAULT_BG),
@@ -230,6 +242,7 @@ pub fn render_config_json(config: &Config, resolver: &Resolver) -> String {
         font_px: config.font_size_px,
         lh_px: config.line_height_px(),
         sym,
+        no_boost,
     };
     serde_json::to_string(&cfg).expect("RenderConfig serializes")
 }

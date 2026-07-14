@@ -34,10 +34,14 @@ font   = "Symbols Nerd Font"
 # Font sources are optional: any family referenced above is auto-located via
 # fontconfig and served to viewers. Add an entry only to override that — `path`
 # serves a specific file, `system = "..."` sets the fontconfig name to match when
-# it differs from the [fonts] key.
+# it differs from the [fonts] key. `weight_boost = false` turns off the renderer's
+# kitty-parity double-draw (which thickens anti-aliased midtones) for this family —
+# use it for fonts whose own hinting already looks right and where the boost reads
+# as too heavy. Default (omitted) is boosted, like every other font.
 [fonts."Symbols Nerd Font"]
 # path = "/usr/share/fonts/NerdFonts/SymbolsNerdFont-Regular.woff2"
 system = "Symbols Nerd Font"
+# weight_boost = false
 
 # Fallback family used by the default_font stack above. This entry is optional:
 # a referenced family is auto-located and served anyway. Add it only to override

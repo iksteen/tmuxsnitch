@@ -22,6 +22,7 @@ import {
   setProto,
   setReloadPage,
   noteReloadTag,
+  primaryFamily,
   apply,
   type Cfg,
   type Cell,
@@ -69,6 +70,14 @@ test("reload tag: baselines the first, reloads on a later mismatch, ignores empt
   assert.equal(reloads, 0);
   noteReloadTag("cfg-b"); // config changed (serve restart / hub re-register) — reload
   assert.equal(reloads, 1, "changed tag reloads");
+});
+
+test("primaryFamily extracts the first family, unquoted and lowercased", () => {
+  // The key a per-font weight_boost setting matches against.
+  assert.equal(primaryFamily('"Iosevka Fixed",monospace'), "iosevka fixed");
+  assert.equal(primaryFamily("'Comic Shanns', monospace"), "comic shanns");
+  assert.equal(primaryFamily("Menlo"), "menlo");
+  assert.equal(primaryFamily('"Symbols Nerd Font Mono","Iosevka Fixed"'), "symbols nerd font mono");
 });
 
 test("palette matches the xterm-256 layout", () => {

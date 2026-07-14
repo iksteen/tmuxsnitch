@@ -278,7 +278,10 @@ cached indefinitely. A single face is extracted from a `.ttc` collection; a
 font that can't be located is a soft failure (warn + skip, the browser falls
 back). In a `[fonts."Name"]` entry, `path` serves a specific file
 (`.ttf`/`.otf`/`.ttc`/`.woff`/`.woff2`) and `system = "Other Name"` maps to a
-differently-named installed family.
+differently-named installed family. `weight_boost = false` turns off the
+renderer's kitty-parity double-draw (which thickens anti-aliased midtones) for
+that family — for fonts whose own hinting already looks right and where the
+boost reads as too heavy; omit it to keep the boost, as every other font does.
 
 [`fontdb`]: https://docs.rs/fontdb
 

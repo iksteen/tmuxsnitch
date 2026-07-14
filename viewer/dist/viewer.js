@@ -22,10 +22,18 @@ export function decodeBlock(block) {
 let cfg;
 let baseFg = "";
 let baseBg = "";
+let noBoostSet = new Set();
 export function setConfig(c) {
     cfg = c;
     baseFg = c.defFg;
     baseBg = c.defBg;
+    noBoostSet = new Set((c.noBoost ?? []).map((f) => f.toLowerCase()));
+}
+export function primaryFamily(stack) {
+    return stack.split(",", 1)[0].trim().replace(/^["']|["']$/g, "").toLowerCase();
+}
+function boostDisabled(stack) {
+    return noBoostSet.size > 0 && noBoostSet.has(primaryFamily(stack));
 }
 export function applyDefaults(e) {
     const fg = resolveRgb(e?.[0]);
@@ -870,7 +878,7 @@ function drawCellText(p, cell, cp, curBlock, bg, x0, x1, w) {
     const font = `${cell.i ? "italic " : ""}${cell.b ? "bold " : ""}${fontPx}px ${fam}`;
     const fgRgb = cellFg(cell, curBlock);
     const fg = hex(fgRgb);
-    const k = weightBoost(fgRgb, bg ?? p.defBgRgb);
+    const k = boostDisabled(fam) ? 0 : weightBoost(fgRgb, bg ?? p.defBgRgb);
     const ink = isFillGlyph(cp) ? inkBox(font, cell.t) : null;
     const overflow = ink === null && glyphOverflowsCell(cell.t, w) && !symbolFamily(cp);
     if (ink !== null || overflow || mapped !== null || !runsOn) {
