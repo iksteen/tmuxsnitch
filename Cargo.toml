@@ -77,12 +77,8 @@ path = "src/bin/sessions.rs"
 required-features = ["sessions"]
 
 [[bin]]
-name = "shellglass-gen-key"
-path = "src/bin/gen_key.rs"
-
-[[bin]]
-name = "shellglass-print-id"
-path = "src/bin/print_id.rs"
+name = "shellglass-keytool"
+path = "src/bin/keytool.rs"
 
 [dependencies]
 anyhow = "1.0.103"

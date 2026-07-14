@@ -460,7 +460,7 @@ local fidelity fixes), inline images, and both renderers are exercised by CI.
 Modes are cargo features: the default build is the full multi-call `shellglass`;
 `cargo build --no-default-features --features hub` (or `serve`, `push`,
 `sessions`) yields a slim build, and per-mode binaries
-(`shellglass-{serve,push,hub,sessions,gen-key,print-id}`) wrap the same CLI.
+(`shellglass-{serve,push,hub,sessions,keytool}`) wrap the same CLI.
 Not yet: multiple sessions/panes in one view. Not planned: scrollback — the
 mirror shows the live screen, like a glance over the operator's shoulder; your
 own terminal already has history.

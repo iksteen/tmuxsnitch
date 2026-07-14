@@ -8,7 +8,7 @@ shellglass mirrors an interactive command (run in a PTY, the `script(1)` model) 
 
 ```sh
 cargo build --release            # full binary + per-mode bins at ./target/release/
-                                 # (shellglass, shellglass-{serve,push,hub,sessions,gen-key,print-id})
+                                 # (shellglass, shellglass-{serve,push,hub,sessions,keytool})
 cargo check --no-default-features --features hub   # modes are cargo features —
                                  # hub/serve/push subset builds must stay warning-free (CI matrix)
 cargo test --workspace           # unit tests incl. vendored vt100 suite (CI runs with --locked)

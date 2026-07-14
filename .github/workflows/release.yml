@@ -105,7 +105,7 @@ jobs:
           tar -czf shellglass-${{ matrix.target }}.tar.gz \
             -C target/${{ matrix.target }}/dist \
             shellglass shellglass-serve shellglass-push shellglass-hub \
-            shellglass-sessions shellglass-gen-key shellglass-print-id
+            shellglass-sessions shellglass-keytool
 
       - uses: softprops/action-gh-release@v3
         with:
