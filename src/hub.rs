@@ -825,6 +825,35 @@ pub fn app_with_cors(state: HubState, cors_origins: &[String]) -> Router {
             "/api/sessions/by-slug/{slug}",
             axum::routing::delete(api_delete_by_slug),
         )
+        // Session recordings (`--record-dir`), enumerable, retrievable, and
+        // deletable by id or slug — two namespaces, same doctrine as session
+        // delete. The by-id routes read the recording directory directly, so
+        // recordings stay reachable after their session is deleted.
+        .route(
+            "/api/sessions/by-id/{id}/recordings",
+            get(api_recordings_by_id),
+        )
+        .route(
+            "/api/sessions/by-id/{id}/recordings/{name}",
+            get(api_recording_by_id).delete(api_recording_delete_by_id),
+        )
+        .route(
+            "/api/sessions/by-slug/{slug}/recordings",
+            get(api_recordings_by_slug),
+        )
+        .route(
+            "/api/sessions/by-slug/{slug}/recordings/{name}",
+            get(api_recording_by_slug).delete(api_recording_delete_by_slug),
+        )
+        // Session-owner recording routes, authorized by the SESSION key (the
+        // same `x-shellglass-key` credential `/push` takes — never the API
+        // domain): the key names the session, so an owner can only ever
+        // reach their own files, and no id rides the path.
+        .route("/recordings", get(owner_recordings))
+        .route(
+            "/recordings/{name}",
+            get(owner_recording).delete(owner_recording_delete),
+        )
         .merge(data)
         .with_state(state)
 }
@@ -984,6 +1013,280 @@ async fn api_list(
         })
         .collect();
     api_json(StatusCode::OK, &serde_json::Value::Array(sessions))
+}
+
+/// `GET /api/sessions/by-id/{id}/recordings` — the session's stored streams.
+/// Reads the recording directory directly, so recordings outlive their
+/// session and stay enumerable by id after a delete; an id that never
+/// recorded lists empty.
+async fn api_recordings_by_id(
+    State(st): State<HubState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if let Err(code) = authorize_api(&st, &headers, peer, "/api/sessions/by-id/recordings").await {
+        return code.into_response();
+    }
+    if validate_id(&id).is_err() {
+        return api_json(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({ "error": "malformed session id" }),
+        );
+    }
+    recordings_list(&st, &id)
+}
+
+/// `GET /api/sessions/by-slug/{slug}/recordings` — resolved through the
+/// registry, so an unknown (or deleted) slug is a 404; use the by-id route
+/// for a session that no longer exists.
+async fn api_recordings_by_slug(
+    State(st): State<HubState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+) -> Response {
+    if let Err(code) = authorize_api(&st, &headers, peer, "/api/sessions/by-slug/recordings").await
+    {
+        return code.into_response();
+    }
+    match st.id_of_view(&slug) {
+        Some(id) => recordings_list(&st, &id),
+        None => api_json(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({ "error": "unknown slug" }),
+        ),
+    }
+}
+
+/// `GET /api/sessions/by-id/{id}/recordings/{name}` — one stored stream.
+async fn api_recording_by_id(
+    State(st): State<HubState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path((id, name)): Path<(String, String)>,
+) -> Response {
+    if let Err(code) = authorize_api(&st, &headers, peer, "/api/sessions/by-id/recordings").await {
+        return code.into_response();
+    }
+    if validate_id(&id).is_err() {
+        return api_json(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({ "error": "malformed session id" }),
+        );
+    }
+    fetch_recording(&st, &id, &name).await
+}
+
+/// `GET /api/sessions/by-slug/{slug}/recordings/{name}` — one stored stream,
+/// with the slug resolved through the registry like the listing route.
+async fn api_recording_by_slug(
+    State(st): State<HubState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path((slug, name)): Path<(String, String)>,
+) -> Response {
+    if let Err(code) = authorize_api(&st, &headers, peer, "/api/sessions/by-slug/recordings").await
+    {
+        return code.into_response();
+    }
+    match st.id_of_view(&slug) {
+        Some(id) => fetch_recording(&st, &id, &name).await,
+        None => api_json(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({ "error": "unknown slug" }),
+        ),
+    }
+}
+
+/// `GET /recordings` — the calling session's recordings, for the session
+/// OWNER: authorized by the session key through the same [`authorize`] path
+/// as `/push` (argon2 semaphore, fail2ban logging, registry check), which
+/// yields the session id — so the routes need no id and can't reach another
+/// session's files.
+async fn owner_recordings(
+    State(st): State<HubState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    match authorize(&st, &headers, peer, "/recordings").await {
+        Ok(id) => recordings_list(&st, &id),
+        Err(code) => code.into_response(),
+    }
+}
+
+/// `GET /recordings/{name}` — fetch one of the calling session's recordings.
+async fn owner_recording(
+    State(st): State<HubState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    match authorize(&st, &headers, peer, "/recordings").await {
+        Ok(id) => fetch_recording(&st, &id, &name).await,
+        Err(code) => code.into_response(),
+    }
+}
+
+/// `DELETE /recordings/{name}` — delete one of the calling session's
+/// recordings. Scoped to the caller's own by construction (the key names the
+/// session); the management API deletes any session's via its own routes.
+async fn owner_recording_delete(
+    State(st): State<HubState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    match authorize(&st, &headers, peer, "/recordings").await {
+        Ok(id) => delete_recording(&st, &id, &name, "its owner").await,
+        Err(code) => code.into_response(),
+    }
+}
+
+/// `DELETE /api/sessions/by-id/{id}/recordings/{name}` — management delete.
+async fn api_recording_delete_by_id(
+    State(st): State<HubState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path((id, name)): Path<(String, String)>,
+) -> Response {
+    if let Err(code) = authorize_api(&st, &headers, peer, "/api/sessions/by-id/recordings").await {
+        return code.into_response();
+    }
+    if validate_id(&id).is_err() {
+        return api_json(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({ "error": "malformed session id" }),
+        );
+    }
+    delete_recording(&st, &id, &name, "the api").await
+}
+
+/// `DELETE /api/sessions/by-slug/{slug}/recordings/{name}` — management
+/// delete, with the slug resolved through the registry like the other
+/// by-slug routes.
+async fn api_recording_delete_by_slug(
+    State(st): State<HubState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path((slug, name)): Path<(String, String)>,
+) -> Response {
+    if let Err(code) = authorize_api(&st, &headers, peer, "/api/sessions/by-slug/recordings").await
+    {
+        return code.into_response();
+    }
+    match st.id_of_view(&slug) {
+        Some(id) => delete_recording(&st, &id, &name, "the api").await,
+        None => api_json(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({ "error": "unknown slug" }),
+        ),
+    }
+}
+
+/// Delete one of session `id`'s recordings; `actor` names who asked, for the
+/// hub log. Shared by the owner route (where the key supplied the id) and
+/// the management routes (where the path did).
+async fn delete_recording(st: &HubState, id: &str, name: &str, actor: &str) -> Response {
+    let Some(dir) = &st.record_dir else {
+        return api_json(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({ "error": "recording is not enabled (--record-dir)" }),
+        );
+    };
+    if !valid_stream_name(name) {
+        return api_json(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({ "error": "unknown recording" }),
+        );
+    }
+    // Deleting a recording still being written unlinks the name; the writer
+    // finishes into the unlinked inode and the bytes vanish with it — exactly
+    // what deleting a live recording means.
+    match tokio::fs::remove_file(dir.join(id).join(name)).await {
+        Ok(()) => {
+            println!("shellglass: recording {name} of session {id} deleted by {actor}");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(_) => api_json(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({ "error": "unknown recording" }),
+        ),
+    }
+}
+
+/// List a session's recordings as `[{name, bytes}]`, oldest first (the name
+/// is the start time in unix milliseconds).
+fn recordings_list(st: &HubState, id: &str) -> Response {
+    let Some(dir) = &st.record_dir else {
+        return api_json(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({ "error": "recording is not enabled (--record-dir)" }),
+        );
+    };
+    let list: Vec<serde_json::Value> = list_streams(&dir.join(id))
+        .into_iter()
+        .map(|(name, bytes)| serde_json::json!({ "name": name, "bytes": bytes }))
+        .collect();
+    api_json(StatusCode::OK, &serde_json::Value::Array(list))
+}
+
+/// Serve one recording's bytes. The name gate doubles as path-traversal
+/// safety: only names the recorder itself generates pass.
+async fn fetch_recording(st: &HubState, id: &str, name: &str) -> Response {
+    let Some(dir) = &st.record_dir else {
+        return api_json(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({ "error": "recording is not enabled (--record-dir)" }),
+        );
+    };
+    if !valid_stream_name(name) {
+        return api_json(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({ "error": "unknown recording" }),
+        );
+    }
+    match tokio::fs::read(dir.join(id).join(name)).await {
+        Ok(bytes) => ([(CONTENT_TYPE, "application/x-ndjson")], bytes).into_response(),
+        Err(_) => api_json(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({ "error": "unknown recording" }),
+        ),
+    }
+}
+
+/// The `(name, size)` of every stream in a session's recording directory,
+/// oldest first. A missing directory (never recorded) is simply empty.
+fn list_streams(dir: &std::path::Path) -> Vec<(String, u64)> {
+    let mut v: Vec<(String, u64)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if valid_stream_name(&name)
+                && let Ok(md) = e.metadata()
+                && md.is_file()
+            {
+                v.push((name, md.len()));
+            }
+        }
+    }
+    // Numeric, not lexicographic: millisecond stems gain a digit in 2286.
+    v.sort_by_key(|(name, _)| stream_stem(name));
+    v
+}
+
+/// A recording name is exactly what the recorder generates — `<millis>.sgs` —
+/// which also makes it path-traversal-safe by construction.
+fn valid_stream_name(name: &str) -> bool {
+    name.strip_suffix(".sgs")
+        .is_some_and(|stem| !stem.is_empty() && stem.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The numeric stem of a valid stream name (its start time in unix millis).
+fn stream_stem(name: &str) -> u128 {
+    name.strip_suffix(".sgs")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
 }
 
 fn key_of(headers: &HeaderMap) -> Option<String> {
@@ -1687,6 +1990,37 @@ mod tests {
         assert!(!empty.is_allowed(&session_id("good-secret")));
     }
 
+    // Recording names: only what the recorder generates is retrievable —
+    // the same check is the path-traversal guard on the fetch route.
+    #[test]
+    fn stream_names_are_strictly_recorder_shaped() {
+        assert!(valid_stream_name("1752574530123.sgs"));
+        assert!(!valid_stream_name(".sgs"), "empty stem");
+        assert!(!valid_stream_name("123.cast"), "wrong suffix");
+        assert!(!valid_stream_name("../123.sgs"), "traversal");
+        assert!(!valid_stream_name("12a3.sgs"), "non-digit stem");
+        assert!(!valid_stream_name("123.sgs.sgs"), "digits only before .sgs");
+    }
+
+    #[test]
+    fn list_streams_sorts_numerically_and_skips_foreign_files() {
+        let dir = scratch("recordings-list");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Different digit counts: lexicographic order would invert these.
+        std::fs::write(dir.join("999.sgs"), "b").unwrap();
+        std::fs::write(dir.join("1000.sgs"), "aa").unwrap();
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+        let names: Vec<(String, u64)> = list_streams(&dir);
+        assert_eq!(
+            names,
+            vec![("999.sgs".to_string(), 1), ("1000.sgs".to_string(), 2)],
+            "numeric order, foreign files skipped"
+        );
+        // A directory that never recorded lists empty, not an error.
+        assert!(list_streams(&dir.join("nope")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // The management API's runtime mutations: --allow semantics as results.
     #[test]
     fn runtime_add_and_remove() {
@@ -2311,6 +2645,206 @@ mod tests {
         req.extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 9))));
         req
+    }
+
+    // The owner recording routes: the session KEY is the whole capability —
+    // it authorizes, names the session, and thereby scopes every operation
+    // to that session's own files.
+    #[tokio::test]
+    async fn owner_recording_routes_scope_to_the_key() {
+        let key = "owner-secret";
+        let sid = session_id(key);
+        let other = session_id("other-secret");
+        let dir = scratch("owner-recordings");
+        std::fs::create_dir_all(dir.join(&sid)).unwrap();
+        std::fs::write(dir.join(&sid).join("100.sgs"), "mine").unwrap();
+        std::fs::create_dir_all(dir.join(&other)).unwrap();
+        std::fs::write(dir.join(&other).join("200.sgs"), "theirs").unwrap();
+        let st = HubState::new(
+            parse_allow(&[sid.clone(), other.clone()]).unwrap(),
+            String::new(),
+        )
+        .with_record_dir(dir.clone());
+        let router = app(st);
+        let own_req = |method: &str, uri: &str, key: Option<&str>| {
+            let mut b = Request::builder().method(method).uri(uri);
+            if let Some(k) = key {
+                b = b.header(KEY_HEADER, k);
+            }
+            let mut req = b.body(Body::empty()).unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 9))));
+            req
+        };
+
+        // Missing and unregistered credentials, same contract as /push.
+        let res = router
+            .clone()
+            .oneshot(own_req("GET", "/recordings", None))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        let res = router
+            .clone()
+            .oneshot(own_req("GET", "/recordings", Some("not-registered")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // List: only the caller's own files.
+        let res = router
+            .clone()
+            .oneshot(own_req("GET", "/recordings", Some(key)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let list: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(list[0]["name"], "100.sgs");
+        assert_eq!(list[0]["bytes"], 4);
+        assert!(
+            list.as_array().unwrap().len() == 1,
+            "own files only: {list}"
+        );
+
+        // Fetch: own file streams; another session's name is a plain 404 —
+        // the id comes from the key, so there is no way to name their dir.
+        let res = router
+            .clone()
+            .oneshot(own_req("GET", "/recordings/100.sgs", Some(key)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], b"mine");
+        let res = router
+            .clone()
+            .oneshot(own_req("GET", "/recordings/200.sgs", Some(key)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        // Delete: own file goes (204, gone from disk), and a second delete —
+        // or a traversal-shaped name — is a 404.
+        let res = router
+            .clone()
+            .oneshot(own_req("DELETE", "/recordings/100.sgs", Some(key)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert!(!dir.join(&sid).join("100.sgs").exists(), "file removed");
+        assert!(
+            dir.join(&other).join("200.sgs").exists(),
+            "other session's file untouched"
+        );
+        let res = router
+            .clone()
+            .oneshot(own_req("DELETE", "/recordings/100.sgs", Some(key)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let res = router
+            .clone()
+            .oneshot(own_req("DELETE", "/recordings/..%2F200.sgs", Some(key)))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::NOT_FOUND,
+            "traversal shape rejected"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The management API's recording routes: same list/retrieve/delete verbs
+    // as the owner's, but reaching ANY session — by id (even a deleted
+    // session's files) or by slug (registry-resolved).
+    #[tokio::test]
+    async fn api_recording_routes_manage_any_session() {
+        let key = "api-secret";
+        let sid = session_id("pusher");
+        let dir = scratch("api-recordings");
+        std::fs::create_dir_all(dir.join(&sid)).unwrap();
+        std::fs::write(dir.join(&sid).join("100.sgs"), "one").unwrap();
+        std::fs::write(dir.join(&sid).join("200.sgs"), "two").unwrap();
+        let st = HubState::new(
+            parse_allow(&[format!("{sid}:demo")]).unwrap(),
+            String::new(),
+        )
+        .with_api_allowed([proto::api_id(key)])
+        .with_record_dir(dir.clone());
+        let router = app(st);
+
+        // Delete by slug; the file is gone, its sibling isn't.
+        let res = router
+            .clone()
+            .oneshot(api_req(
+                "DELETE",
+                "/api/sessions/by-slug/demo/recordings/100.sgs",
+                Some(key),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert!(!dir.join(&sid).join("100.sgs").exists());
+        assert!(dir.join(&sid).join("200.sgs").exists());
+
+        // Delete by id; unknown name / unknown slug are 404s.
+        let res = router
+            .clone()
+            .oneshot(api_req(
+                "DELETE",
+                &format!("/api/sessions/by-id/{sid}/recordings/200.sgs"),
+                Some(key),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert!(!dir.join(&sid).join("200.sgs").exists());
+        let res = router
+            .clone()
+            .oneshot(api_req(
+                "DELETE",
+                &format!("/api/sessions/by-id/{sid}/recordings/200.sgs"),
+                Some(key),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "already gone");
+        let res = router
+            .clone()
+            .oneshot(api_req(
+                "DELETE",
+                "/api/sessions/by-slug/nope/recordings/100.sgs",
+                Some(key),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "unknown slug");
+
+        // A session key is NOT an API credential here (domain separation).
+        let res = router
+            .clone()
+            .oneshot(api_req(
+                "DELETE",
+                &format!("/api/sessions/by-id/{sid}/recordings/100.sgs"),
+                Some("pusher"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
