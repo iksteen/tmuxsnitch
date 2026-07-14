@@ -80,7 +80,8 @@ collision or a non-URL-safe slug is a startup error.
 | `serve` | self-contained: render locally and serve the viewer over HTTP |
 | `push <url>` | client: render locally, stream frames to the hub at `<url>` |
 | `hub` | run as a hub: relay clients' pushes (no config needed) |
-| `sessions <url>` | manage a hub's sessions over its management API: list, add, remove |
+| `sessions <url>` | manage a hub's sessions over its management API: list, add, remove — plus any session's recordings |
+| `recordings <url>` | manage **your own** session recordings on a hub: list, get, delete (authorized by the session key) |
 | `gen-key` | mint a random secret and print it with its session id (`--api` for an API credential) |
 | `print-id` | print the session id for `--key` (`--api` for its API id) |
 
@@ -95,11 +96,13 @@ Flags by command:
 | `--ssh-host-key <path>` | serve, hub | OpenSSH host key for the SSH view (generated + persisted 0600 if absent) |
 | `--ssh-motd-file <path>` | serve, hub | file shown as a banner to each SSH viewer before the live view — raw bytes, all control characters preserved |
 | `--ssh-motd-delay <n>` | serve, hub | seconds to show the MOTD banner (default 5) |
-| `--key <secret>` | push, print-id | secret key (or `SHELLGLASS_KEY` env var) |
+| `--key <secret>` | push, recordings, print-id | secret key (or `SHELLGLASS_KEY` env var) |
 | `--key <api-key>` | sessions | management-API key (or `SHELLGLASS_API_KEY` env var) |
 | `--allow <id>[:<slug>]` | hub | a session id permitted to push, optionally aliased to a view-URL slug; repeat per client. Others get `403` |
 | `--api-allow <api-id>` | hub | an API id permitted to call the session-management API; repeat per caller. Without it, `/api` is off (404) |
 | `--sessions-file <path>` | hub | persist the session registry across restarts (see [Managing hub sessions](#managing-hub-sessions-over-http)) |
+| `--record-dir <dir>` | serve, hub | record sessions as timestamped native streams (see [Session recording](#session-recording)) |
+| `--no-record` | push | decline recording on a hub that records (or `SHELLGLASS_NO_RECORD=true`) |
 | `--api` | gen-key, print-id | mint/print in the API salt domain (for `--api-allow`) instead of the session domain |
 | `--id-salt <ext>` | hub, gen-key, print-id | optional per-system salt extension (or `SHELLGLASS_ID_SALT`); one value per hub, used by every command deriving ids for it — see [security notes](#security-notes) |
 | `--tls-cert <path>` / `--tls-key <path>` | hub | serve HTTPS with your own PEM cert chain + key |
@@ -129,6 +132,9 @@ export SHELLGLASS_API_KEY=<API_KEY>
 shellglass sessions https://hub add <session-id> --slug demo
 shellglass sessions https://hub list
 shellglass sessions https://hub remove --slug demo   # or: remove --id <session-id>
+shellglass sessions https://hub recordings list --slug demo         # or --id
+shellglass sessions https://hub recordings get --slug demo <name>   # -o -  for stdout
+shellglass sessions https://hub recordings delete --slug demo <name>
 
 # or any HTTP client (Authorization: Bearer <API_KEY>):
 curl -X POST -H "Authorization: Bearer $SHELLGLASS_API_KEY" \
@@ -143,6 +149,10 @@ curl -X DELETE -H "Authorization: Bearer $SHELLGLASS_API_KEY" https://hub/api/se
 | `DELETE /api/sessions/by-id/<id>` | remove by **session id**. `204`; `404` unknown |
 | `DELETE /api/sessions/by-slug/<slug>` | remove by **view slug**. `204`; `404` unknown |
 | `GET /api/sessions` | list `[{id, slug, live, webViewers, sshViewers}]` — `live` means an operator is currently pushing; `webViewers`/`sshViewers` are the current live viewer counts per transport |
+| `GET /api/sessions/by-id/<id>/recordings` | list a session's recordings `[{name, bytes}]`, oldest first (see [Session recording](#session-recording)). Works after the session is deleted — the files are the artifact |
+| `GET /api/sessions/by-slug/<slug>/recordings` | same, resolved through the registry (`404` for an unknown slug) |
+| `GET /api/sessions/by-{id,slug}/…/recordings/<name>` | fetch one recording (`application/x-ndjson`) |
+| `DELETE /api/sessions/by-{id,slug}/…/recordings/<name>` | delete one recording. `204`; `404` unknown |
 
 Removal by id and by slug are separate routes on purpose: an un-aliased session's
 slug **is** its id, so a single guessing route could delete the wrong thing.
@@ -166,6 +176,55 @@ no secrets). On startup, a loadable file **is** the registry and `--allow` is
 ignored (announced on stderr); a missing file is seeded from `--allow`; a corrupt
 file is a startup error, never a silent fall back to `--allow` — re-seeding could
 resurrect sessions the API deleted.
+
+## Session recording
+
+`--record-dir <dir>` records sessions as **timestamped native shellglass
+streams** — `.sgs` files, one JSON line per event:
+
+- a header (`{"shellglass":1,"protocol":…,"start":<unix-ms>}`), then
+- one `[ms_since_start, <message>]` line per push-protocol message, verbatim:
+  the register (page CSS, render config, the base64 font bundle), `{"blob":…}`
+  image payloads, and the wire messages themselves.
+
+A recording is the session's push transcript, so it is **self-contained**
+(fonts, template, and images included, unlike a plain terminal capture) and
+replayable at full mirror fidelity by anything that speaks the wire format.
+Consumers dispatch lines the way the hub does: the first message is the
+register, a `blob` key is an image payload, everything else is a wire message.
+
+On a **hub**, every pushed session records while its pusher is connected: one
+file per push connection at `<dir>/<session-id>/<start-millis>.sgs`, announced
+in the hub log when the connection ends, and enumerable/retrievable through the
+management API (see the route table above). A pusher declines with
+`push --no-record` (or `SHELLGLASS_NO_RECORD=true`) — the flag rides the
+register message. On **serve**, the same format records the standalone session
+(one file per run, in `<dir>` directly) with a synthesized register, so the
+file looks exactly like a hub recording.
+
+**Session owners manage their own recordings** with the session key — the
+same secret `push` uses. It both authorizes and names the session, so only
+that session's files are ever reachable, and neither an id nor a slug rides
+the request:
+
+```sh
+export SHELLGLASS_KEY=<secret>            # the push key
+shellglass recordings https://hub list
+shellglass recordings https://hub get 1752574530123.sgs        # saves ./<name>
+shellglass recordings https://hub get 1752574530123.sgs -o -   # to stdout
+shellglass recordings https://hub delete 1752574530123.sgs
+
+# or any HTTP client (x-shellglass-key: <secret>, like /push):
+curl -H "x-shellglass-key: $SHELLGLASS_KEY" https://hub/recordings
+curl -H "x-shellglass-key: $SHELLGLASS_KEY" https://hub/recordings/<name>
+curl -X DELETE -H "x-shellglass-key: $SHELLGLASS_KEY" https://hub/recordings/<name>
+```
+
+Management and owner have the same three verbs — list, retrieve, delete — the
+only difference being scope: the management API reaches any session's
+recordings, the session key only its own. Otherwise, recordings are plain
+files: rotation, retention, and cleanup are yours (a deleted session keeps
+its files, still listable by id over the management API).
 
 ## How it works
 

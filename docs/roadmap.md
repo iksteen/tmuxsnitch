@@ -442,6 +442,22 @@ at 0 in `Parser::new`.)
 
 ## Interceptor/injector track — session recording + privacy pause
 
+> **Status 2026-07-15:** consumer-side recording landed first, as
+> `--record-dir` on serve + hub (`src/record.rs`): timestamped **native
+> shellglass streams** (`.sgs` — the push transcript verbatim: register,
+> blobs, wire messages), stored hub-side per push connection and served by
+> the management API's recordings routes; `push --no-record` opts a client
+> out (an additive register key, no protocol bump). Management and owner
+> share the verbs (list/retrieve/delete), differing only in scope: the
+> management API reaches any session's recordings (first-party CLI:
+> `sessions recordings …`), while owners use the session key at
+> `/recordings[/name]` — reaching only their own — via the `recordings`
+> subcommand / `shellglass-recordings` binary. That covers hub-stored,
+> API-retrievable, full-fidelity-replayable recordings — item 1 below
+> remains only for the *byte-exact local* cast use case (asciinema
+> interchange), and item 2's pause gates native recordings for free (a
+> paused client publishes no frames, so nothing lands in the transcript).
+
 Producer-side features on the `screen` thread's interceptor tee. **Customer
 request** drives the recording half; the pause half is coupled to it (both
 gate on one flag) so they land together or recording-first with the seam

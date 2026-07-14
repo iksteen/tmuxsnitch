@@ -8,7 +8,7 @@ shellglass mirrors an interactive command (run in a PTY, the `script(1)` model) 
 
 ```sh
 cargo build --release            # full binary + per-mode bins at ./target/release/
-                                 # (shellglass, shellglass-{serve,push,hub,sessions,keytool})
+                                 # (shellglass, shellglass-{serve,push,hub,sessions,recordings,keytool})
 cargo check --no-default-features --features hub   # modes are cargo features —
                                  # hub/serve/push subset builds must stay warning-free (CI matrix)
 cargo test --workspace           # unit tests incl. vendored vt100 suite (CI runs with --locked)
@@ -65,6 +65,7 @@ The `screen` thread also runs the inline-image side channel (`images.rs`): raw P
 - `fonts.rs` — `symbol_map` codepoint→family resolution + locating font files via `fontdb` (extracts a single face from `.ttc`) so viewers render glyphs with no local install. `fc-match` is consulted only to resolve a CSS generic like `monospace`.
 - `config.rs` — TOML config (`default_font` stack, `symbol_map`, `template`). The built-in template carries an in-page CRT-effect toggle (off by default, localStorage-persisted) — there is no `theme` option.
 - `proto.rs` — client/hub wire contract.
+- `record.rs` — `--record-dir` session recording (serve + hub): timestamped native streams (`.sgs`, JSONL) that are the push transcript VERBATIM — header, then `[ms,<message>]` lines (register, blobs, wire) — so a recording is self-contained (fonts/template/images ride along) and replayable at full mirror fidelity by anything speaking the wire format. The hub taps its `/push` loop (one file per connection under `<dir>/<session-id>/`, enumerable/retrievable via `/api/…/recordings`; `push --no-record` opts out via an additive register key); serve synthesizes the same shape (register built like the push client's, then snapshot-then-ticks). The writer prints nothing (serve owns the terminal) and each line is one write call. Management and owner share the verbs — list, retrieve, delete — differing only in scope: the management API (`/api/…/recordings[/name]`, Bearer) reaches any session's files by id or slug, while **owners** use `/recordings[/name]` (GET/DELETE) authorized by the SESSION key through the same `authorize` path as `/push` — the key names the session, so those routes carry no id and can't reach another session's files. `recctl.rs` + the `recordings` subcommand/`shellglass-recordings` binary (feature `recordings`) are the first-party owner client; `sessions recordings list|get|delete (--id|--slug)` is the management-side equivalent in `apictl.rs`; the shared mechanics (capped reads, name gate, streamed no-clobber download) live in `cliutil.rs`.
 
 ## Capability model (proto.rs)
 
