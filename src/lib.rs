@@ -46,6 +46,8 @@ pub mod apictl;
 pub mod cli;
 #[cfg(feature = "push")]
 pub mod client;
+#[cfg(any(feature = "sessions", feature = "recordings"))]
+pub(crate) mod cliutil;
 #[cfg(feature = "mirror")]
 pub mod config;
 pub mod diff;
@@ -59,6 +61,8 @@ pub mod parse;
 pub mod proto;
 #[cfg(feature = "mirror")]
 pub mod pty;
+#[cfg(feature = "recordings")]
+pub mod recctl;
 #[cfg(any(feature = "serve", feature = "hub"))]
 pub mod record;
 pub mod render;

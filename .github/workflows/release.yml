@@ -96,7 +96,7 @@ jobs:
           fi
 
       - name: Package
-        # All seven binaries: the universal `shellglass` plus the per-mode builds
+        # All eight binaries: the universal `shellglass` plus the per-mode builds
         # (thin mains over the same clap actions — a hub-only box wants just
         # shellglass-hub). The default feature set builds every one, so they all
         # sit in the profile dir; list them by name so the tarball holds the
@@ -105,7 +105,7 @@ jobs:
           tar -czf shellglass-${{ matrix.target }}.tar.gz \
             -C target/${{ matrix.target }}/dist \
             shellglass shellglass-serve shellglass-push shellglass-hub \
-            shellglass-sessions shellglass-keytool
+            shellglass-sessions shellglass-recordings shellglass-keytool
 
       - uses: softprops/action-gh-release@v3
         with:

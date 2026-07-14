@@ -22,7 +22,7 @@ use crate::{config::Config, fonts, fonts::FontFile, fonts::Resolver, pty};
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
-#[cfg(any(feature = "mirror", feature = "hub"))]
+#[cfg(any(feature = "mirror", feature = "hub", feature = "recordings"))]
 use std::path::PathBuf;
 #[cfg(feature = "mirror")]
 use std::sync::Arc;
@@ -55,6 +55,8 @@ impl Cli {
             Action::Hub(args) => args.run().await,
             #[cfg(feature = "sessions")]
             Action::Sessions(args) => args.run().await,
+            #[cfg(feature = "recordings")]
+            Action::Recordings(args) => args.run().await,
         }
     }
 }
@@ -136,6 +138,66 @@ impl SessionsArgs {
     }
 }
 
+/// `shellglass recordings` — the session-owner recordings client (see
+/// [`crate::recctl`]). The credential is the SESSION key: it both authorizes
+/// and names the session, so only that session's recordings are reachable and
+/// no id/slug argument exists to get wrong.
+#[cfg(feature = "recordings")]
+#[derive(clap::Args, Debug)]
+pub struct RecordingsArgs {
+    /// Hub base URL (e.g. `https://hub.example.com`) — positional, like `push`'s.
+    url: String,
+
+    /// The session key (or `SHELLGLASS_KEY`) — the same secret `push` uses.
+    #[command(flatten)]
+    key: KeyArg,
+
+    #[command(subcommand)]
+    cmd: RecordingsCmd,
+}
+
+#[cfg(feature = "recordings")]
+#[derive(clap::Subcommand, Debug)]
+enum RecordingsCmd {
+    /// List the session's recordings (name, size), oldest first.
+    List,
+    /// Download one recording (streamed).
+    Get {
+        /// The recording's name from `list` (`<millis>.sgs`).
+        name: String,
+        /// Where to write it: a path (created fresh, never clobbered) or `-`
+        /// for stdout. Defaults to the recording's name in the current
+        /// directory.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+    /// Delete one recording.
+    Delete {
+        /// The recording's name from `list` (`<millis>.sgs`).
+        name: String,
+    },
+}
+
+#[cfg(feature = "recordings")]
+impl RecordingsArgs {
+    /// Run the session-owner recordings client (the `recordings` action).
+    ///
+    /// # Errors
+    /// Connection/auth failures and hub rejections, with the hub's own error
+    /// message where it provides one.
+    pub async fn run(self) -> Result<()> {
+        match &self.cmd {
+            RecordingsCmd::List => crate::recctl::list(&self.url, &self.key.key).await,
+            RecordingsCmd::Get { name, output } => {
+                crate::recctl::get(&self.url, &self.key.key, name, output.as_deref()).await
+            }
+            RecordingsCmd::Delete { name } => {
+                crate::recctl::delete(&self.url, &self.key.key, name).await
+            }
+        }
+    }
+}
+
 /// Each variant is one self-contained mode; clap only accepts the flags that belong
 /// to the chosen subcommand, so incompatible options can't be combined by construction.
 #[derive(clap::Subcommand, Debug)]
@@ -177,6 +239,11 @@ enum Action {
     /// Manage a hub's sessions over its management API: list, add, remove.
     #[cfg(feature = "sessions")]
     Sessions(SessionsArgs),
+
+    /// Manage YOUR OWN session recordings on a hub: list, get, delete
+    /// (authorized by the session key — the same secret `push` uses).
+    #[cfg(feature = "recordings")]
+    Recordings(RecordingsArgs),
 }
 
 /// Args for `serve` (and the `shellglass-serve` binary).
