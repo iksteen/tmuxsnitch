@@ -59,6 +59,8 @@ pub mod parse;
 pub mod proto;
 #[cfg(feature = "mirror")]
 pub mod pty;
+#[cfg(any(feature = "serve", feature = "hub"))]
+pub mod record;
 pub mod render;
 #[cfg(feature = "serve")]
 pub mod server;

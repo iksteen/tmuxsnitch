@@ -216,6 +216,13 @@ pub struct ServeArgs {
     /// Seconds to show the `--ssh-motd-file` banner before the live view starts.
     #[arg(long, value_name = "N", default_value_t = 5)]
     ssh_motd_delay: u64,
+
+    /// Record the session as a timestamped native shellglass stream into this
+    /// directory (one `<start-millis>.sgs` file per run): the full push-shaped
+    /// transcript — register, image payloads, wire messages — self-contained
+    /// and replayable at full fidelity. Off by default.
+    #[arg(long = "record-dir", value_name = "DIR")]
+    record_dir: Option<PathBuf>,
 }
 
 /// Args for `push` (and the `shellglass-push` binary).
@@ -230,6 +237,16 @@ pub struct PushArgs {
 
     #[command(flatten)]
     source: SourceArgs,
+
+    /// Decline session recording on a hub that records (`--record-dir`):
+    /// rides the register message, so the hub skips this connection.
+    /// (Falsey env parsing: unset/empty/`0`/`false` = record, else opt out.)
+    #[arg(
+        long,
+        env = "SHELLGLASS_NO_RECORD",
+        value_parser = clap::builder::FalseyValueParser::new()
+    )]
+    no_record: bool,
 }
 
 /// The terminal source, shared by `serve` and `push` (both render locally).
@@ -386,6 +403,14 @@ pub struct HubArgs {
     /// Seconds to show the `--ssh-motd-file` banner before the live view starts.
     #[arg(long, value_name = "N", default_value_t = 5)]
     ssh_motd_delay: u64,
+
+    /// Record every pushed session as timestamped native shellglass streams
+    /// under this directory (`<DIR>/<session-id>/<start-millis>.sgs`, one
+    /// verbatim push transcript per connection), enumerable/retrievable
+    /// through the management API. A pusher opts out with `push --no-record`.
+    /// Off by default.
+    #[arg(long = "record-dir", value_name = "DIR")]
+    record_dir: Option<PathBuf>,
 }
 
 /// How the hub should terminate TLS.
@@ -459,6 +484,7 @@ impl ServeArgs {
             self.ssh_host_key,
             self.ssh_motd_file,
             self.ssh_motd_delay,
+            self.record_dir,
         )
         .await
     }
@@ -471,7 +497,7 @@ impl PushArgs {
     /// # Errors
     /// Config/font failures before registration; the client loop's after.
     pub async fn run(self) -> Result<()> {
-        run_push(self.url, self.key.key, self.source).await
+        run_push(self.url, self.key.key, self.source, self.no_record).await
     }
 }
 
@@ -521,6 +547,7 @@ impl HubArgs {
                 id_salt: self.id_salt.id_salt,
                 sessions_file: self.sessions_file,
                 cors_origins: self.cors_origin,
+                record_dir: self.record_dir,
             },
             &self.bind,
             tls,
@@ -601,6 +628,7 @@ fn setup(source: &SourceArgs) -> Result<Setup> {
 /// exits, `pty.rs` exits the whole process, so the SSH connection drops and the
 /// client's own tty is restored by its ssh.
 #[cfg(feature = "serve")]
+#[allow(clippy::too_many_arguments)] // one call site, mirrors ServeArgs field-for-field
 async fn run_serve(
     source: SourceArgs,
     bind_addr: &str,
@@ -609,9 +637,17 @@ async fn run_serve(
     ssh_host_key: Option<PathBuf>,
     ssh_motd_file: Option<PathBuf>,
     ssh_motd_delay: u64,
+    record_dir: Option<PathBuf>,
 ) -> Result<()> {
     let listener = bind(bind_addr)?;
     let s = setup(&source)?;
+    // Fail loud on an unusable recording directory NOW, before raw mode: once
+    // the PTY owns the terminal nothing may print, so the recorder itself
+    // stays silent and only this up-front check can reach the operator.
+    if let Some(dir) = &record_dir {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating --record-dir {}", dir.display()))?;
+    }
     // Bind + resolve the SSH host key before the PTY takes the terminal, so the hint
     // and fingerprint print cleanly (raw mode hasn't started yet). A failure here must
     // NOT abort the HTTP mirror — log and continue without the SSH view.
@@ -689,6 +725,46 @@ async fn run_serve(
         &cfg_json,
         &s.template,
     ]));
+    // Session recording (`--record-dir`): one native-stream transcript for the
+    // process lifetime, shaped exactly like a push connection's — a register
+    // built the way the push client builds one, then snapshot + deltas
+    // (record_live). The feeder's stop sender lives to the end of this
+    // function, so the recording ends with the server. Silent by design past
+    // the startup check above (raw mode owns the terminal); a write error
+    // just ends the recording.
+    let _record_stop = record_dir.map(|dir| {
+        let (rec, _done) = crate::record::start(dir);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let live = Arc::clone(&live);
+        let (config, template, fonts) = (
+            Arc::clone(&s.config),
+            Arc::clone(&s.template),
+            Arc::clone(&s.fonts),
+        );
+        let (font_css, cfg_json) = (font_css.clone(), cfg_json.clone());
+        tokio::spawn(async move {
+            // The register carries the font bundle (MBs base64) — build it on
+            // the blocking pool so neither the async workers nor this
+            // function's caller stall on it; the stream's snapshot-first shape
+            // means a late register start loses nothing.
+            let register = tokio::task::spawn_blocking(move || {
+                let css = render::head_css(&font_css, &config);
+                serde_json::to_string(&crate::proto::RegisterBody {
+                    css,
+                    render_cfg: cfg_json,
+                    template: (*template).clone(),
+                    fonts: crate::fonts::font_assets(&fonts),
+                    font_css,
+                    no_record: false,
+                })
+                .expect("register body serializes")
+            })
+            .await
+            .expect("register build task");
+            crate::record::record_live(live, register, rec, rx).await;
+        });
+        tx
+    });
     let state = AppState {
         font_css: Arc::new(font_css),
         config: s.config,
@@ -706,7 +782,7 @@ async fn run_serve(
 /// command) start only once the hub has accepted a registration — `client::run`
 /// invokes the closure after the first successful register.
 #[cfg(feature = "push")]
-async fn run_push(url: String, key: String, source: SourceArgs) -> Result<()> {
+async fn run_push(url: String, key: String, source: SourceArgs, no_record: bool) -> Result<()> {
     // The client derives NO ids: authorization sends the key itself, font URLs
     // in the pushed CSS are page-relative, and the authoritative view URL is
     // announced in the HUB's log on connect — the client could only guess it
@@ -715,9 +791,16 @@ async fn run_push(url: String, key: String, source: SourceArgs) -> Result<()> {
     println!("shellglass: pushing live to {base}");
     let s = setup(&source)?;
     let sixel_compat = source.sixel_compat;
-    client::run(url, key, s.config, s.resolver, s.fonts, s.template, || {
-        pty::start(&source.command(), sixel_compat)
-    })
+    client::run(
+        url,
+        key,
+        s.config,
+        s.resolver,
+        s.fonts,
+        s.template,
+        no_record,
+        || pty::start(&source.command(), sixel_compat),
+    )
     .await
 }
 
@@ -737,6 +820,7 @@ struct HubSetup {
     id_salt: String,
     sessions_file: Option<PathBuf>,
     cors_origins: Vec<String>,
+    record_dir: Option<PathBuf>,
 }
 
 /// Serve the hub, terminating TLS per `tls`. Plain HTTP keeps the `SO_REUSEADDR`
@@ -769,6 +853,12 @@ async fn serve_hub(
     let mut hub_state = hub::HubState::new(setup.allow, base)
         .with_api_allowed(setup.api_allow)
         .with_id_salt(setup.id_salt);
+    if let Some(dir) = setup.record_dir {
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("creating --record-dir {}", dir.display()))?;
+        println!("shellglass: recording sessions under {}", dir.display());
+        hub_state = hub_state.with_record_dir(dir);
+    }
     if let Some(path) = setup.sessions_file {
         hub_state = hub_state.with_persistence(path);
         // Materialize the seed (file absent) / normalize the loaded file now,

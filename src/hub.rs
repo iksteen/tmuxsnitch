@@ -367,6 +367,12 @@ pub struct HubState {
     /// Fires once on SIGTERM: each open `/push` WebSocket sends a Close and returns
     /// so pushers detect the shutdown immediately (see `main`'s graceful path).
     shutdown: broadcast::Sender<()>,
+    /// Record pushed sessions as timestamped native streams under this
+    /// directory (`--record-dir`): one `<dir>/<session-id>/<start-millis>.sgs`
+    /// verbatim push transcript per connection, written by [`crate::record`]
+    /// and served by the management API's recordings routes. `None` =
+    /// recording off.
+    record_dir: Option<Arc<std::path::PathBuf>>,
 }
 
 impl HubState {
@@ -383,6 +389,7 @@ impl HubState {
             id_salt: "".into(),
             hash_slots: Arc::new(Semaphore::new(HASH_SLOTS)),
             shutdown,
+            record_dir: None,
         };
         // Every seeded --allow entry gets its placeholder immediately: the
         // view URL works (operator-offline) before any pusher connects.
@@ -445,6 +452,14 @@ impl HubState {
     #[must_use]
     pub fn with_persistence(mut self, path: std::path::PathBuf) -> Self {
         self.persist_path = Some(Arc::new(path));
+        self
+    }
+
+    /// Record pushed sessions as native streams under `dir` (`--record-dir`).
+    /// Builder style; call before the state is cloned into the router.
+    #[must_use]
+    pub fn with_record_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.record_dir = Some(Arc::new(dir));
         self
     }
 
@@ -1110,6 +1125,12 @@ async fn push_session(st: HubState, id: String, base: String, mut socket: WebSoc
     let mut live: Option<Arc<diff::Live>> = None;
     // The session's kick channel (management-API delete), armed at register.
     let mut kick: Option<broadcast::Receiver<()>> = None;
+    // Session recording (`--record-dir`, declinable in the client's register):
+    // armed at register, then fed every Text message VERBATIM — the recording
+    // is the timestamped push transcript itself (register, blobs, wire), no
+    // hub-side interpretation. Dropping the feeder when this function returns
+    // (any exit path) closes the file with the connection.
+    let mut recorder: Option<crate::record::Recorder> = None;
     loop {
         tokio::select! {
             _ = shutdown.recv() => {
@@ -1169,10 +1190,33 @@ async fn push_session(st: HubState, id: String, base: String, mut socket: WebSoc
                         // AwaitingRegister: the first message must parse as a
                         // RegisterBody; anything else is a protocol error → close.
                         None => match serde_json::from_str::<proto::RegisterBody>(t.as_str()) {
-                            Ok(reg) => match register_session(&st, &id, &base, reg) {
+                            Ok(reg) => {
+                                let no_record = reg.no_record;
+                                match register_session(&st, &id, &base, reg) {
                                 Some((l, k)) => {
                                     live = Some(l);
                                     kick = Some(k);
+                                    if !no_record && let Some(dir) = &st.record_dir {
+                                        let (rec, done) = crate::record::start(dir.join(&id));
+                                        rec.event(t.as_str()); // the register, verbatim
+                                        recorder = Some(rec);
+                                        // The writer stays silent (shared with
+                                        // serve, where the terminal is owned);
+                                        // the hub's log is ours to use.
+                                        let sid = id.clone();
+                                        tokio::spawn(async move {
+                                            match done.await {
+                                                Ok(Ok(path)) => println!(
+                                                    "shellglass: session {sid} recorded to {}",
+                                                    path.display()
+                                                ),
+                                                Ok(Err(e)) => eprintln!(
+                                                    "shellglass: recording session {sid} failed: {e:#}"
+                                                ),
+                                                Err(_) => {}
+                                            }
+                                        });
+                                    }
                                 }
                                 // Deleted between the upgrade's authorize and this
                                 // register — the API raced the connect; close.
@@ -1183,7 +1227,7 @@ async fn push_session(st: HubState, id: String, base: String, mut socket: WebSoc
                                     let _ = socket.send(Message::Close(None)).await;
                                     break;
                                 }
-                            },
+                            }},
                             Err(e) => {
                                 eprintln!(
                                     "shellglass: push {id} sent an invalid register message ({e}) — closing"
@@ -1198,6 +1242,12 @@ async fn push_session(st: HubState, id: String, base: String, mut socket: WebSoc
                         // publish_wire drops malformed or out-of-sync messages
                         // rather than the whole session.
                         Some(l) => {
+                            // Recorded before dispatch: the transcript is the
+                            // stream as received (a message publish_wire would
+                            // drop is dropped by a player the same way).
+                            if let Some(r) = &recorder {
+                                r.event(t.as_str());
+                            }
                             if t.as_str().starts_with("{\"blob\":") {
                                 store_blob(&st, &id, l, t.as_str());
                             } else {
@@ -1844,6 +1894,7 @@ mod tests {
             template: String::new(),
             render_cfg: String::new(),
             fonts: vec![],
+            no_record: false,
         }
     }
 
@@ -1861,6 +1912,7 @@ mod tests {
                     b64: base64::engine::general_purpose::STANDARD.encode(bytes),
                 })
                 .collect(),
+            no_record: false,
         }
     }
 
@@ -2566,6 +2618,7 @@ mod tests {
             template: String::new(),
             render_cfg: r##"{"defFg":"#111","defBg":"#222","fillFont":"Foo","fontPx":14,"lhPx":16.8,"sym":[]}"##.into(),
             fonts: vec![],
+            no_record: false,
         };
         register_session(&st, &sid, "http://h", reg).unwrap();
 

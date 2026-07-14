@@ -81,6 +81,13 @@ pub struct RegisterBody {
     pub render_cfg: String,
     #[serde(default)]
     pub fonts: Vec<FontAsset>,
+    /// The pusher declines session recording (`push --no-record` /
+    /// `SHELLGLASS_NO_RECORD`): a hub running with `--record-dir` skips this
+    /// connection. Additive and `default` (false): an older client's register
+    /// omits it and records; an older hub ignores it (it has no recorder
+    /// anyway) — no protocol bump.
+    #[serde(default)]
+    pub no_record: bool,
 }
 
 /// Client→hub upload of one inline-image payload, sent on the `/push`

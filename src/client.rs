@@ -51,7 +51,7 @@ const INITIAL_SEND_TIMEOUT: Duration = Duration::from_secs(60);
 /// Backoff between reconnect attempts.
 const RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
 
-// ponytail: 7 positional args, one call site — an args struct would be ceremony
+// ponytail: 8 positional args, one call site — an args struct would be ceremony
 // for no reader benefit. Bundle them if a second caller ever appears.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -61,6 +61,8 @@ pub async fn run(
     resolver: Arc<Resolver>,
     fonts: Arc<Vec<FontFile>>,
     template: Arc<String>,
+    // Decline hub-side session recording (rides the register message).
+    no_record: bool,
     // Starts the PTY backend (raw mode, the command itself). Invoked only after the
     // hub has accepted the WebSocket upgrade, so a down or misconfigured hub is
     // reported — and retried — before the command runs and the terminal is taken over.
@@ -85,6 +87,7 @@ pub async fn run(
         template: (*template).clone(),
         render_cfg: render::render_config_json(&config, &resolver),
         fonts: fonts::font_assets(&fonts),
+        no_record,
     };
     let reg_json = serde_json::to_string(&reg).context("encoding register payload")?;
     // Fail fast on an over-limit register rather than looping forever: the hub caps a
