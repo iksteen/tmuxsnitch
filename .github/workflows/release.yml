@@ -96,7 +96,7 @@ jobs:
           fi
 
       - name: Package
-        # All eight binaries: the universal `shellglass` plus the per-mode builds
+        # All seven binaries: the universal `shellglass` plus the per-mode builds
         # (thin mains over the same clap actions — a hub-only box wants just
         # shellglass-hub). The default feature set builds every one, so they all
         # sit in the profile dir; list them by name so the tarball holds the
