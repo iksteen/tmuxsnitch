@@ -693,7 +693,14 @@ function watchZoom(): void {
 function attachCanvas(cols: number, rows: number, screenDiv: HTMLElement): void {
   const c = document.createElement("canvas");
   // Overlay .screen exactly; the backing store is sized in sizeCanvas().
-  c.style.cssText = "position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none";
+  // -webkit-font-smoothing: WebKit applies macOS font smoothing (stem
+  // darkening) to canvas fillText and honors this property on the element;
+  // "antialiased" pins plain grayscale coverage — the baseline weightBoost's
+  // k-fit assumes and what Skia/FreeType engines already emit. Without it,
+  // Safari pre-thickens and the boost double-applies (smudge at 1x DPR).
+  c.style.cssText =
+    "position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;" +
+    "-webkit-font-smoothing:antialiased";
   screenDiv.appendChild(c);
   canvasEl = c;
   ctx = c.getContext("2d");

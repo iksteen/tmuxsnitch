@@ -376,7 +376,9 @@ function watchZoom() {
 }
 function attachCanvas(cols, rows, screenDiv) {
     const c = document.createElement("canvas");
-    c.style.cssText = "position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none";
+    c.style.cssText =
+        "position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;" +
+            "-webkit-font-smoothing:antialiased";
     screenDiv.appendChild(c);
     canvasEl = c;
     ctx = c.getContext("2d");
