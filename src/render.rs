@@ -66,8 +66,8 @@ const DEFAULT_FG: (u8, u8, u8) = (0xd0, 0xd0, 0xd0);
 #[cfg(feature = "mirror")]
 const DEFAULT_BG: (u8, u8, u8) = (0x00, 0x00, 0x00);
 
-/// Built-in viewer template (n3o-style dark chrome, with an in-page CRT-effect
-/// toggle, off by default). A template is a full HTML document with three tokens
+/// Built-in viewer template (n3o-style dark chrome).
+/// A template is a full HTML document with three tokens
 /// the renderer fills: `{{style}}` (the generated terminal CSS + `@font-face`),
 /// `{{screen}}` (the `#screen` div the live renderer fills), and `{{script}}`
 /// (the scripts that boot it). Override via `--config`'s `template`.
@@ -359,11 +359,6 @@ mod tests {
         for tok in ["{{style}}", "{{screen}}", "{{script}}"] {
             assert!(DEFAULT_TEMPLATE.contains(tok), "template missing {tok}");
         }
-        // The CRT toggle ships off: effects only when the viewer opts in.
-        assert!(
-            DEFAULT_TEMPLATE.contains("id=\"crt\">"),
-            "CRT checkbox must not default to checked"
-        );
         // The favicon link is RELATIVE (resolves under the page's directory —
         // `/` standalone, `/s/<slug>/` hub — so a subpath mount works), and
         // the asset is baked in.

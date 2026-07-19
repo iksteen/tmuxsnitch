@@ -7,8 +7,7 @@
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <!-- Tokens filled at serve time (double-brace style/screen/script): style = terminal
      CSS + @font-face; screen = the live #screen div the renderer fills; script = the
-     scripts that boot it. The nav carries a pure-CSS CRT toggle (scanlines, phosphor
-     bloom, flicker) — off by default, remembered in localStorage. -->
+     scripts that boot it. -->
 {{style}}
 <style>
 :root {
@@ -53,9 +52,6 @@ body[data-offline] .dot { background:#ef4444; animation:pulse-off 1s infinite; }
 }
 .nav .meta { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.5px; color:var(--text-mute); }
 .nav-right { display:flex; align-items:center; gap:16px; }
-.toggle { display:inline-flex; align-items:center; gap:7px; cursor:pointer; user-select:none;
-  font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.5px; color:var(--text-mute); }
-.toggle input { accent-color:var(--accent); margin:0; }
 .stage { position:relative; display:flex; justify-content:center; align-items:center;
   flex:1; min-height:0; padding:clamp(14px,2vw,24px) clamp(16px,5vw,40px); }
 .glow {
@@ -76,25 +72,14 @@ footer { max-width:1140px; width:100%; margin:0 auto; padding:14px clamp(16px,5v
 .stats { font-family:ui-monospace,Menlo,Consolas,monospace; font-variant-numeric:tabular-nums;
   white-space:nowrap; color:var(--text-mute); }
 
-/* ── CRT tube ─────────────────────────────────────────────────────────────
-   The panel is styled as a curved glass tube (thick bezel, deep corner
-   vignette, rounded glass). Four stacked non-interactive overlay layers give
-   the shader: .crt-scan (darkening scanlines, multiply), .crt-grille (RGB
-   aperture mask, screen), .crt-bar (bright rolling refresh band), .crt-vig
-   (glass sheen + vignette). #screen itself gets phosphor bloom + a chromatic
-   fringe. Overlays are pointer-events:none so the text stays selectable.
-   The overlays live in .tube WITH the terminal — the fit script scales the
-   tube, so scanlines/grille are phosphor-space: they magnify and pan with the
-   content instead of staying glued to the glass at 1 screen pixel. */
-.stage { perspective:1600px; }
-/* The fit scale is `transform` on .tube — paint-time, so mobile WebKit's text
+/* ── Terminal panel ───────────────────────────────────────────────────────
+   The fit scale is `transform` on #screen — paint-time, so mobile WebKit's text
    autosizer never sees the tiny effective font size (CSS `zoom` feeds it, and
    it "helpfully" boosts the ghost text ~4x, warping the whole box; the boost
    ignores text-size-adjust). transform doesn't affect layout, so .fitbox
    carries the scaled dimensions (set by the fit script) for the panel to
    tighten around and the pan to scroll. */
 .fitbox { width:fit-content; }
-.tube { position:relative; width:fit-content; transform-origin:0 0; }
 .panel {
   /* border-box so max-width/height:100% cap the padded box — content-box would
      let the panel's own padding overshoot the stage into the footer.
@@ -107,81 +92,23 @@ footer { max-width:1140px; width:100%; margin:0 auto; padding:14px clamp(16px,5v
   touch-action:none; /* we own touch: one finger pans, two-finger pinch zooms */
   padding:26px 30px; border:none; border-radius:26px / 34px;
   background:#040705;
-  box-shadow:
-    0 0 0 10px #05070a, 0 0 0 11px #1c2530,   /* bezel */
-    0 40px 90px -20px rgba(0,0,0,.9),
-    inset 0 0 90px 24px rgba(0,0,0,.95),        /* deep corner vignette */
-    inset 0 0 40px rgba(60,255,170,.06);        /* faint phosphor wash */
-  filter:saturate(1.25) contrast(1.06);
-  transform:rotateX(.6deg);
-}
-#screen {
-  filter:brightness(1.12) contrast(1.08) saturate(1.3);
-  text-shadow:
-    -1px 0 rgba(255,45,85,.45),
-     1px 0 rgba(45,205,255,.45),
-     0 0 6px rgba(120,255,180,.6),
-     0 0 16px rgba(80,255,160,.35);
-}
-.crt-scan, .crt-grille, .crt-bar, .crt-vig {
-  content:""; position:absolute; inset:0; z-index:5; pointer-events:none; border-radius:inherit;
-}
-/* Scanlines: darken every other 1px line — the visible interlace. */
-.crt-scan {
-  background:repeating-linear-gradient(0deg,
-    rgba(0,0,0,.55) 0 1px, rgba(0,0,0,0) 1px 3px);
-  mix-blend-mode:multiply;
-  animation:crt-flicker 90ms steps(2) infinite;
-}
-/* Aperture grille: vertical R/G/B phosphor stripes, adding light. */
-.crt-grille {
-  background:repeating-linear-gradient(90deg,
-    rgba(255,0,60,.22) 0 1px, rgba(0,255,90,.14) 1px 2px, rgba(60,120,255,.22) 2px 3px);
-  mix-blend-mode:screen; opacity:.7;
-}
-/* Bright refresh band sweeping top→bottom, continuously. Painted as a moving
-   background (not a positioned element) so it never extends the panel's scroll. */
-.crt-bar {
-  background:linear-gradient(180deg,
-    rgba(180,255,210,0) 0, rgba(180,255,210,.14) 45%, rgba(120,255,190,.22) 50%,
-    rgba(180,255,210,.14) 55%, rgba(180,255,210,0) 100%);
-  background-size:100% 26%; background-repeat:no-repeat; mix-blend-mode:screen;
-  animation:crt-sweep 5s linear infinite;
-}
-/* Curved-glass sheen (top-left) over the corner vignette. */
-.crt-vig {
-  background:
-    radial-gradient(120% 90% at 28% 8%, rgba(255,255,255,.06) 0, transparent 42%),
-    radial-gradient(140% 140% at 50% 50%, transparent 55%, rgba(0,0,0,.6) 100%);
-}
-@keyframes crt-sweep { 0% { background-position:0 -30%; } 100% { background-position:0 130%; } }
-@keyframes crt-flicker { 0% { opacity:.86; } 100% { opacity:1; } }
-@media (prefers-reduced-motion: reduce) {
-  .crt-scan, .crt-bar, .dot, body[data-offline] .dot, .offline text { animation:none; }
-}
-/* Header toggle: unchecking "CRT" flattens the tube — hide the overlays and drop
-   phosphor bloom, chromatic fringe, glass curve + vignette, leaving plain text.
-   Pure CSS via :has(); the checkbox state is persisted to localStorage below. */
-body:has(#crt:not(:checked)) .crt-scan,
-body:has(#crt:not(:checked)) .crt-grille,
-body:has(#crt:not(:checked)) .crt-bar,
-body:has(#crt:not(:checked)) .crt-vig { display:none; }
-body:has(#crt:not(:checked)) .panel {
-  filter:none; transform:none;
   box-shadow:0 40px 90px -20px rgba(0,0,0,.9), 0 0 0 1px var(--border);
 }
-body:has(#crt:not(:checked)) #screen { filter:none; text-shadow:none; }
+@media (prefers-reduced-motion: reduce) {
+  .dot, body[data-offline] .dot, .offline text { animation:none; }
+}
 /* Hug the terminal so the panel shrink-wraps it, and so the ResizeObserver in the
-   fit script below fires on grid width changes too (not just height). */
-#screen { width:fit-content; }
+   fit script below fires on grid width changes too (not just height). Origin 0 0
+   so the scaled box stays anchored at .fitbox's top-left. */
+#screen { width:fit-content; transform-origin:0 0; }
 
 /* ── Offline takeover ───────────────────────────────────────────────────────
    When the stream isn't live, cover the terminal with a big label: "HUB OFFLINE"
    (viewer.ts can't reach the server) or "OPERATOR OFFLINE" (server up, push source
    gone). The label is an SVG that scales to fill the panel — textLength fills the
    width, font-size fills the height, preserveAspectRatio letterboxes the rest — so
-   it's dramatic at any terminal size with no measuring JS. Sits above the CRT
-   overlays (z-index) and paints an opaque backdrop, so it replaces the frozen
+   it's dramatic at any terminal size with no measuring JS. Sits above the
+   terminal (z-index) and paints an opaque backdrop, so it replaces the frozen
    screen rather than layering over it. */
 .offline {
   position:absolute; inset:0; z-index:20; display:none;
@@ -205,40 +132,13 @@ body[data-offline="operator"] .offline .off-op { display:block; }
   <span class="brand"><span class="dot"></span><span class="grad">shellglass</span></span>
   <span class="nav-right">
     <span class="meta">live terminal mirror</span>
-    <label class="toggle"><input type="checkbox" id="crt">CRT</label>
   </span>
 </nav>
-<script>
-// Persist the nav toggles across reloads. Runs before <main> so the stored state
-// is applied before the panel paints (no flash of effects). localStorage is wrapped —
-// a viewer with it disabled still gets working toggles, just not remembered ones.
-// A query param (`?crt`) flips the default, but only when there is no stored
-// choice — an explicit toggle always wins over the URL.
-(() => {
-  const params = new URLSearchParams(location.search);
-  const wire = (id, key, urlOn) => {
-    const c = document.getElementById(id);
-    let stored = null;
-    try { stored = localStorage.getItem(key); } catch (e) {}
-    c.checked = stored ? stored === 'on' : urlOn;
-    c.addEventListener('change', () => {
-      try { localStorage.setItem(key, c.checked ? 'on' : 'off'); } catch (e) {}
-    });
-  };
-  wire('crt', 'shellglass-crt', params.has('crt'));
-})();
-</script>
 <main class="stage">
   <div class="glow"></div>
   <div class="panel">
     <div class="fitbox">
-    <div class="tube">
       {{screen}}
-      <div class="crt-grille"></div>
-      <div class="crt-scan"></div>
-      <div class="crt-bar"></div>
-      <div class="crt-vig"></div>
-    </div>
     </div>
     <div class="offline" aria-hidden="true">
       <svg class="off-hub" viewBox="0 0 1000 170" preserveAspectRatio="xMidYMid meet">
@@ -265,31 +165,29 @@ body[data-offline="operator"] .offline .off-op { display:block; }
 // the pan scrolls. The base factor fits the stage between nav and footer (up
 // or down), and the user factor (pinch / ctrl+wheel, 1..8, anchored at the
 // cursor) magnifies on top. Zoomed-in content overflows *inside* the panel
-// (overflow:auto, capped at the stage via max-width/height:100%), so the tube
+// (overflow:auto, capped at the stage via max-width/height:100%), so the panel
 // never grows past nav or footer; panning is native scroll
 // (wheel/trackpad/scrollbars) plus middle-drag — left-drag stays free for text
 // selection. Re-fits when the grid resizes (#screen is fit-content, so a new
 // frame size moves its box) or the viewport does (the stage resizes). Stable:
-// the stage is viewport-driven (flex-basis 0), so zooming the tube can't
-// change the space we measure against. The scale goes on .tube (terminal +
-// CRT overlays) so the shader layers scale and pan with the content. Runs
-// after <footer> so the first measurement already sees the final page layout.
+// the stage is viewport-driven (flex-basis 0), so zooming the terminal can't
+// change the space we measure against. Runs after <footer> so the first
+// measurement already sees the final page layout.
 (() => {
   const scr = document.getElementById('screen');
-  const tube = document.querySelector('.tube');
   const fitbox = document.querySelector('.fitbox');
   const stage = document.querySelector('.stage');
   const panel = document.querySelector('.panel');
   let fitZ = 1; // fit-to-stage factor (grows or shrinks), from the layout
   let userZ = 1; // user magnification (≥ 1), from pinch / ctrl+wheel
-  let nat = null; // the tube's natural (unscaled) size, from the last fit()
+  let nat = null; // the terminal's natural (unscaled) size, from the last fit()
   const pads = (el, a, b) => {
     const cs = getComputedStyle(el);
     return parseFloat(cs[a]) + parseFloat(cs[b]);
   };
   const apply = () => {
     const z = fitZ * userZ;
-    tube.style.transform = 'scale(' + z + ')';
+    scr.style.transform = 'scale(' + z + ')';
     if (nat) {
       fitbox.style.width = nat.w * z + 'px';
       fitbox.style.height = nat.h * z + 'px';
@@ -307,7 +205,7 @@ body[data-offline="operator"] .offline .off-op { display:block; }
     // Measuring unscaled momentarily reshapes the content, which clamps the
     // panel's scroll position — capture and restore it around the measurement.
     const sl = panel.scrollLeft, st = panel.scrollTop;
-    tube.style.transform = 'none';
+    scr.style.transform = 'none';
     fitbox.style.width = fitbox.style.height = 'auto';
     const availW = stage.clientWidth - pads(stage, 'paddingLeft', 'paddingRight')
       - pads(panel, 'paddingLeft', 'paddingRight');
@@ -318,7 +216,7 @@ body[data-offline="operator"] .offline .off-op { display:block; }
     // scrollbars. Grows as well as shrinks: a terminal smaller than the stage
     // is scaled UP to fill it, not left at natural size. The canvas re-rasterizes
     // crisp at the new scale on sg-zoom, so upscaling isn't a blurry bitmap.
-    const b = tube.getBoundingClientRect();
+    const b = scr.getBoundingClientRect();
     nat = { w: b.width, h: b.height };
     const z = Math.min(availW / b.width, availH / b.height);
     fitZ = z * 0.999;

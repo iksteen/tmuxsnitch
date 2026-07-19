@@ -10,7 +10,6 @@
   .screen { position:relative; white-space:pre; overflow:hidden; }
   .row { position:relative; height:var(--lh); contain:layout style; }
 </style></head><body>
-<input type="checkbox" id="crt" hidden>
 <div id="screen"></div>
 <script type="module">
 import { setConfig, apply, benchInit, benchFlush, benchRedraw, benchCursorStep, benchBlinkPhase, benchWeight, benchRuns, benchPinch, weightBoost } from "./viewer.js";
@@ -490,29 +489,5 @@ if (MODE === "pinch") {
   document.body.style.background = pass ? "#00ff00" : "#ff0000";
 }
 
-// ?mode=crt: canvas phosphor self-check — flipping the #crt toggle on must
-// add bloom ink to the canvas rows (blurred lighter self-composite), and off
-// must remove it. Same green/red screenshot convention as ?mode=links.
-if (MODE === "crt") {
-  const canvas = document.querySelector("#screen canvas");
-  const ink = () => {
-    const px = canvas.getContext("2d")
-      .getImageData(0, 0, canvas.width, canvas.height).data;
-    let t = 0;
-    for (let i = 3; i < px.length; i += 4) t += px[i];
-    return t;
-  };
-  const off = ink();
-  const crt = document.getElementById("crt");
-  crt.checked = true;
-  crt.dispatchEvent(new Event("change")); // crtOn()'s listener → redrawCanvasAll
-  const on = ink();
-  crt.checked = false;
-  crt.dispatchEvent(new Event("change"));
-  const offAgain = ink();
-  const pass = on > off * 1.05 && Math.abs(offAgain - off) < off * 0.01;
-  document.getElementById("screen").style.display = "none";
-  document.body.style.background = pass ? "#00ff00" : "#ff0000";
-}
 document.title = "verified-ready";
 </script></body></html>

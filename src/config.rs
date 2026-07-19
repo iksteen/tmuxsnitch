@@ -35,7 +35,7 @@ pub struct Config {
 
     /// Path to a custom viewer HTML template. Tokens `{{style}}` / `{{screen}}` /
     /// `{{script}}` are filled in (see [`crate::render::DEFAULT_TEMPLATE`]). Omit
-    /// for the built-in page (which carries its own in-page CRT-effect toggle).
+    /// for the built-in page.
     #[serde(default)]
     pub template: Option<PathBuf>,
 }
@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn template_defaults_to_builtin_page() {
-        // No config → the built-in page (which carries the CRT toggle itself).
+        // No config → the built-in page.
         let def = Config::default().template_html().unwrap();
         assert_eq!(def, crate::render::DEFAULT_TEMPLATE);
 

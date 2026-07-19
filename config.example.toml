@@ -9,8 +9,8 @@ default_font = ["monospace", "Symbols Nerd Font Mono"]
 font_size_px = 14.0
 line_height  = 1.2
 
-# Custom viewer page. The built-in page (used when unset) carries a CRT-effect
-# toggle in its nav, off by default. The file is a full HTML document with
+# Custom viewer page (the built-in page is used when unset). The file is a
+# full HTML document with
 # three tokens filled at serve time: {{style}} (terminal CSS + @font-face),
 # {{screen}} (the live #screen div — keep its id), {{script}} (the scripts
 # that boot the live renderer). Everything else is yours.

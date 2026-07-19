@@ -626,14 +626,10 @@ the DOM mode was removed entirely.**
 6. ✅ **Over-wide fallback glyphs** (landed 2026-07-10, `canvas-track-a`):
    `drawRowStorm` drops the `fillText` maxWidth clamp for
    `glyphOverflowsCell` cells (DOM lets ❯ overflow; canvas now does too).
-7. ✅ **Per-mode CRT** (landed 2026-07-10, `canvas-track-a`): discovery —
-   the scanline/grille/sweep/vignette overlays and the `#screen` filter are
-   blend-mode layers that already composite over the canvas; only the
-   text-shadow phosphor is text-bound. Canvas rows re-create exactly that:
-   a per-row blurred lighter self-composite in `drawRowStorm` (per-row, not
-   per-flush, so undirtied rows aren't re-brightened). Driven by the same
-   `#crt` checkbox; the DOM's chromatic fringe stays text-shadow-only.
-   Verified: `verify.py` `?mode=crt` self-check.
+7. ✅ **Per-mode CRT** (landed 2026-07-10, `canvas-track-a`; REMOVED
+   2026-07-19): the whole CRT effect — template overlays, `#crt` toggle,
+   canvas bloom pass, `?mode=crt` self-check — was dropped as a rough port
+   of the DOM version; may return later in a better form.
 8. ✅ **The renderer switch** (landed 2026-07-10, `canvas-track-a`):
    `#render` nav toggle (persisted `shellglass-render`, default via
    `?render=canvas`) + `canvasModeOn()` in the viewer — canvas mode pins

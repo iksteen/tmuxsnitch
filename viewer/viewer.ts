@@ -1038,9 +1038,9 @@ function paintOps(g: CanvasRenderingContext2D, color: string, ops: Op[]): void {
 // the degenerate case DOM layout is fast at, and it keeps select/copy working
 // through the canvas (which is pointer-events:none): the browser's selection
 // highlight paints in the DOM layer and shows through — the canvas clears to
-// transparent instead of filling the default bg, so it never occludes it. The CRT
-// text-shadow is forced off on ghost rows (shadows have explicit colors and would
-// render even for transparent text).
+// transparent instead of filling the default bg, so it never occludes it. Any
+// template text-shadow is forced off on ghost rows (shadows have explicit colors
+// and would render even for transparent text).
 
 function drawGlyph(r: number, c: number, cp: number, cell: Cell, isCursor: boolean): void {
   if (!ctx) return;
@@ -1145,22 +1145,6 @@ function noteBlinkRow(r: number, has: boolean): void {
   } else {
     blinkRows.delete(r);
   }
-}
-
-// The template's CRT is mostly blend-mode overlays + a #screen filter, which
-// composite over the canvas for free; only the text-shadow phosphor bloom is
-// text-bound (and forced off on ghost rows). Canvas rows re-create it below in
-// redrawCanvasRow. Any template with a #crt checkbox opts in; none = no CRT.
-let crtBox: HTMLInputElement | null | undefined;
-function crtOn(): boolean {
-  if (crtBox === undefined) {
-    crtBox = uiRoot.querySelector("#crt") as HTMLInputElement | null;
-    // repaint when the toggle flips (the overlay layers are pure CSS)
-    crtBox?.addEventListener("change", () => {
-      if (!pictureHeld()) redrawCanvasAll();
-    });
-  }
-  return crtBox !== null && crtBox.checked;
 }
 
 // ── the row painter ───────────────────────────────────────────────────────────
@@ -1492,19 +1476,6 @@ function drawCellDecorations(
   }
 }
 
-// Phosphor bloom (CRT toggle): blurred lighter self-composite of the row
-// band, glowing in the ink's own color. Per-row, not per-flush over the full
-// canvas — undirtied rows must not be re-brightened every flush.
-function drawRowBloom(p: RowPaint, canvas: HTMLCanvasElement): void {
-  const g = p.g;
-  g.save();
-  g.globalCompositeOperation = "lighter";
-  g.globalAlpha = 0.4;
-  g.filter = `blur(${1.5 * dpr}px)`;
-  g.drawImage(canvas, 0, p.y0, canvas.width, p.y1 - p.y0, 0, p.y0, canvas.width, p.y1 - p.y0);
-  g.restore();
-}
-
 // Redraw one row's band of the canvas from screen.cells: clear to transparent
 // (the ghost text below is invisible, #screen supplies the backdrop, and a
 // selection highlight must show through), image slices, then per cell:
@@ -1574,7 +1545,6 @@ function redrawCanvasRow(r: number): void {
   }
   flushRun(p);
   noteBlinkRow(r, p.hasBlink);
-  if (crtOn()) drawRowBloom(p, canvasEl);
   ctx.restore(); // the band clip
 }
 
@@ -2337,8 +2307,8 @@ function injectViewerCss(): void {
     `${s}.row{position:relative;height:var(--lh);contain:layout style}` +
     // Ghost rows: transparent selectable text under the canvas. The explicit
     // ::selection background is the visible highlight — the UA default is
-    // unreliable over transparent text. text-shadow off so a CRT phosphor
-    // bloom can't re-ink the invisible glyphs.
+    // unreliable over transparent text. text-shadow off so a template's
+    // text-shadow can't re-ink the invisible glyphs.
     `${s}.row.ghost{color:transparent;text-shadow:none}` +
     `${s}.row.ghost::selection{background:rgba(110,170,255,.4)}` +
     // Inline-image layout, sourced from the per-element custom properties —
@@ -2414,7 +2384,7 @@ export interface MountOpts {
   boot: Boot;
   cssRoot?: Node; // where injected CSS lands (default document.head)
   cssScope?: string; // selector prefix for light-DOM isolation (default "")
-  uiRoot?: ParentNode; // querySelector root for #crt / #sg-stats (default document)
+  uiRoot?: ParentNode; // querySelector root for #sg-stats (default document)
   base?: string; // URL base for images, e.g. "/s/demo/" (default "" = page-relative)
   crossOriginImages?: boolean; // set crossorigin=anonymous on image <img>s
   title?: (t: string) => void; // title sink (default sets document.title)

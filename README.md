@@ -368,10 +368,8 @@ DOM underneath carries the same content as transparent ghost text, so native
 select/copy/find work — what you see, what you highlight, and what Ctrl-C
 copies are the same thing (the whole picture holds still while you select).
 
-The built-in page is a dark chrome with a **CRT** nav toggle — a CRT tube
-effect (scanlines, phosphor bloom, flicker, vignette; also `?crt`), remembered
-per browser in localStorage. `?cursor=smooth` makes the cursor glide between
-cells over ~80ms instead of teleporting.
+The built-in page is a dark chrome. `?cursor=smooth` makes the cursor glide
+between cells over ~80ms instead of teleporting.
 
 For a fully custom page, point `template` at a full HTML document with three
 tokens the renderer fills at serve time:

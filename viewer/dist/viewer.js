@@ -773,17 +773,6 @@ function noteBlinkRow(r, has) {
         blinkRows.delete(r);
     }
 }
-let crtBox;
-function crtOn() {
-    if (crtBox === undefined) {
-        crtBox = uiRoot.querySelector("#crt");
-        crtBox?.addEventListener("change", () => {
-            if (!pictureHeld())
-                redrawCanvasAll();
-        });
-    }
-    return crtBox !== null && crtBox.checked;
-}
 function rowMetrics(g, r) {
     const baseY = rowBaseline(r);
     const defBg = cfg.defBg.toLowerCase();
@@ -996,15 +985,6 @@ function drawCellDecorations(p, cell, curBlock, hidden, x0, x1) {
         p.g.fillRect(x0, p.strikeY, x1 - x0, p.th);
     }
 }
-function drawRowBloom(p, canvas) {
-    const g = p.g;
-    g.save();
-    g.globalCompositeOperation = "lighter";
-    g.globalAlpha = 0.4;
-    g.filter = `blur(${1.5 * dpr}px)`;
-    g.drawImage(canvas, 0, p.y0, canvas.width, p.y1 - p.y0, 0, p.y0, canvas.width, p.y1 - p.y0);
-    g.restore();
-}
 function redrawCanvasRow(r) {
     if (!ctx || !canvasEl)
         return;
@@ -1060,8 +1040,6 @@ function redrawCanvasRow(r) {
     }
     flushRun(p);
     noteBlinkRow(r, p.hasBlink);
-    if (crtOn())
-        drawRowBloom(p, canvasEl);
     ctx.restore();
 }
 export function linkHref(links, id) {
