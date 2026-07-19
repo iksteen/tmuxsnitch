@@ -438,6 +438,9 @@ export function isCanvasGlyph(cp: number): boolean {
 }
 
 let canvasEl: HTMLCanvasElement | null = null;
+// Optional NON-TRANSFORMED overlay the canvas mounts into (see MountOpts.canvasHost
+// and attachCanvas). null = mount inside .screen (the default / baked-page behavior).
+let canvasHost: HTMLElement | null = null;
 let ctx: CanvasRenderingContext2D | null = null;
 let fontPx = 16; // device-pixel font size for canvas fillText (set in sizeCanvas)
 let fontFam = "monospace";
@@ -691,10 +694,27 @@ function watchZoom(): void {
 }
 
 function attachCanvas(cols: number, rows: number, screenDiv: HTMLElement): void {
+  // Where the canvas composites. By default it lives INSIDE .screen (rebuilt each
+  // full frame, so it dies with it). When the host supplies a `canvasHost` — a
+  // NON-TRANSFORMED box mirroring the fit rectangle (embed.js's fitbox) — the
+  // canvas mounts there instead so a fit `transform: scale` on the .screen subtree
+  // never resamples the finished canvas: WebKit composites a transformed canvas
+  // layer by rasterizing it at its own density and then up-then-down sampling that
+  // snapshot through the transform, softening every glyph; Blink folds the ancestor
+  // transform into the raster and stays crisp. Getting the canvas OUT of the
+  // transformed subtree reproduces the crisp path in both. obsScreen still measures
+  // .screen (its getBoundingClientRect is the scaled on-screen size, == the host
+  // box), so all cell/glyph math is unchanged — only where the canvas composites
+  // moves. The ghost rows stay under the transform: they're color:transparent, so
+  // only their geometry (for native selection) matters, not their sharpness.
+  const host = canvasHost || screenDiv;
+  // A persistent host survives full-frame .screen rebuilds, so the prior canvas
+  // would linger — drop it (inside .screen it died with the rebuild).
+  if (canvasEl && canvasEl.parentNode) canvasEl.remove();
   const c = document.createElement("canvas");
   // Overlay .screen exactly; the backing store is sized in sizeCanvas().
   c.style.cssText = "position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none";
-  screenDiv.appendChild(c);
+  host.appendChild(c);
   canvasEl = c;
   ctx = c.getContext("2d");
   obsScreen = screenDiv;
@@ -2408,6 +2428,7 @@ export interface MountOpts {
   cssRoot?: Node; // where injected CSS lands (default document.head)
   cssScope?: string; // selector prefix for light-DOM isolation (default "")
   uiRoot?: ParentNode; // querySelector root for #crt / #sg-stats (default document)
+  canvasHost?: HTMLElement; // non-transformed overlay for the canvas (default: inside .screen)
   base?: string; // URL base for images, e.g. "/s/demo/" (default "" = page-relative)
   crossOriginImages?: boolean; // set crossorigin=anonymous on image <img>s
   title?: (t: string) => void; // title sink (default sets document.title)
@@ -2419,6 +2440,7 @@ export function mount(o: MountOpts): void {
   if (o.cssRoot) cssRoot = o.cssRoot;
   if (o.cssScope) cssScope = o.cssScope;
   if (o.uiRoot) uiRoot = o.uiRoot;
+  if (o.canvasHost) canvasHost = o.canvasHost;
   if (o.base) mountBase = o.base;
   if (o.crossOriginImages) crossOriginImages = true;
   if (o.title) titleFn = o.title;
@@ -2459,5 +2481,13 @@ export function mount(o: MountOpts): void {
 // The baked page sets window.SHELLGLASS and owns its whole document; an
 // iframe-less embed has no SHELLGLASS and calls mount() itself (see embed.js).
 if (typeof document !== "undefined" && (window as unknown as { SHELLGLASS?: Boot }).SHELLGLASS) {
-  mount({ screen: document.getElementById("screen")!, boot: (window as unknown as { SHELLGLASS: Boot }).SHELLGLASS });
+  // A template that fits with `transform: scale` can offer a NON-TRANSFORMED
+  // `#sg-canvas-host` overlay (mirroring the fit rectangle) to mount the canvas
+  // into, so WebKit composites it crisp instead of resampling a transformed layer
+  // (see attachCanvas). Absent = mount inside #screen, unchanged.
+  mount({
+    screen: document.getElementById("screen")!,
+    canvasHost: document.getElementById("sg-canvas-host") ?? undefined,
+    boot: (window as unknown as { SHELLGLASS: Boot }).SHELLGLASS,
+  });
 }

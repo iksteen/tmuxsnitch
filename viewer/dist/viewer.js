@@ -202,6 +202,7 @@ export function isCanvasGlyph(cp) {
         (cp >= 0xe0b0 && cp <= 0xe0b3));
 }
 let canvasEl = null;
+let canvasHost = null;
 let ctx = null;
 let fontPx = 16;
 let fontFam = "monospace";
@@ -375,9 +376,12 @@ function watchZoom() {
     });
 }
 function attachCanvas(cols, rows, screenDiv) {
+    const host = canvasHost || screenDiv;
+    if (canvasEl && canvasEl.parentNode)
+        canvasEl.remove();
     const c = document.createElement("canvas");
     c.style.cssText = "position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none";
-    screenDiv.appendChild(c);
+    host.appendChild(c);
     canvasEl = c;
     ctx = c.getContext("2d");
     obsScreen = screenDiv;
@@ -1590,6 +1594,8 @@ export function mount(o) {
         cssScope = o.cssScope;
     if (o.uiRoot)
         uiRoot = o.uiRoot;
+    if (o.canvasHost)
+        canvasHost = o.canvasHost;
     if (o.base)
         mountBase = o.base;
     if (o.crossOriginImages)
@@ -1619,5 +1625,9 @@ export function mount(o) {
     document.fonts?.ready.then(reflowGlyphs);
 }
 if (typeof document !== "undefined" && window.SHELLGLASS) {
-    mount({ screen: document.getElementById("screen"), boot: window.SHELLGLASS });
+    mount({
+        screen: document.getElementById("screen"),
+        canvasHost: document.getElementById("sg-canvas-host") ?? undefined,
+        boot: window.SHELLGLASS,
+    });
 }
