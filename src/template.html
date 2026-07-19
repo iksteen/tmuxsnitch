@@ -78,8 +78,13 @@ footer { max-width:1140px; width:100%; margin:0 auto; padding:14px clamp(16px,5v
    it "helpfully" boosts the ghost text ~4x, warping the whole box; the boost
    ignores text-size-adjust). transform doesn't affect layout, so .fitbox
    carries the scaled dimensions (set by the fit script) for the panel to
-   tighten around and the pan to scroll. */
-.fitbox { width:fit-content; }
+   tighten around and the pan to scroll. The fitbox doubles as #sg-canvas-host:
+   the viewer mounts the canvas HERE, outside the transformed subtree, because
+   WebKit rasterizes a transformed canvas layer at its own density and then
+   resamples the snapshot through the transform — soft glyphs in Safari (see
+   attachCanvas in the viewer). #screen under the transform keeps only the
+   transparent ghost rows, whose sharpness doesn't matter. */
+.fitbox { width:fit-content; position:relative; }
 .panel {
   /* border-box so max-width/height:100% cap the padded box — content-box would
      let the panel's own padding overshoot the stage into the footer.
@@ -137,7 +142,7 @@ body[data-offline="operator"] .offline .off-op { display:block; }
 <main class="stage">
   <div class="glow"></div>
   <div class="panel">
-    <div class="fitbox">
+    <div class="fitbox" id="sg-canvas-host">
       {{screen}}
     </div>
     <div class="offline" aria-hidden="true">
@@ -189,8 +194,14 @@ body[data-offline="operator"] .offline .off-op { display:block; }
     const z = fitZ * userZ;
     scr.style.transform = 'scale(' + z + ')';
     if (nat) {
-      fitbox.style.width = nat.w * z + 'px';
-      fitbox.style.height = nat.h * z + 'px';
+      // Snap the fitbox — the canvas's 100% frame — to whole device pixels,
+      // measured from the post-transform rect (the same value sizeCanvas
+      // rounds into the backing store), so the canvas CSS box equals its
+      // backing exactly: any fraction left over is a whole-canvas resample.
+      const dpr = devicePixelRatio || 1;
+      const r = scr.getBoundingClientRect();
+      fitbox.style.width = Math.round(r.width * dpr) / dpr + 'px';
+      fitbox.style.height = Math.round(r.height * dpr) / dpr + 'px';
     }
     // Scrollbars only when magnified — at fit the content fits by construction,
     // and overflow:auto there is a scrollbar trap (see the .panel comment).

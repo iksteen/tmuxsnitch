@@ -13,7 +13,6 @@
 html, body { height:100%; }
 body { display:flex; align-items:center; justify-content:center;
        overflow:hidden; background:#000; }
-#screen { width:fit-content; }
 /* The fit scales #screen with `transform: scale` (paint-time — see the fit script).
    The canvas mounts in #sg-canvas-host, OUTSIDE that transform, so WebKit
    composites it at device resolution instead of resampling a transformed layer
@@ -22,7 +21,7 @@ body { display:flex; align-items:center; justify-content:center;
    the transparent, selectable ghost rows. Origin 0 0 so the scaled ghost rows
    land at the host's top-left, exactly under the canvas. */
 #sg-canvas-host { position:relative; }
-#screen { transform-origin:0 0; }
+#screen { width:fit-content; transform-origin:0 0; }
 /* Offline takeover: viewer.ts publishes body[data-offline="hub"|"operator"]
    (absent = live) — a frozen embed should say so, not just stand still. */
 .sg-offline { position:fixed; inset:0; display:none; align-items:center;
@@ -63,8 +62,13 @@ body[data-offline="operator"] .off-op { display:inline; }
     scr.style.transform = 'scale(' + z + ')';
     // transform is invisible to layout, so mirror the scaled size onto the
     // non-transformed host — the flex-centered box AND the canvas's 100% frame.
-    host.style.width = b.width * z + 'px';
-    host.style.height = b.height * z + 'px';
+    // Snapped to whole device pixels from the post-transform rect (the same
+    // value sizeCanvas rounds into the backing store), so the canvas CSS box
+    // equals its backing exactly — a leftover fraction resamples the canvas.
+    const dpr = devicePixelRatio || 1;
+    const r = box.getBoundingClientRect();
+    host.style.width = Math.round(r.width * dpr) / dpr + 'px';
+    host.style.height = Math.round(r.height * dpr) / dpr + 'px';
     window.dispatchEvent(new Event('sg-zoom'));
   };
   new ResizeObserver(fit).observe(scr);

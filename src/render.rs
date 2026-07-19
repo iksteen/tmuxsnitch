@@ -340,6 +340,13 @@ mod tests {
         }
         assert!(EMBED_TEMPLATE.contains("data-offline"), "offline takeover");
         assert!(EMBED_TEMPLATE.contains("sg-zoom"), "canvas re-raster hook");
+        // The canvas mounts OUTSIDE the fit transform (WebKit resamples a
+        // transformed canvas layer — soft glyphs); the id is the viewer
+        // bootstrap's frozen hook.
+        assert!(
+            EMBED_TEMPLATE.contains(r#"id="sg-canvas-host""#),
+            "canvas host outside the fit transform"
+        );
         // embed.js is the STABLE public API: the one-liner's data-src, the
         // element name and its src attribute must never change, and both
         // forms must point at the ?embed page. currentScript = classic-script
@@ -359,6 +366,11 @@ mod tests {
         for tok in ["{{style}}", "{{screen}}", "{{script}}"] {
             assert!(DEFAULT_TEMPLATE.contains(tok), "template missing {tok}");
         }
+        // The canvas mounts OUTSIDE the fit transform (see the embed test).
+        assert!(
+            DEFAULT_TEMPLATE.contains(r#"id="sg-canvas-host""#),
+            "canvas host outside the fit transform"
+        );
         // The favicon link is RELATIVE (resolves under the page's directory —
         // `/` standalone, `/s/<slug>/` hub — so a subpath mount works), and
         // the asset is baked in.

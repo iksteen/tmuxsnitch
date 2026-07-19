@@ -389,6 +389,13 @@ Everything around those tokens is yours — nav, wrapper, footer, extra `<style>
 Only `{{screen}}`'s `#screen` id is load-bearing (the updater targets it). In hub
 mode the client pushes its template to the hub, so custom pages work off-box too.
 
+If your page fits the terminal to a box with `transform: scale`, dispatch a
+`sg-zoom` event after changing the factor (so the canvas re-rasterizes crisp)
+and give the page a non-transformed `<div id="sg-canvas-host">` around
+`{{screen}}`, sized to the scaled rectangle: the renderer mounts its canvas
+there, outside the transform, which keeps glyphs sharp in Safari (WebKit
+resamples a transformed canvas layer). Both built-in pages do exactly this.
+
 ## Embedding in another page
 
 One line, where the terminal should appear:
